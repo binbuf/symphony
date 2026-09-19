@@ -1,0 +1,25 @@
+{
+  "name": "symphony",
+  "version": "0.1.0",
+  "description": "Thin task-runner harness: drives an LLM coding agent (Claude Code, Cursor, OpenCode) through .docs/ROADMAP.md one fresh session per task.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20.11"
+  },
+  "bin": {
+    "symphony": "./symphony"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node --import tsx src/cli.ts",
+    "test": "node --import tsx --test --test-timeout=60000 'test/**/*.test.ts'",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

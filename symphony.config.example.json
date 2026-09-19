@@ -1,0 +1,55 @@
+{
+  "provider": "claude",
+  "providers": {
+    "claude": {
+      "bin": "claude",
+      "model": "claude-fable-5-1",
+      "extraArgs": []
+    },
+    "cursor": {
+      "bin": "agent",
+      "model": "",
+      "extraArgs": [],
+      "idleTimeoutMin": 45
+    },
+    "opencode": {
+      "bin": "opencode",
+      "model": "anthropic/claude-sonnet-4-5",
+      "extraArgs": [],
+      "idleTimeoutMin": 45
+    },
+    "codex": {
+      "bin": "codex",
+      "model": "",
+      "extraArgs": [],
+      "idleTimeoutMin": 45
+    }
+  },
+  "autoApprove": true,
+  "nudge": true,
+  "timeoutMin": 240,
+  "idleTimeoutMin": 20,
+  "nudgeTimeoutMin": 45,
+  "prepareTimeoutMin": 60,
+  "maxProgressBytes": 32768,
+  "retry": {
+    "maxAttempts": 3,
+    "backoffSec": [
+      30,
+      120,
+      300
+    ]
+  },
+  "halt": {
+    "maxConsecutiveFailures": 2,
+    "maxAttemptsPerTask": 3,
+    "onCategories": [
+      "auth",
+      "billing",
+      "usage_limit",
+      "model",
+      "config"
+    ]
+  },
+  "commitMessageTemplate": "{id}: {title} [{status}]"
+}

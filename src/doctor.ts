@@ -1,0 +1,93 @@
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import type { Config, SessionSpec } from './config.js';
+import { dirtyFiles, gitAvailable, gitToplevel } from './git.js';
+import type { Paths } from './paths.js';
+import type { Provider } from './providers/types.js';
+import { liveLock, type State } from './state.js';
+
+export interface Check { name: string; level: 'ok' | 'warn' | 'fail'; detail: string }
+
+export interface DoctorInput {
+  paths: Paths;
+  config: Config;
+  state: State;
+  spec?: SessionSpec;
+  provider?: Provider;
+  taskCount?: number;
+  roadmapError?: string;
+  /** `run --clear-halt` clears before checking. */
+  ignoreHalt?: boolean;
+  skipAuth?: boolean;
+  /** `prepare` repairs the roadmap, so its absence is not a preflight failure there. */
+  skipRoadmap?: boolean;
+}
+
+function probe(bin: string, args: string[], timeoutMs = 15_000): { ok: boolean; enoent: boolean; timedOut: boolean; out: string } {
+  const r = spawnSync(bin, args, { encoding: 'utf8', timeout: timeoutMs, env: process.env });
+  const enoent = (r.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+  const timedOut = r.error !== undefined && /ETIMEDOUT/.test(String((r.error as NodeJS.ErrnoException).code ?? ''));
+  const all = `${r.stdout ?? ''}\n${r.stderr ?? ''}`.trim();
+  let out = all.split('\n').filter(Boolean).slice(-1)[0] ?? '';
+  try {
+    const j = JSON.parse((r.stdout ?? '').trim()) as Record<string, unknown>;
+    const pick = ['loggedIn', 'authenticated', 'status', 'authMethod', 'apiProvider'].filter((k) => j[k] !== undefined && typeof j[k] !== 'object');
+    if (pick.length) out = pick.map((k) => `${k}=${String(j[k])}`).join(' ');
+  } catch { /* not JSON */ }
+  return { ok: r.status === 0, enoent, timedOut, out };
+}
+
+export function runDoctor(i: DoctorInput): Check[] {
+  const checks: Check[] = [];
+  const add = (name: string, level: Check['level'], detail: string) => checks.push({ name, level, detail });
+
+  const [major, minor] = process.versions.node.split('.').map(Number);
+  add('node', major > 20 || (major === 20 && minor >= 11) ? 'ok' : 'fail', `node ${process.versions.node} (need >= 20.11)`);
+
+  if (!gitAvailable()) add('git', 'fail', 'git not found on PATH');
+  else {
+    const top = gitToplevel(i.paths.root);
+    if (!top) add('git', 'fail', `${i.paths.root} is not inside a git repository (run git init)`);
+    else if (top !== i.paths.root) add('git', 'warn', `project root is inside a repo rooted at ${top}; commits go there`);
+    else add('git', 'ok', `repository at ${top}`);
+    const dirty = dirtyFiles(i.paths.root);
+    if (dirty.length) add('worktree', 'warn', `${dirty.length} uncommitted change${dirty.length === 1 ? '' : 's'}; the first task's commit will sweep them in`);
+    else if (top) add('worktree', 'ok', 'clean');
+  }
+
+  if (i.skipRoadmap) { /* prepare fixes the roadmap itself */ }
+  else if (i.roadmapError) add('roadmap', 'fail', i.roadmapError);
+  else if (!existsSync(i.paths.roadmap)) add('roadmap', 'fail', `${i.paths.roadmap} missing (run: symphony init)`);
+  else if (i.taskCount === 0) add('roadmap', 'warn', 'ROADMAP.md has no task bullets yet');
+  else add('roadmap', 'ok', `${i.taskCount ?? '?'} task${i.taskCount === 1 ? '' : 's'}`);
+
+  if (i.spec && i.provider) {
+    if (i.provider.name === 'fake') add('provider', 'ok', 'fake provider (fixture replay)');
+    else {
+      const v = probe(i.spec.bin, ['--version']);
+      if (v.enoent) add('provider', 'fail', `${i.spec.bin} not found on PATH (provider ${i.provider.name}); set providers.${i.provider.name}.bin`);
+      else if (v.timedOut) add('provider', 'warn', `${i.spec.bin} --version did not answer within 15 s`);
+      else add('provider', v.ok ? 'ok' : 'warn', `${i.provider.name} via ${i.spec.bin}${v.out ? ` (${v.out})` : ''} · model ${i.spec.model ?? 'provider default'} [${i.spec.sources.model}]`);
+      if (!v.enoent && !i.skipAuth) {
+        if (i.provider.authCheckArgs) {
+          const a = probe(i.spec.bin, i.provider.authCheckArgs);
+          if (a.timedOut) add('auth', 'warn', `${i.spec.bin} ${i.provider.authCheckArgs.join(' ')} did not answer within 15 s`);
+          else add('auth', a.ok ? 'ok' : 'fail', a.ok ? `authenticated${a.out ? ` (${a.out.slice(0, 120)})` : ''}` : `not authenticated: ${a.out || 'non-zero exit'}`);
+        } else add('auth', 'warn', `${i.provider.name}: no auth probe available; first session will tell`);
+      }
+    }
+    if (!i.spec.autoApprove) add('permissions', 'warn', 'safe mode: the agent may edit files but shell commands need approval nobody can give; expect blocked results');
+  }
+
+  if (existsSync(i.paths.stop)) add('stop', 'warn', `${i.paths.stop} present; run pauses until it is removed`);
+  if (i.state.halted && !i.ignoreHalt) add('halt', 'fail', `halted at ${i.state.halted.at}${i.state.halted.taskId ? ` on ${i.state.halted.taskId}` : ''} (${i.state.halted.category}): ${i.state.halted.reason} — run: symphony clear-halt`);
+  const lock = liveLock(i.paths);
+  if (lock) add('lock', 'fail', `another run is active (pid ${lock.pid}, since ${lock.startedAt})`);
+
+  return checks;
+}
+
+export function formatChecks(checks: Check[]): string[] {
+  const mark = { ok: '✓', warn: '!', fail: '✗' } as const;
+  return checks.map((c) => `${mark[c.level]} ${c.name.padEnd(11)} ${c.detail}`);
+}

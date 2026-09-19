@@ -1,0 +1,31 @@
+# symphony source repo.
+# When installed into a project as .symphony/, install.sh replaces this file with a single "*"
+# so the whole harness directory stays untracked there.
+
+# build + deps
+node_modules/
+dist/
+*.tsbuildinfo
+coverage/
+*.tgz
+
+# runtime state a run leaves behind when the harness is exercised in-repo (--root or tests)
+runs/
+state.json
+symphony.log
+lock
+STOP
+symphony.config.json
+fixtures/
+
+# logs
+npm-debug.log*
+yarn-error.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

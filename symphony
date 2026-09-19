@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Thin launcher. Prefers the compiled build; falls back to tsx for development.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$here/dist/cli.js" ]; then
+  exec node "$here/dist/cli.js" "$@"
+fi
+if [ -d "$here/node_modules/tsx" ]; then
+  exec node --import tsx "$here/src/cli.ts" "$@"
+fi
+echo "symphony: no dist/cli.js found. Run 'npm install && npm run build' in $here" >&2
+exit 4
