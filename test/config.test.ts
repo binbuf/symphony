@@ -120,3 +120,39 @@ test('designDocs can be switched off', () => {
   writeFileSync(paths.config, JSON.stringify({ designDocs: false }));
   assert.equal(loadConfig(paths, {}).config.designDocs, false);
 });
+
+test('caps, verify, hooks and git settings parse, with CLI caps overriding', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-limits-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({
+    maxTasksPerRun: 3,
+    maxIterationsPerTask: 7,
+    verifyCommand: 'npm test',
+    verifyTimeoutMin: 12,
+    hooks: { afterTask: 'echo done', onHalt: 'echo halt' },
+    git: { autoIgnoreUntracked: false, extraIgnore: ['*.tfstate'] },
+  }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.maxTasksPerRun, 3);
+  assert.equal(config.maxIterationsPerTask, 7);
+  assert.equal(config.verifyCommand, 'npm test');
+  assert.equal(config.verifyTimeoutMin, 12);
+  assert.equal(config.hooks.afterTask, 'echo done');
+  assert.equal(config.hooks.onHalt, 'echo halt');
+  assert.equal(config.hooks.onBlocked, undefined);
+  assert.equal(config.git.autoIgnoreUntracked, false);
+  assert.deepEqual(config.git.extraIgnore, ['*.tfstate']);
+  assert.equal(warnings.length, 0);
+
+  const overridden = loadConfig(paths, { maxTasks: 1, maxIterations: 2 }).config;
+  assert.equal(overridden.maxTasksPerRun, 1);
+  assert.equal(overridden.maxIterationsPerTask, 2);
+
+  writeFileSync(paths.config, JSON.stringify({ hooks: { afterTask: 42 }, git: { extraIgnore: 'nope' } }));
+  const bad = loadConfig(paths, {});
+  assert.equal(bad.config.hooks.afterTask, undefined);
+  assert.deepEqual(bad.config.git.extraIgnore, []);
+  assert.ok(bad.warnings.some((w) => w.includes('hooks.afterTask')));
+  assert.ok(bad.warnings.some((w) => w.includes('git.extraIgnore')));
+});

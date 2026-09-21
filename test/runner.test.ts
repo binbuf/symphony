@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULTS } from '../src/config.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths } from '../src/paths.js';
-import { runTask, type RunContext, type RunFlags } from '../src/runner.js';
+import { runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
 import { loadState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
 
@@ -93,6 +93,97 @@ test('continuation is bounded by maxContinuations and ends failed', async () => 
     assert.equal(out.status, 'failed');
     assert.equal(state.tasks.T01.status, 'failed');
     assert.match(state.tasks.T01.summary ?? '', /continuation/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('maxIterationsPerTask stops a task that keeps continuing, with a clear summary', async () => {
+  const { dir, paths, task } = project();
+  writeFileSync(join(dir, 'fixtures', 'T01.continue.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('continue', 'still not finished'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 9, maxIterationsPerTask: 2, nudge: false };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'failed');
+    assert.equal(state.tasks.T01.attempts, 2);
+    assert.match(state.tasks.T01.summary ?? '', /maxIterationsPerTask/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a done result is demoted to failed when the harness verify command fails', async () => {
+  const { dir, paths, task } = project();
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, verifyCommand: `node -e "process.exit(1)"` };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'failed');
+    assert.equal(state.tasks.T01.verify?.ok, false);
+    assert.match(state.tasks.T01.summary ?? '', /verify failed/);
+    assert.match(readFileSync(paths.roadmap, 'utf8'), /\[~\] T01/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a done result stands when the verify command passes', async () => {
+  const { dir, paths, task } = project();
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, verifyCommand: `node -e "process.exit(0)"` };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.verify?.ok, true);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('run caps at maxTasksPerRun and fires afterTask hooks per finished task', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-run2-'));
+  execFileSync('git', ['-C', dir, 'init', '-q']);
+  execFileSync('git', ['-C', dir, 'config', 'user.email', 't@t']);
+  execFileSync('git', ['-C', dir, 'config', 'user.name', 't']);
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.tasksDir, { recursive: true });
+  writeFileSync(paths.roadmap, '# R\n\n## Phase 1\n\n- [ ] T01 — One\n- [ ] T02 — Two\n');
+  writeFileSync(paths.progress, '# Progress notes\n');
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  for (const id of ['T01', 'T02']) {
+    writeFileSync(join(fixtures, `${id}.task.jsonl`), [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: `s-${id}` }),
+      claudeResult('done', `${id} done`),
+    ].join('\n') + '\n');
+  }
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+  const tasks: Task[] = [
+    { id: 'T01', num: 1, title: 'One', phase: 'Phase 1', order: 0, meta: { provider: 'fake' } },
+    { id: 'T02', num: 2, title: 'Two', phase: 'Phase 1', order: 1, meta: { provider: 'fake' } },
+  ];
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    maxTasksPerRun: 1,
+    hooks: { afterTask: `node -e "require('fs').writeFileSync('hook-'+process.env.SYMPHONY_TASK+'.txt','x')"` },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks, state, interrupted: false, abort: new AbortController() };
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    assert.equal(state.tasks.T01.status, 'done');
+    assert.equal(state.tasks.T02, undefined);
+    assert.ok(existsSync(join(dir, 'hook-T01.txt')));
+    assert.ok(!existsSync(join(dir, 'hook-T02.txt')));
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

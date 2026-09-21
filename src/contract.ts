@@ -37,6 +37,7 @@ export const TASK_TEMPLATE = `---
 # provider: claude | cursor | opencode | codex | gemini | antigravity
 # model: <model id>
 # timeoutMin: 240
+# verify: <shell command the harness runs after this task reports done; non-zero fails the task>
 ---
 # TNN — <Title>
 
@@ -114,7 +115,7 @@ export function docsContract(paths: Paths, opts: { design?: boolean } = {}): str
 
 ${indent(TASK_TEMPLATE.replace(/^---[\s\S]*?---\n/, ''))}
 
-   Rules: "Scope" items are concrete and checkable; "Out of scope" names the task that owns each excluded item; "Done when" lists the commands to run and what they must show, and names at least one automated test that must pass; leave "Hand-off" as the single italic placeholder line until the task runs.${design ? ' Cite design docs by path.' : ''}`,
+   Rules: "Scope" items are concrete and checkable; "Out of scope" names the task that owns each excluded item; "Done when" lists the commands to run and what they must show, and names at least one automated test that must pass; leave "Hand-off" as the single italic placeholder line until the task runs. Optionally set "verify:" in the front matter to the single command the harness should run itself to confirm the task (leave it out when the project's test command is enough).${design ? ' Cite design docs by path.' : ''}`,
 
     `${progress} — starts with exactly this header (existing notes below it are kept):
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { acceptCommand, briefCommand, clearHaltCommand, initCommand, statusCommand } from './commands.js';
+import { acceptCommand, briefCommand, clearHaltCommand, initCommand, resetCommand, statusCommand } from './commands.js';
 import { DEFAULTS, loadConfig, resolveSession, type CliOverrides } from './config.js';
 import { formatChecks, runDoctor } from './doctor.js';
 import { formatLint, lintDocs } from './lint.js';
@@ -19,14 +19,15 @@ const HELP = `symphony — run an LLM coding agent through your roadmap, one fre
 
 Usage
   symphony run     [--prepare] [--provider P] [--model M] [--from T03] [--to T10] [--only T05,T06] [--retry]
-                   [--continue-on-failure] [--dry-run] [--safe] [--no-nudge] [--timeout-min N]
-                   [--budget USD] [--clear-halt]
+                   [--continue-on-failure] [--dry-run] [--safe] [--no-nudge] [--timeout-min N] [--max-tasks N]
+                   [--max-iterations N] [--budget USD] [--clear-halt]
   symphony status  [--json]              progress table (or JSON)
   symphony doctor                        preflight: binaries, auth, git, roadmap, halt/STOP/lock
   symphony lint                          check the project root and docs/ against the expected layout (no LLM)
   symphony prepare [--dry-run]           lint, then let the configured agent convert/repair the docs and commit
   symphony init                          scaffold the docs/ package (ROADMAP, PROGRESS, tasks/, design/, adr/) + config + .gitignore
   symphony accept  T05 [--note "..."]    human sign-off on a blocked/failed task (counts as done)
+  symphony reset   T05 [--revert]        clear a task's state (and revert its commits with --revert) so it runs again
   symphony nudge   T05 [--note "..."]    resume a task's last session and ask it to close out
   symphony clear-halt                    lift a halt so run can start again
   symphony brief                         print a paste-ready prompt that makes any LLM client emit the docs package in this format
@@ -36,6 +37,11 @@ Provider/model precedence: --provider/--model > SYMPHONY_PROVIDER/SYMPHONY_MODEL
 > .symphony/symphony.config.json > defaults. All providers run with permissions bypassed unless --safe.
 Every location (docs, tasks, progress, design, adr, logs, stop, state, runs, log) is overridable via the
 "paths" section of .symphony/symphony.config.json.
+
+Limits
+  --max-tasks N            process at most N tasks this run (config maxTasksPerRun)
+  --max-iterations N       at most N sessions per task, retries and continuations included (config maxIterationsPerTask)
+  verifyCommand            shell command the harness runs after a task reports done; non-zero demotes it to failed
 
 Controls
   touch .stop              pause at the next task boundary (nothing is killed); configurable via paths.stop
@@ -86,10 +92,13 @@ export async function main(argv: string[]): Promise<number> {
       safe: { type: 'boolean' },
       'no-nudge': { type: 'boolean' },
       'timeout-min': { type: 'string' },
+      'max-tasks': { type: 'string' },
+      'max-iterations': { type: 'string' },
       budget: { type: 'string' },
       'clear-halt': { type: 'boolean' },
       prepare: { type: 'boolean' },
       note: { type: 'string' },
+      revert: { type: 'boolean' },
       json: { type: 'boolean' },
     },
   });
@@ -100,11 +109,15 @@ export async function main(argv: string[]): Promise<number> {
     provider: v.provider,
     model: v.model,
     timeoutMin: v['timeout-min'] !== undefined ? Number(v['timeout-min']) : undefined,
+    maxTasks: v['max-tasks'] !== undefined ? Number(v['max-tasks']) : undefined,
+    maxIterations: v['max-iterations'] !== undefined ? Number(v['max-iterations']) : undefined,
     budgetUsd: v.budget !== undefined ? Number(v.budget) : undefined,
     safe: v.safe,
     noNudge: v['no-nudge'],
   };
   if (cli.timeoutMin !== undefined && !(cli.timeoutMin > 0)) throw new UsageError('--timeout-min must be a positive number');
+  if (cli.maxTasks !== undefined && !(cli.maxTasks >= 0)) throw new UsageError('--max-tasks must be zero or a positive number');
+  if (cli.maxIterations !== undefined && !(cli.maxIterations >= 0)) throw new UsageError('--max-iterations must be zero or a positive number');
   if (cli.budgetUsd !== undefined && !(cli.budgetUsd > 0)) throw new UsageError('--budget must be a positive number');
 
   if (cmd === 'init' || cmd === 'brief') {
@@ -155,6 +168,11 @@ export async function main(argv: string[]): Promise<number> {
     }
     case 'clear-halt':
       return clearHaltCommand(paths, loaded.state, log);
+    case 'reset': {
+      const id = positionals[1];
+      if (!id) throw new UsageError('reset: give a task id, e.g. symphony reset T05 [--revert]');
+      return resetCommand(paths, loaded.state, loaded.tasks, id, { revert: v.revert === true, log });
+    }
     case 'doctor': {
       const { spec, warnings } = resolveSession(config, loaded.tasks[0], cli, process.env, (p) => getProvider(p).supportsBudget);
       warnings.forEach((w) => log.warn(w));
@@ -197,7 +215,7 @@ function installSignalHandlers(ctx: RunContext): void {
       return;
     }
     ctx.log.error(`${sig} received again: force quitting; the task row stays "running" and will be retried next run`);
-    if (ctx.active?.pid) { try { process.kill(-ctx.active.pid, 'SIGKILL'); } catch { /* gone */ } }
+    ctx.active?.kill('force');
     process.exit(sig === 'SIGTERM' ? 143 : 130);
   };
   process.on('SIGINT', onSignal);

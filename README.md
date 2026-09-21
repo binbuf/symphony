@@ -56,12 +56,14 @@ launcher works from `cmd.exe`.
 | `prepare [--dry-run]` | lint, then let the configured agent convert/repair the docs in place, re-lint, commit |
 | `brief` | print a paste-ready prompt so any LLM turns an idea into the docs package in this exact format |
 | `accept T05[,T06…] [--note "…"]` | human sign-off on one or more blocked/failed tasks; counts as done, bullet becomes `[x] ⟵ accepted` |
+| `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also undoes its `T05:` commits (newest first) |
 | `nudge T05 [--note "…"]` | resume a task's last session and ask it to close out with a result block |
 | `clear-halt` | lift a halt so `run` can start again |
 
 Every command accepts `--root DIR` (default: the project containing `.symphony/`). `run` flags: `--provider`,
 `--model`, `--from T03`, `--to T10`, `--only T05,T06`, `--retry`, `--continue-on-failure`, `--dry-run`, `--safe`,
-`--no-nudge`, `--timeout-min N`, `--budget USD` (Claude only), `--clear-halt`, `--prepare`.
+`--no-nudge`, `--timeout-min N`, `--max-tasks N`, `--max-iterations N`, `--budget USD` (Claude only),
+`--clear-halt`, `--prepare`.
 
 ## The docs contract
 
@@ -165,6 +167,35 @@ Every session is instructed to, before it ends:
 
 A `continue` session leaves all four in place, so the next fresh session can pick up exactly where it stopped.
 
+### Independent verification
+
+A session's `done` is a claim, so the harness can check it itself. Set `verifyCommand` (or a per-task
+`verify:` in the task file's front matter, which wins) to a shell command run in the project root after a task
+reports `done`. A non-zero exit (or `verifyTimeoutMin` elapsing) demotes the task to `failed`, records the
+command, exit code and output tail in the run log and the task's `docs/logs/TNN.md`, and leaves the normal
+commit untouched. It is provider-agnostic: any command, any stack. Example: `"verifyCommand": "npm test"`.
+
+### Hooks
+
+Four optional shell hooks let the harness notify or trigger anything without built-in integrations. Each runs
+in the project root with the event in its environment; a hook that fails only warns and never breaks the run.
+
+| hook | when | environment |
+|---|---|---|
+| `hooks.afterTask` | after every task finishes | `SYMPHONY_TASK`, `SYMPHONY_TITLE`, `SYMPHONY_STATUS`, `SYMPHONY_SUMMARY`, `SYMPHONY_COMMIT`, `SYMPHONY_PROVIDER`, `SYMPHONY_MODEL` |
+| `hooks.onBlocked` | a task reports `blocked` | `SYMPHONY_TASK`, `SYMPHONY_TITLE`, `SYMPHONY_SUMMARY` |
+| `hooks.onHalt` | the run halts on a fatal error | `SYMPHONY_TASK`, `SYMPHONY_HALT_CATEGORY`, `SYMPHONY_HALT_REASON` |
+| `hooks.onRunEnd` | `run` finishes | `SYMPHONY_EXIT`, `SYMPHONY_STATUS` (`ok` · `stopped` · `halted` · `error`) |
+
+All hooks also get `SYMPHONY_ROOT`. Example: `"afterTask": "curl -fsS -d \"$SYMPHONY_TASK $SYMPHONY_STATUS\" $WEBHOOK || true"`.
+
+### Runaway limits
+
+`maxIterationsPerTask` caps the total sessions one task may use in a single run — retries and continuations
+counted together — so a task that keeps looping fails gracefully with a clear summary instead of running for
+hours. `maxTasksPerRun` caps how many tasks one `run` invocation processes. Both default to `0` (unlimited)
+and have CLI equivalents (`--max-iterations`, `--max-tasks`). Unlike `--budget`, they are provider-agnostic.
+
 ## When things stop
 
 | situation | what happens | what you do |
@@ -226,8 +257,12 @@ override it per run (see **Providers** for the precedence order).
 | `maxProgressBytes` | `32768` | tail of PROGRESS.md inlined into each prompt |
 | `designDocs` | `true` | when `false`, `design/` and `adr/` are neither required nor used: tasks run standalone |
 | `maxContinuations` | `4` | extra fresh sessions a task may take after reporting `continue` |
+| `maxIterationsPerTask`, `maxTasksPerRun` | `0`, `0` | provider-agnostic caps (0 = unlimited): sessions per task in a run, and tasks per run |
 | `commitPerSession` | `true` | commit each `continue` slice, not just the final result |
 | `onBlocked` | `stop` | `stop` at a blocked task for a human, or `continue` to the next task |
+| `verifyCommand`, `verifyTimeoutMin` | –, `30` | shell command the harness runs itself after `done`; non-zero demotes to failed (per-task `verify:` wins) |
+| `hooks.afterTask` `.onBlocked` `.onHalt` `.onRunEnd` | – | shell commands run on lifecycle events (see **Hooks**) |
+| `git.autoIgnoreUntracked`, `git.extraIgnore` | `true`, `[]` | before committing, keep untracked ephemeral/secret files out of the commit by adding their patterns to `.gitignore` |
 | `retry.maxAttempts`, `retry.backoffSec` | `3`, `[30,120,300]` | transient-error retries |
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
@@ -255,7 +290,8 @@ docs/logs/T05.md                               per-task run log: status, provide
 
 Every task gets a `docs/logs/TNN.md` (path overridable with `paths.logs`). It is rewritten in full after each
 session and committed with the task, so `git log` plus the logs give a per-task and pipeline-wide history.
-Retries append `-r2`, nudges `-nudge`, continuation sessions `-rN` too. `paths.state`/`.runs`/`.log` move these.
+It also records the verify command's result when one is configured. Retries append `-r2`, nudges `-nudge`,
+continuation sessions `-rN` too. `paths.state`/`.runs`/`.log` move these.
 
 ## Platform support
 
@@ -269,7 +305,7 @@ no process groups. `npm run clean` and the test script avoid POSIX-only commands
 ```bash
 npm install
 npm run dev -- run --root /path/to/project       # run from source via tsx
-npm test                                          # node --test, 53 tests
+npm test                                          # node --test, 65 tests
 npm run typecheck && npm run build                # tsc → dist/
 node dist/tools/parse-check.js claude session.jsonl [--render]   # replay a provider log through the parser
 ```

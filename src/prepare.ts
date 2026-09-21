@@ -12,7 +12,7 @@ import { getProvider } from './providers/index.js';
 import { parseResultBlock } from './result.js';
 import { describeCmd, haltBanner, outcomeEvidence, preflight, type RunContext } from './runner.js';
 import { startSession } from './session.js';
-import { acquireLock, releaseLock, saveState } from './state.js';
+import { acquireLock, releaseLock, saveState, startLockHeartbeat } from './state.js';
 import { clip, ensureDir, nowIso, stamp } from './util.js';
 
 const LIVE_MAX = 400;
@@ -120,6 +120,7 @@ const created = scaffoldDocs(paths, { roadmap: false, config: false, design: con
   if (!preflight(ctx, spec, provider, { skipRoadmap: true })) { log.error('preflight failed; fix the ✗ items above'); return 4; }
 
   acquireLock(paths);
+  const stopHeartbeat = startLockHeartbeat(paths);
   try {
     ensureDir(paths.runs);
     const sinks = openRunSinks(paths.runs, `prepare-${stamp()}`);
@@ -160,11 +161,12 @@ const created = scaffoldDocs(paths, { roadmap: false, config: false, design: con
     const after = lintDocs(paths, { design: config.designDocs });
     log.plain('--- lint (after)');
     formatLint(after).forEach((l) => log.plain(l));
-    const commit = commitAll(paths.root, `docs: normalise ${docsRel} for symphony [prepare]`);
+    const commit = commitAll(paths.root, `docs: normalise ${docsRel} for symphony [prepare]`, (m) => log.warn(m), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore });
     log.info(`prepare: git ${describeCommit(commit)}${out.costUsd !== undefined ? ` · $${out.costUsd.toFixed(2)}` : ''}`);
     if (!after.ok) { log.error(`${docsRel}/ is still not in the expected format; fix the ✗ items by hand or run \`symphony prepare\` again`); return 2; }
     return 0;
   } finally {
+    stopHeartbeat();
     releaseLock(paths);
   }
 }

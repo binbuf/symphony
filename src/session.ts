@@ -4,7 +4,7 @@ import type { RunSinks } from './logger.js';
 import type { ClassifyHints, NormalizedEvent, Provider, ResultEvent, SpawnSpec } from './providers/types.js';
 import { renderEvent } from './render.js';
 
-export type KillReason = 'timeout' | 'stall' | 'interrupt';
+export type KillReason = 'timeout' | 'stall' | 'interrupt' | 'force';
 
 export interface SessionOpts {
   spec: SpawnSpec;
@@ -114,6 +114,11 @@ export function startSession(o: SessionOpts): Session {
 
   let killTimer: NodeJS.Timeout | undefined;
   const kill = (reason: KillReason) => {
+    if (reason === 'force') {
+      // Second Ctrl-C: kill the whole tree immediately, no grace period.
+      signalTree('SIGKILL');
+      return;
+    }
     if (reason === 'timeout') flags.timedOut = true;
     else if (reason === 'stall') flags.stalled = true;
     else flags.interrupted = true;

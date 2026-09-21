@@ -39,6 +39,10 @@ export interface TaskState {
   summary?: string;
   lastError?: LastError;
   commit?: string;
+  /** Full commit hash of the task's final commit, if any (for `reset --revert`). */
+  commitSha?: string;
+  /** Result of the harness-run verify command after the task reported done. */
+  verify?: { command: string; ok: boolean; code?: number; output?: string; at: string };
   logs: LogRef[];
   accepted?: { at: string; from: TaskStatus; note?: string };
   reconciled?: boolean;
@@ -112,7 +116,10 @@ export function reconcile(state: State, roadmap: Roadmap): string[] {
   return notes;
 }
 
-export interface Lock { pid: number; startedAt: string }
+export interface Lock { pid: number; startedAt: string; heartbeat?: string }
+
+/** A lock whose heartbeat has not moved for this long is treated as stale even if the pid is alive. */
+export const LOCK_STALE_MS = 5 * 60_000;
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
@@ -128,14 +135,32 @@ export function readLock(paths: Paths): Lock | undefined {
 
 export function liveLock(paths: Paths): Lock | undefined {
   const l = readLock(paths);
-  return l && l.pid !== process.pid && pidAlive(l.pid) ? l : undefined;
+  if (!l || l.pid === process.pid || !pidAlive(l.pid)) return undefined;
+  // Guard against pid reuse: a live pid whose lock has not been refreshed for a long time is stale.
+  const seen = Date.parse(l.heartbeat ?? l.startedAt);
+  if (Number.isFinite(seen) && Date.now() - seen > LOCK_STALE_MS) return undefined;
+  return l;
 }
 
 export function acquireLock(paths: Paths): void {
   const live = liveLock(paths);
   if (live) throw new UsageError(`another symphony run is active (pid ${live.pid}, started ${live.startedAt}). Wait for it or remove ${paths.lock} if it is stale.`);
   ensureDir(paths.symphony);
-  writeFileSync(paths.lock, JSON.stringify({ pid: process.pid, startedAt: nowIso() } satisfies Lock));
+  writeFileSync(paths.lock, JSON.stringify({ pid: process.pid, startedAt: nowIso(), heartbeat: nowIso() } satisfies Lock));
+}
+
+/** Refresh the lock's heartbeat if we own it. */
+export function heartbeatLock(paths: Paths): void {
+  const l = readLock(paths);
+  if (!l || l.pid !== process.pid) return;
+  try { writeFileSync(paths.lock, JSON.stringify({ ...l, heartbeat: nowIso() } satisfies Lock)); } catch { /* ignore */ }
+}
+
+/** Keep the lock's heartbeat fresh while a run is active. Returns a stop function. */
+export function startLockHeartbeat(paths: Paths, everyMs = 15_000): () => void {
+  const t = setInterval(() => heartbeatLock(paths), everyMs);
+  t.unref?.();
+  return () => clearInterval(t);
 }
 
 export function releaseLock(paths: Paths): void {

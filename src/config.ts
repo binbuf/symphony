@@ -14,6 +14,24 @@ export interface ProviderConfig {
   idleTimeoutMin?: number;
 }
 
+export interface HooksConfig {
+  /** Run after every task finishes (done/failed/blocked/accepted), with the task in the environment. */
+  afterTask?: string;
+  /** Run when the run halts on a fatal error. */
+  onHalt?: string;
+  /** Run when a task reports `blocked`. */
+  onBlocked?: string;
+  /** Run once when `run` finishes, with SYMPHONY_EXIT set. */
+  onRunEnd?: string;
+}
+
+export interface GitConfig {
+  /** Before committing, append untracked ephemeral/secret files (node_modules/, .env*, *.log, …) to .gitignore. */
+  autoIgnoreUntracked: boolean;
+  /** Extra glob-ish basenames/segments to treat as ephemeral (e.g. "*.tfstate", "scratch"). */
+  extraIgnore: string[];
+}
+
 export interface Config {
   provider: ProviderName;
   providers: Record<ProviderName, ProviderConfig>;
@@ -30,6 +48,10 @@ export interface Config {
   designDocs: boolean;
   /** How many extra fresh sessions a task may take when it reports `continue` (subtask iteration). */
   maxContinuations: number;
+  /** Max total sessions (task + retries + continuations) a single task may use in one run before it fails. 0 = unlimited. */
+  maxIterationsPerTask: number;
+  /** Max tasks a single `run` invocation will process. 0 = unlimited. */
+  maxTasksPerRun: number;
   /** Commit after every session, including intermediate `continue` sessions. */
   commitPerSession: boolean;
   /** What to do when a task reports `blocked`: 'stop' for a human, or 'continue' to the next task. */
@@ -37,6 +59,12 @@ export interface Config {
   retry: { maxAttempts: number; backoffSec: number[] };
   halt: { maxConsecutiveFailures: number; maxAttemptsPerTask: number; onCategories: string[] };
   commitMessageTemplate: string;
+  /** Shell command the harness runs itself after a task reports `done`; non-zero demotes it to failed. */
+  verifyCommand?: string;
+  /** Wall clock for the verify command. */
+  verifyTimeoutMin: number;
+  hooks: HooksConfig;
+  git: GitConfig;
 }
 
 export interface CliOverrides {
@@ -46,6 +74,8 @@ export interface CliOverrides {
   budgetUsd?: number;
   safe?: boolean;
   noNudge?: boolean;
+  maxTasks?: number;
+  maxIterations?: number;
 }
 
 export const DEFAULTS: Config = {
@@ -69,6 +99,8 @@ export const DEFAULTS: Config = {
   maxProgressBytes: 32768,
   designDocs: true,
   maxContinuations: 4,
+  maxIterationsPerTask: 0,
+  maxTasksPerRun: 0,
   commitPerSession: true,
   onBlocked: 'stop',
   retry: { maxAttempts: 3, backoffSec: [30, 120, 300] },
@@ -78,6 +110,10 @@ export const DEFAULTS: Config = {
     onCategories: ['auth', 'billing', 'usage_limit', 'model', 'config'],
   },
   commitMessageTemplate: '{id}: {title} [{status}]',
+  verifyCommand: undefined,
+  verifyTimeoutMin: 30,
+  hooks: {},
+  git: { autoIgnoreUntracked: true, extraIgnore: [] },
 };
 
 export interface LoadedConfig {
@@ -112,6 +148,13 @@ function stringArray(x: unknown, fallback: string[], where: string, warnings: st
   if (Array.isArray(x) && x.every((v) => typeof v === 'string')) return x as string[];
   warnings.push(`${where}: expected an array of strings; using default`);
   return fallback;
+}
+
+function hookString(x: unknown, where: string, warnings: string[]): string | undefined {
+  if (x === undefined || x === null) return undefined;
+  if (typeof x === 'string' && x.trim()) return x.trim();
+  warnings.push(`${where}: expected a non-empty string; ignored`);
+  return undefined;
 }
 
 const PATH_KEYS = ['docs', 'roadmap', 'progress', 'tasks', 'design', 'adr', 'logs', 'stop', 'state', 'runs', 'log'] as const;
@@ -168,6 +211,8 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
 
   const retryRaw = isRecord(raw.retry) ? raw.retry : {};
   const haltRaw = isRecord(raw.halt) ? raw.halt : {};
+  const hooksRaw = isRecord(raw.hooks) ? raw.hooks : {};
+  const gitRaw = isRecord(raw.git) ? raw.git : {};
 
   const config: Config = {
     provider: raw.provider === undefined ? DEFAULTS.provider : asProviderName(raw.provider, 'symphony.config.json provider'),
@@ -182,6 +227,8 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     maxProgressBytes: numberOr(raw.maxProgressBytes, DEFAULTS.maxProgressBytes, 'maxProgressBytes', warnings),
     designDocs: boolOr(raw.designDocs, DEFAULTS.designDocs, 'designDocs', warnings),
     maxContinuations: Math.max(0, numberOr(raw.maxContinuations, DEFAULTS.maxContinuations, 'maxContinuations', warnings)),
+    maxIterationsPerTask: Math.max(0, numberOr(raw.maxIterationsPerTask, DEFAULTS.maxIterationsPerTask, 'maxIterationsPerTask', warnings)),
+    maxTasksPerRun: Math.max(0, numberOr(raw.maxTasksPerRun, DEFAULTS.maxTasksPerRun, 'maxTasksPerRun', warnings)),
     commitPerSession: boolOr(raw.commitPerSession, DEFAULTS.commitPerSession, 'commitPerSession', warnings),
     onBlocked: (() => {
       if (raw.onBlocked === undefined || raw.onBlocked === null) return DEFAULTS.onBlocked;
@@ -205,9 +252,23 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
       onCategories: stringArray(haltRaw.onCategories, DEFAULTS.halt.onCategories, 'halt.onCategories', warnings),
     },
     commitMessageTemplate: typeof raw.commitMessageTemplate === 'string' && raw.commitMessageTemplate ? raw.commitMessageTemplate : DEFAULTS.commitMessageTemplate,
+    verifyCommand: hookString(raw.verifyCommand, 'verifyCommand', warnings),
+    verifyTimeoutMin: numberOr(raw.verifyTimeoutMin, DEFAULTS.verifyTimeoutMin, 'verifyTimeoutMin', warnings),
+    hooks: {
+      afterTask: hookString(hooksRaw.afterTask, 'hooks.afterTask', warnings),
+      onHalt: hookString(hooksRaw.onHalt, 'hooks.onHalt', warnings),
+      onBlocked: hookString(hooksRaw.onBlocked, 'hooks.onBlocked', warnings),
+      onRunEnd: hookString(hooksRaw.onRunEnd, 'hooks.onRunEnd', warnings),
+    },
+    git: {
+      autoIgnoreUntracked: boolOr(gitRaw.autoIgnoreUntracked, DEFAULTS.git.autoIgnoreUntracked, 'git.autoIgnoreUntracked', warnings),
+      extraIgnore: stringArray(gitRaw.extraIgnore, DEFAULTS.git.extraIgnore, 'git.extraIgnore', warnings),
+    },
   };
 
   if (cli.timeoutMin !== undefined) config.timeoutMin = cli.timeoutMin;
+  if (cli.maxTasks !== undefined) config.maxTasksPerRun = Math.max(0, cli.maxTasks);
+  if (cli.maxIterations !== undefined) config.maxIterationsPerTask = Math.max(0, cli.maxIterations);
   if (cli.safe) config.autoApprove = false;
   if (cli.noNudge) config.nudge = false;
   return { config, fileExists: exists, warnings };
@@ -278,4 +339,14 @@ export function resolveSession(
     },
     warnings,
   };
+}
+
+/**
+ * The independent check the harness runs after a task reports `done`. Per-task front matter wins.
+ * Provider-agnostic: it is a plain shell command run in the project root.
+ */
+export function resolveVerify(config: Config, task: Task | undefined): { command: string; timeoutMin: number } | undefined {
+  const command = (task?.meta?.verify ?? '').trim() || (config.verifyCommand ?? '').trim();
+  if (!command) return undefined;
+  return { command, timeoutMin: config.verifyTimeoutMin };
 }

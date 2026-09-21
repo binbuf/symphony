@@ -47,8 +47,16 @@
   "maxProgressBytes": 32768,
   "designDocs": true,
   "maxContinuations": 4,
+  "maxIterationsPerTask": 0,
+  "maxTasksPerRun": 0,
   "commitPerSession": true,
   "onBlocked": "stop",
+  "verifyTimeoutMin": 30,
+  "hooks": {},
+  "git": {
+    "autoIgnoreUntracked": true,
+    "extraIgnore": []
+  },
   "retry": {
     "maxAttempts": 3,
     "backoffSec": [

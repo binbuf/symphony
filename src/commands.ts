@@ -2,12 +2,13 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULTS, type Config } from './config.js';
 import { ADR_TEMPLATE, DESIGN_README, LOGS_README, ROADMAP_TEMPLATE, TASK_TEMPLATE, docsContract } from './contract.js';
-import { ensureGitignore } from './git.js';
+import { commitsForTask, ensureGitignore, git } from './git.js';
 import type { Logger } from './logger.js';
 import { rel, stopIgnoreEntry, stopPresent, type Paths } from './paths.js';
 import { PROGRESS_HEADER } from './prompt.js';
 import { canonicalId, patchRoadmapFile } from './roadmap.js';
 import { DONE_STATES, saveState, type State } from './state.js';
+import { updatePipelineStatus } from './status.js';
 import type { Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, squash } from './util.js';
 
@@ -111,6 +112,42 @@ export function clearHaltCommand(paths: Paths, state: State, log: Logger): numbe
   log.info(`cleared halt from ${state.halted.at} (${state.halted.category}: ${state.halted.reason})`);
   delete state.halted;
   saveState(paths, state);
+  return 0;
+}
+
+/**
+ * Clear a task's recorded state so `run` picks it up again. With `--revert`, also undo the commits the
+ * task produced (newest first) so the work starts from a clean slate.
+ */
+export function resetCommand(paths: Paths, state: State, tasks: Task[], rawId: string, opts: { revert: boolean; log: Logger }): number {
+  const { revert, log } = opts;
+  const id = canonicalId(rawId);
+  const task = id ? tasks.find((t) => t.id === id) : undefined;
+  if (!task) throw new UsageError(`reset ${rawId}: no such task in ROADMAP.md`);
+
+  if (revert) {
+    const shas = commitsForTask(paths.root, task.id);
+    if (!shas.length) log.info(`${task.id}: no commits with subject "${task.id}: …" to revert`);
+    for (const sha of shas) {
+      const r = git(paths.root, ['revert', '--no-edit', sha]);
+      if (r.code !== 0) {
+        log.error(`${task.id}: git revert ${sha.slice(0, 8)} failed: ${(r.stderr || r.stdout).slice(0, 300)}`);
+        log.warn('resolve the conflict (or run `git revert --abort`), then re-run `symphony reset`');
+        return 1;
+      }
+      log.info(`${task.id}: reverted ${sha.slice(0, 8)}`);
+    }
+  }
+
+  delete state.tasks[task.id];
+  if (state.halted?.taskId === task.id) {
+    delete state.halted;
+    log.info(`${task.id}: cleared the halt on this task`);
+  }
+  saveState(paths, state);
+  try { patchRoadmapFile(paths.roadmap, task.id, 'pending'); } catch (e) { log.warn(`${task.id}: could not patch ROADMAP.md: ${(e as Error).message}`); }
+  updatePipelineStatus(paths, tasks, state, log);
+  log.info(`${task.id}: state cleared; it will run again from the start${revert ? ' (commits reverted)' : ''}`);
   return 0;
 }
 

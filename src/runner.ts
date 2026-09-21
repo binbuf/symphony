@@ -1,9 +1,10 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { relative } from 'node:path';
 import { classifyFailure, type Classified, type FailureEvidence } from './classify.js';
-import { resolveSession, type CliOverrides, type Config, type SessionSpec } from './config.js';
+import { resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
 import { formatChecks, runDoctor } from './doctor.js';
 import { commitAll, describeCommit } from './git.js';
+import { fireHook } from './hooks.js';
 import { createLogger, openRunSinks, type Logger } from './logger.js';
 import { writeTaskLog } from './logs.js';
 import { stopPresent, type Paths } from './paths.js';
@@ -14,9 +15,10 @@ import { parseResultBlock, type ResultBlock } from './result.js';
 import { canonicalId, patchRoadmapFile, type Roadmap } from './roadmap.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
 import { updatePipelineStatus } from './status.js';
-import { DONE_STATES, SKIP_STATES, acquireLock, newTaskState, releaseLock, saveState, type Halted, type LastError, type LogRef, type State, type TaskState, type TaskStatus } from './state.js';
+import { DONE_STATES, SKIP_STATES, acquireLock, newTaskState, releaseLock, saveState, startLockHeartbeat, type Halted, type LastError, type LogRef, type State, type TaskState, type TaskStatus } from './state.js';
 import type { Task } from './tasks.js';
-import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, stamp } from './util.js';
+import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, squash, stamp } from './util.js';
+import { runVerify } from './verify.js';
 
 export interface RunFlags {
   from?: string;
@@ -180,12 +182,23 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
     log.warn(`${task.id}: could not write ${ctx.paths.logsDir} log: ${(e as Error).message}`);
   }
   updatePipelineStatus(paths, ctx.tasks, state, log);
-  const commit = commitAll(paths.root, message);
+  const commit = commitAll(paths.root, message, (m) => log.warn(`${task.id}: ${m}`), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore });
   st.commit = describeCommit(commit);
+  if (commit.status === 'committed') st.commitSha = commit.sha;
   if (commit.status === 'failed') log.warn(`${task.id}: ${st.commit}`);
 
   if (halt) state.halted = halt;
   saveState(paths, state);
+  fireHook(config, 'afterTask', {
+    SYMPHONY_ROOT: paths.root,
+    SYMPHONY_TASK: task.id,
+    SYMPHONY_TITLE: task.title,
+    SYMPHONY_STATUS: final.status,
+    SYMPHONY_SUMMARY: final.summary,
+    SYMPHONY_COMMIT: st.commitSha ?? '',
+    SYMPHONY_PROVIDER: st.provider ?? '',
+    SYMPHONY_MODEL: st.model ?? '',
+  }, (m) => log.warn(`${task.id}: ${m}`));
   log.info(`=== ${task.id} -> ${final.status.toUpperCase()} · ${fmtDuration(st.durationS)} · ${fmtCost(st.costUsd)} · ${final.summary} · git: ${st.commit}`);
 }
 
@@ -207,7 +220,7 @@ async function backoff(ctx: RunContext, ms: number): Promise<boolean> {
 function commitIntermediate(ctx: RunContext, task: Task, st: TaskState): void {
   const { paths, config, log } = ctx;
   const message = renderTemplate(config.commitMessageTemplate, { id: task.id, title: task.title, status: 'continue' });
-  const commit = commitAll(paths.root, message);
+  const commit = commitAll(paths.root, message, (m) => log.warn(`${task.id}: ${m}`), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore });
   if (commit.status === 'committed') log.info(`${task.id}: intermediate commit ${commit.sha} (${commit.files} file${commit.files === 1 ? '' : 's'})`);
   else if (commit.status === 'failed') log.warn(`${task.id}: intermediate ${describeCommit(commit)}`);
 }
@@ -221,16 +234,22 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   const provider = getProvider(spec.providerName);
   const maxAttempts = Math.max(1, config.retry.maxAttempts);
   const maxContinuations = Math.max(0, config.maxContinuations);
+  const maxIterations = Math.max(0, config.maxIterationsPerTask);
   ensureProgressFile(paths);
 
   let resumeId: string | undefined;
   let lastTransient: Classified | undefined;
   let retryCount = 0;
   let continuation = 0;
+  let iterations = 0;
   let final: Final | undefined;
   let halt: Halted | undefined;
 
   for (let attempt = 1; ; attempt++) {
+    if (maxIterations > 0 && iterations >= maxIterations) {
+      final = { status: 'failed', summary: `stopped after maxIterationsPerTask (${maxIterations}) sessions without finishing`, lastError: { category: 'task', message: 'maxIterationsPerTask reached', transient: false, fatal: false, at: nowIso() } };
+      break;
+    }
     if (lastTransient) {
       const wait = config.retry.backoffSec[Math.min(retryCount - 1, config.retry.backoffSec.length - 1)] ?? 30;
       log.warn(`${task.id}: ${lastTransient.category}: ${lastTransient.message}. Retry ${retryCount}/${maxAttempts} in ${wait}s ${resumeId ? `resuming session ${resumeId}` : 'with a fresh session'}.`);
@@ -241,6 +260,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
 
     st.status = 'running';
     st.attempts += 1;
+    iterations += 1;
     st.started = nowIso();
     st.provider = spec.providerName;
     st.model = spec.model;
@@ -294,6 +314,21 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         }
         final = { status: 'failed', summary: `${block.summary || 'more work remains'} | gave up after ${maxContinuations} continuation sessions (maxContinuations)`, lastError: { category: 'task', message: 'continuation limit reached', transient: false, fatal: false, at: nowIso() } };
         break;
+      }
+      if (block.status === 'done') {
+        const verify = resolveVerify(config, task);
+        if (verify) {
+          log.info(`${task.id}: running verify: ${verify.command}`);
+          const res = runVerify(paths.root, verify.command, verify.timeoutMin * 60_000);
+          st.verify = { command: verify.command, ok: res.ok, code: res.code ?? undefined, output: res.output.slice(-2000) || undefined, at: nowIso() };
+          if (!res.ok) {
+            const msg = `verify failed (exit ${res.code ?? 'timeout'}): ${verify.command} — ${squash(res.output, 240) || 'no output'}`;
+            log.error(`${task.id}: ${msg}`);
+            final = { status: 'failed', summary: msg, lastError: { category: 'verify', message: msg, transient: false, fatal: false, at: nowIso() } };
+            break;
+          }
+          log.info(`${task.id}: verify passed`);
+        }
       }
       final = { status: block.status, summary: block.summary || block.status };
       if (block.status !== 'done') final.lastError = { category: 'task', message: block.summary || `model reported ${block.status}`, transient: false, fatal: false, at: nowIso() };
@@ -359,6 +394,12 @@ function setHalt(ctx: RunContext, h: Halted): number {
   saveState(ctx.paths, ctx.state);
   updatePipelineStatus(ctx.paths, ctx.tasks, ctx.state, ctx.log);
   haltBanner(ctx, h);
+  fireHook(ctx.config, 'onHalt', {
+    SYMPHONY_ROOT: ctx.paths.root,
+    SYMPHONY_TASK: h.taskId ?? '',
+    SYMPHONY_HALT_CATEGORY: h.category,
+    SYMPHONY_HALT_REASON: h.reason,
+  }, (m) => ctx.log.warn(m));
   return 3;
 }
 
@@ -388,7 +429,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   }
 
   const selected = selectTasks(ctx);
-  const todo = selected.filter((t) => flags.retry || !SKIP_STATES.includes(state.tasks[t.id]?.status ?? 'pending'));
+  let todo = selected.filter((t) => flags.retry || !SKIP_STATES.includes(state.tasks[t.id]?.status ?? 'pending'));
   const carried = selected.filter((t) => !flags.retry && state.tasks[t.id]?.status === 'blocked');
   const leftRunning = todo.filter((t) => state.tasks[t.id]?.status === 'running');
 
@@ -406,13 +447,20 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   for (const t of leftRunning) log.warn(`${t.id} was left "running" (previous harness crashed or was killed); it will be retried`);
 
   if (flags.dryRun) {
-    if (!first) { log.info('nothing to run'); return 0; }
-    const st = state.tasks[first.id] ?? newTaskState(first.title);
-    const prompt = buildTaskPrompt(promptCtx(ctx, first, { ...st, attempts: st.attempts + 1 }, spec, st.lastError?.message, 0));
-    const cmd = provider.buildCommand({ bin: spec.bin, prompt, promptFile: `${paths.runs}/${first.id}-<stamp>.prompt.md`, taskId: first.id, attempt: st.attempts + 1, kind: 'task', model: spec.model, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd, extraArgs: spec.extraArgs, cwd: paths.root });
-    log.plain(`\nprovider: ${spec.providerName} [${spec.sources.provider}] · model: ${spec.model ?? 'provider default'} [${spec.sources.model}] · timeout ${spec.timeoutMin} min · idle ${spec.idleTimeoutMin} min · auto-approve ${spec.autoApprove}`);
-    log.plain(`command: ${describeCmd(cmd)}\n`);
-    log.plain(`--- prompt for ${first.id} (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);
+    if (!todo.length) { log.info('nothing to run'); return 0; }
+    const capNote = config.maxTasksPerRun > 0 && todo.length > config.maxTasksPerRun ? ` (capped to ${config.maxTasksPerRun} by maxTasksPerRun)` : '';
+    log.plain(`\n${todo.length} task${todo.length === 1 ? '' : 's'} would run${capNote}: ${todo.map((t) => t.id).join(' ')}`);
+    for (const t of todo) {
+      const rs = resolveSession(config, t, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+      const tProvider = getProvider(rs.spec.providerName);
+      const st = state.tasks[t.id] ?? newTaskState(t.title);
+      const prompt = buildTaskPrompt(promptCtx(ctx, t, { ...st, attempts: st.attempts + 1 }, rs.spec, st.lastError?.message, 0));
+      const cmd = tProvider.buildCommand({ bin: rs.spec.bin, prompt, promptFile: `${paths.runs}/${t.id}-<stamp>.prompt.md`, taskId: t.id, attempt: st.attempts + 1, kind: 'task', model: rs.spec.model, autoApprove: rs.spec.autoApprove, budgetUsd: rs.spec.budgetUsd, extraArgs: rs.spec.extraArgs, cwd: paths.root });
+      log.plain(`\n=== ${t.id} — ${t.title}`);
+      log.plain(`provider: ${rs.spec.providerName} [${rs.spec.sources.provider}] · model: ${rs.spec.model ?? 'provider default'} [${rs.spec.sources.model}] · timeout ${rs.spec.timeoutMin} min · idle ${rs.spec.idleTimeoutMin} min · auto-approve ${rs.spec.autoApprove}`);
+      log.plain(`command: ${describeCmd(cmd)}`);
+      log.plain(`--- prompt for ${t.id} (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);
+    }
     return 0;
   }
 
@@ -422,8 +470,12 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     return 0;
   }
 
-  acquireLock(paths);
-  try {
+  if (config.maxTasksPerRun > 0 && todo.length > config.maxTasksPerRun) {
+    log.info(`maxTasksPerRun=${config.maxTasksPerRun}: running the first ${config.maxTasksPerRun} of ${todo.length} selected task(s); the rest stay for a later run`);
+    todo = todo.slice(0, config.maxTasksPerRun);
+  }
+
+  const runLoop = async (): Promise<number> => {
     let consecutiveFailures = 0;
     for (const task of todo) {
       if (ctx.interrupted) return ctx.signalName === 'SIGTERM' ? 143 : 130;
@@ -438,11 +490,17 @@ export async function runCommand(ctx: RunContext): Promise<number> {
 
       const out = await runTask(ctx, task);
       if (out.stopped) return 0;
-      if (out.halt) { haltBanner(ctx, out.halt); return 3; }
+      if (out.halt) return setHalt(ctx, out.halt);
       if (out.interrupted) return ctx.signalName === 'SIGTERM' ? 143 : 130;
 
       if (out.status === 'done') { consecutiveFailures = 0; continue; }
       if (out.status === 'blocked') {
+        fireHook(config, 'onBlocked', {
+          SYMPHONY_ROOT: paths.root,
+          SYMPHONY_TASK: task.id,
+          SYMPHONY_TITLE: task.title,
+          SYMPHONY_SUMMARY: state.tasks[task.id]?.summary ?? '',
+        }, (m) => log.warn(m));
         if (!flags.continueOnFailure && config.onBlocked === 'stop') {
           log.error(`stopping at ${task.id} (blocked): the session finished what it could; the human items are in its Hand-off. Re-run to continue past it, \`symphony accept ${task.id} --note ...\` to sign off, or \`symphony run --retry --only ${task.id}\` to redo.`);
           return 2;
@@ -464,9 +522,23 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     updatePipelineStatus(paths, ctx.tasks, state, log);
     log.info(`run finished: ${done}/${ctx.tasks.length} done${blocked.length ? `; awaiting a human: ${blocked.join(' ')}` : ''}`);
     return 0;
+  };
+
+  acquireLock(paths);
+  const stopHeartbeat = startLockHeartbeat(paths);
+  let code: number;
+  try {
+    code = await runLoop();
   } finally {
+    stopHeartbeat();
     releaseLock(paths);
   }
+  fireHook(config, 'onRunEnd', {
+    SYMPHONY_ROOT: paths.root,
+    SYMPHONY_EXIT: String(code),
+    SYMPHONY_STATUS: code === 0 ? 'ok' : code === 2 ? 'stopped' : code === 3 ? 'halted' : 'error',
+  }, (m) => log.warn(m));
+  return code;
 }
 
 /** Manual close-out: resume a task's recorded session and ask it to report. */
@@ -486,6 +558,7 @@ export async function nudgeCommand(ctx: RunContext, rawId: string, note?: string
   if (!preflight(ctx, spec, provider)) return 4;
 
   acquireLock(paths);
+  const stopHeartbeat = startLockHeartbeat(paths);
   try {
     st.status = 'running';
     saveState(paths, state);
@@ -505,9 +578,10 @@ export async function nudgeCommand(ctx: RunContext, rawId: string, note?: string
       if (c.fatal) halt = { at: nowIso(), taskId: task.id, category: c.category, reason: c.message };
     }
     finalizeTask(ctx, task, st, final, halt);
-    if (halt) { haltBanner(ctx, halt); return 3; }
+    if (halt) return setHalt(ctx, halt);
     return final.status === 'done' ? 0 : 2;
   } finally {
+    stopHeartbeat();
     releaseLock(paths);
   }
 }

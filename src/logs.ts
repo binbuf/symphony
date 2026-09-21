@@ -43,6 +43,14 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
     lines.push('');
     lines.push(`${st.lastError.category}: ${st.lastError.message} (${st.lastError.transient ? 'transient' : 'non-transient'}${st.lastError.fatal ? ', fatal' : ''}) at ${st.lastError.at}`);
   }
+  if (st.verify) {
+    lines.push('');
+    lines.push('## Verification');
+    lines.push('');
+    lines.push(`- command: \`${st.verify.command}\``);
+    lines.push(`- result: ${st.verify.ok ? 'pass' : `FAIL (exit ${st.verify.code ?? 'timeout'})`} at ${st.verify.at}`);
+    if (st.verify.output) { lines.push('', '```', st.verify.output, '```'); }
+  }
   lines.push('');
   lines.push('## Sessions');
   lines.push('');
