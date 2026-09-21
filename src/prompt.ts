@@ -3,6 +3,7 @@ import { basename, join } from 'node:path';
 import { rel, type Paths } from './paths.js';
 import { DONE_STATES, type State } from './state.js';
 import { parseFrontMatter, type Task } from './tasks.js';
+import { renderPrompt } from './templates.js';
 import { ensureDir, slugify } from './util.js';
 
 export interface PromptCtx {
@@ -130,39 +131,36 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
   const howTo = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
   const finalStep = steps.length + 1;
 
-  return `You are an autonomous coding agent working on exactly one task in the "${basename(paths.root)}" project, driven by the symphony harness. Nobody is watching and nobody can answer questions: make routine judgment calls yourself and record them.
-${retryNote}${continuationNote}
-Project root: ${paths.root}  (your working directory; never touch files outside it)
-Task: ${task.id} — ${task.title}  (phase: ${task.phase}; task ${task.order + 1} of ${ctx.tasks.length} in ${d.roadmap})
-Task file: ${task.taskFileRel ?? '(none)'}
-Attempt: ${ctx.attempt} · continuation: ${ctx.continuation} · provider: ${ctx.providerName} · model: ${ctx.model ?? 'provider default'}
-
-## The planning contract
-- ${d.roadmap} is the ordered task list. Read it for context on neighbouring tasks. Do not edit the [ ]/[~]/[x] marker or the trailing "⟵" tag on any bullet; the harness owns those. Follow-up work you discover goes into ${d.progress} under "## Follow-ups", not into the roadmap.
-- ${d.progress} is the shared notebook for the whole run; its current content is inlined below. Before you finish, append a section "## ${task.id} — ${task.title}" with what later tasks need to know: real paths, commands that work, contract deviations, gotchas. Facts, not narrative. Never delete other sections. If a later session will need to continue this task, say exactly what remains.
-- ${d.logs}/TNN.md is the harness's per-task run log (status, timing and what each session reported). Read it for history if useful, but never create or edit files there; the harness regenerates them.
-${designBullets}- The task file's "## Hand-off" section (create it if missing) is where you report what landed, what deviated from the plan and why, and what the next task must know. Replace any placeholder text.
-${noTaskFileNote}${designPresent}Progress so far: done [${ids(ctx, (s) => (DONE_STATES as string[]).includes(s))}] · blocked/failed [${ids(ctx, (s) => s === 'blocked' || s === 'failed')}]
-
-## How to work
-${howTo}
-${finalStep}. End your final message with exactly this block, as plain text, no code fence, and nothing after it:
-
-SYMPHONY_RESULT
-status: <exactly one word: done, continue, blocked, or failed>
-summary: <one line: what landed, or what is blocking>
-END_SYMPHONY_RESULT
-
-Use "done" only when the task's acceptance criteria are met and its tests pass; "continue" when you completed a real slice but more sessions are needed to finish this same task; "blocked" when a human decision or an external dependency stops you; "failed" when you could not complete it for any other reason.
-
---- PROGRESS (${d.progress}) ---
-${readProgress(ctx, paths)}
---- END PROGRESS ---
-
---- TASK FILE (${task.taskFileRel ?? 'none'}) ---
-${body ?? `(no task file — the roadmap bullet is the whole task: "${task.id} — ${task.title}")`}
---- END TASK FILE ---
-`;
+  const vars: Record<string, string | number> = {
+    projectName: basename(paths.root),
+    retryNote,
+    continuationNote,
+    root: paths.root,
+    taskId: task.id,
+    taskTitle: task.title,
+    taskPhase: task.phase,
+    taskOrder: task.order + 1,
+    taskCount: ctx.tasks.length,
+    roadmap: d.roadmap,
+    taskFile: task.taskFileRel ?? '(none)',
+    attempt: ctx.attempt,
+    continuation: ctx.continuation,
+    provider: ctx.providerName,
+    model: ctx.model ?? 'provider default',
+    progress: d.progress,
+    logs: d.logs,
+    designBullets,
+    noTaskFileNote,
+    designPresent,
+    doneIds: ids(ctx, (s) => (DONE_STATES as string[]).includes(s)),
+    blockedIds: ids(ctx, (s) => s === 'blocked' || s === 'failed'),
+    howTo,
+    finalStep,
+    progressBody: readProgress(ctx, paths),
+    taskFileForBlock: task.taskFileRel ?? 'none',
+    taskBody: body ?? `(no task file — the roadmap bullet is the whole task: "${task.id} — ${task.title}")`,
+  };
+  return renderPrompt('task.md', vars);
 }
 
 function readProgress(ctx: PromptCtx, paths: Paths): string {

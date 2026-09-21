@@ -13,6 +13,7 @@ import { parseResultBlock } from './result.js';
 import { describeCmd, haltBanner, outcomeEvidence, preflight, type RunContext } from './runner.js';
 import { startSession } from './session.js';
 import { acquireLock, releaseLock, saveState, startLockHeartbeat } from './state.js';
+import { renderPrompt } from './templates.js';
 import { clip, ensureDir, nowIso, stamp } from './util.js';
 
 const LIVE_MAX = 400;
@@ -40,42 +41,25 @@ export function buildPreparePrompt(ctx: RunContext, report: LintReport): string 
     : '(none)';
   const roadmap = existsSync(paths.roadmap) ? clip(readFileSync(paths.roadmap, 'utf8'), ROADMAP_CAP) : '(missing)';
   const tree = docsTree(paths);
-  return `You are preparing the "${basename(paths.root)}" project for the symphony harness, which will later drive an autonomous coding agent through ${d.roadmap}, one task per session. Your only job in this session is to bring the project's planning documents into the exact layout and format below. Do not write or change application code, do not start any task, do not run the harness. Nobody can answer questions: make reasonable calls and record each one in ${d.progress} under a "## Preparation notes" section.
-
-Project root: ${paths.root}  (your working directory; never touch files outside it)
-
-## Required layout and formats
-${docsContract(paths, { design: ctx.config.designDocs })}
-
-## What the linter found (fix every ✗; fix ! and · where the source material allows)
-${findings}
-
-## Planning documents outside ${d.docs}/
-${report.candidates.length ? report.candidates.map((c) => `- ${c}`).join('\n') : '(none)'}
-${report.candidates.length ? `Fold their content into ${d.docs}/ (roadmap tasks, task files, design docs, ADRs). Move with \`git mv\` so history is kept; if other files link to the old path, leave a one-line pointer there. Leave genuine end-user documentation (README, API docs) where it is.` : ''}
-
-## Current ${d.docs}/ tree
-${tree.length ? tree.join('\n') : '(empty)'}
-
-## Current ${d.roadmap}
-${roadmap}
-
-## Rules
-- Preserve meaning. Convert, split, merge, renumber and move; do not add scope the documents do not already contain. When a document lists phases or milestones without tasks, break each into tasks small enough for one unattended coding session, in dependency order.
-- Every roadmap task gets a task file at ${d.tasks}/NN-<slug>.md from the template, filled with what the sources say; put open questions under "Design notes" as explicit assumptions rather than guessing silently. Every task's "Done when" must name at least one automated test to run.
-- Use "- [ ]" for work not yet done and "- [x]" only where the sources clearly say it is finished. Never write "[~]" or a "⟵" tag; the harness owns those.
-- Do not create or edit anything under .symphony/. Do not commit or push; the harness commits after you finish.
-- Run everything in the foreground and finish in this single turn.
-- Before you end, run \`${lintCommand(ctx)}\` and fix anything it still reports as ✗. Repeat until it prints "lint: ok".
-- End your final message with exactly this block, as plain text, no code fence, nothing after it:
-
-SYMPHONY_RESULT
-status: <exactly one word: done, blocked, or failed>
-summary: <one line: what you changed, or what is missing>
-END_SYMPHONY_RESULT
-
-Use "blocked" only when there is genuinely no planning content to work from, and say what is missing.
-`;
+  const candidatesNote = report.candidates.length
+    ? `Fold their content into ${d.docs}/ (roadmap tasks, task files, design docs, ADRs). Move with \`git mv\` so history is kept; if other files link to the old path, leave a one-line pointer there. Leave genuine end-user documentation (README, API docs) where it is.`
+    : '';
+  const vars: Record<string, string | number> = {
+    projectName: basename(paths.root),
+    roadmapPath: d.roadmap,
+    progress: d.progress,
+    root: paths.root,
+    contract: docsContract(paths, { design: ctx.config.designDocs }),
+    findings,
+    docsDir: d.docs,
+    candidates: report.candidates.length ? report.candidates.map((c) => `- ${c}`).join('\n') : '(none)',
+    candidatesNote,
+    tree: tree.length ? tree.join('\n') : '(empty)',
+    roadmapContent: roadmap,
+    tasks: d.tasks,
+    lintCommand: lintCommand(ctx),
+  };
+  return renderPrompt('prepare.md', vars);
 }
 
 /** Lint .docs/, then let the configured provider repair it. Returns 0 when lint is clean afterwards. */
