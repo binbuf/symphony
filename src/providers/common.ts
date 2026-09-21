@@ -39,8 +39,8 @@ export function newHints(): ClassifyHints {
   return { apiErrorCategories: [], errorTexts: [] };
 }
 
-/** Linux caps a single argv string at 128 KB; above 64 KB hand the agent the prompt file instead. */
-export const ARGV_PROMPT_LIMIT = 64 * 1024;
+/** Linux caps a single argv string at 128 KB; Windows caps the whole command line at ~32 KB. */
+export const ARGV_PROMPT_LIMIT = process.platform === 'win32' ? 24 * 1024 : 64 * 1024;
 
 export function argvPrompt(prompt: string, promptFile: string): string {
   if (Buffer.byteLength(prompt, 'utf8') <= ARGV_PROMPT_LIMIT) return prompt;
