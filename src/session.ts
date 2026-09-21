@@ -77,6 +77,16 @@ export function startSession(o: SessionOpts): Session {
   const pid = child.pid;
 
   const signalTree = (sig: NodeJS.Signals) => {
+    if (process.platform === 'win32') {
+      // Windows has no process groups; taskkill /T walks the child tree.
+      try {
+        if (sig === 'SIGKILL') spawn('taskkill', ['/pid', String(pid ?? 0), '/T', '/F'], { stdio: 'ignore' }).on('error', () => {});
+        else child.kill();
+      } catch {
+        try { child.kill(); } catch { /* already gone */ }
+      }
+      return;
+    }
     try {
       if (detached && pid) process.kill(-pid, sig);
       else child.kill(sig);

@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import type { Config, SessionSpec } from './config.js';
 import { dirtyFiles, gitAvailable, gitToplevel } from './git.js';
-import type { Paths } from './paths.js';
+import { rel, stopPresent, type Paths } from './paths.js';
 import type { Provider } from './providers/types.js';
 import { liveLock, type State } from './state.js';
 
@@ -79,7 +79,7 @@ export function runDoctor(i: DoctorInput): Check[] {
     if (!i.spec.autoApprove) add('permissions', 'warn', 'safe mode: the agent may edit files but shell commands need approval nobody can give; expect blocked results');
   }
 
-  if (existsSync(i.paths.stop)) add('stop', 'warn', `${i.paths.stop} present; run pauses until it is removed`);
+  if (stopPresent(i.paths)) add('stop', 'warn', `${rel(i.paths.root, i.paths.stop)} present; run pauses until it is removed`);
   if (i.state.halted && !i.ignoreHalt) add('halt', 'fail', `halted at ${i.state.halted.at}${i.state.halted.taskId ? ` on ${i.state.halted.taskId}` : ''} (${i.state.halted.category}): ${i.state.halted.reason} — run: symphony clear-halt`);
   const lock = liveLock(i.paths);
   if (lock) add('lock', 'fail', `another run is active (pid ${lock.pid}, since ${lock.startedAt})`);

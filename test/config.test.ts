@@ -58,7 +58,7 @@ test('resolveSession precedence: cli > env > front matter > config', () => {
   assert.equal(byCli.providerName, 'codex');
   assert.equal(byCli.model, 'm-cli');
   assert.equal(byCli.sources.provider, '--provider');
-  assert.throws(() => resolveSession(cfg, task(), { provider: 'gemini' }, {}), /unknown provider/);
+  assert.throws(() => resolveSession(cfg, task(), { provider: 'not-a-provider' }, {}), /unknown provider/);
 });
 
 test('budget is dropped with a warning for providers without a budget flag', () => {
@@ -67,4 +67,56 @@ test('budget is dropped with a warning for providers without a budget flag', () 
   assert.ok(r.warnings[0].includes('budget'));
   const ok = resolveSession(DEFAULTS, task(), { provider: 'claude', budgetUsd: 3 }, {}, (p) => p === 'claude');
   assert.equal(ok.spec.budgetUsd, 3);
+});
+
+test('paths section is parsed and drives every location; unknown keys warn', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({
+    paths: { docs: 'planning', tasks: 'planning/work', progress: 'notes/PROGRESS.md', stop: '.halt' },
+    maxContinuations: 7,
+    commitPerSession: false,
+    onBlocked: 'continue',
+  }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.paths.docs, 'planning');
+  assert.equal(config.paths.tasks, 'planning/work');
+  assert.equal(config.paths.progress, 'notes/PROGRESS.md');
+  assert.equal(config.paths.stop, '.halt');
+  assert.equal(config.maxContinuations, 7);
+  assert.equal(config.commitPerSession, false);
+  assert.equal(config.onBlocked, 'continue');
+  const rp = resolvePaths(dir, config.paths);
+  assert.equal(rp.docs, join(dir, 'planning'));
+  assert.equal(rp.roadmap, join(dir, 'planning', 'ROADMAP.md'));
+  assert.equal(rp.tasksDir, join(dir, 'planning', 'work'));
+  assert.equal(rp.adrDir, join(dir, 'planning', 'design', 'adr'));
+  assert.equal(rp.stop, join(dir, '.halt'));
+
+  writeFileSync(paths.config, JSON.stringify({ paths: { docs: 'x', nope: 'y' }, onBlocked: 'sometimes' }));
+  const bad = loadConfig(paths, {});
+  assert.equal(bad.config.paths.docs, 'x');
+  assert.equal(bad.config.onBlocked, 'stop');
+  assert.ok(bad.warnings.some((w) => w.includes('paths.nope')));
+  assert.ok(bad.warnings.some((w) => w.includes('onBlocked')));
+});
+
+test('default docs dir is docs/, but a legacy .docs/ is honoured when docs/ is absent', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-docs-'));
+  assert.equal(resolvePaths(dir).docs, join(dir, 'docs'));
+  mkdirSync(join(dir, '.docs'), { recursive: true });
+  assert.equal(resolvePaths(dir).docs, join(dir, '.docs'));
+  mkdirSync(join(dir, 'docs'), { recursive: true });
+  assert.equal(resolvePaths(dir).docs, join(dir, 'docs'));
+  assert.equal(resolvePaths(dir, { docs: 'custom' }).docs, join(dir, 'custom'));
+});
+
+test('designDocs can be switched off', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-nodesign-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  assert.equal(loadConfig(paths, {}).config.designDocs, true);
+  writeFileSync(paths.config, JSON.stringify({ designDocs: false }));
+  assert.equal(loadConfig(paths, {}).config.designDocs, false);
 });

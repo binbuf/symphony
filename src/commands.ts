@@ -4,7 +4,7 @@ import { DEFAULTS, type Config } from './config.js';
 import { ADR_TEMPLATE, DESIGN_README, ROADMAP_TEMPLATE, TASK_TEMPLATE, docsContract } from './contract.js';
 import { ensureGitignore } from './git.js';
 import type { Logger } from './logger.js';
-import type { Paths } from './paths.js';
+import { rel, stopIgnoreEntry, stopPresent, type Paths } from './paths.js';
 import { PROGRESS_HEADER } from './prompt.js';
 import { canonicalId, patchRoadmapFile } from './roadmap.js';
 import { DONE_STATES, saveState, type State } from './state.js';
@@ -18,17 +18,19 @@ function writeIfMissing(path: string, content: string, created: string[]): void 
   created.push(path);
 }
 
-/** Create the .docs/ skeleton (never overwrites). Returns the paths created. */
-export function scaffoldDocs(paths: Paths, opts: { roadmap: boolean; config: boolean }): string[] {
+/** Create the docs skeleton (never overwrites). Returns the paths created. */
+export function scaffoldDocs(paths: Paths, opts: { roadmap: boolean; config: boolean; design?: boolean }): string[] {
   const created: string[] = [];
   ensureDir(paths.tasksDir);
-  ensureDir(paths.adrDir);
   ensureDir(paths.symphony);
   if (opts.roadmap) writeIfMissing(paths.roadmap, ROADMAP_TEMPLATE, created);
   writeIfMissing(paths.progress, PROGRESS_HEADER, created);
   writeIfMissing(join(paths.tasksDir, 'TEMPLATE.md'), TASK_TEMPLATE, created);
-  writeIfMissing(join(paths.designDir, 'README.md'), DESIGN_README, created);
-  writeIfMissing(join(paths.adrDir, '0000-template.md'), ADR_TEMPLATE, created);
+  if (opts.design !== false) {
+    ensureDir(paths.adrDir);
+    writeIfMissing(join(paths.designDir, 'README.md'), DESIGN_README, created);
+    writeIfMissing(join(paths.adrDir, '0000-template.md'), ADR_TEMPLATE, created);
+  }
   if (opts.config && !existsSync(paths.config)) {
     const example = join(import.meta.dirname, '..', 'symphony.config.example.json');
     const { fake: _fake, ...providers } = DEFAULTS.providers;
@@ -38,13 +40,13 @@ export function scaffoldDocs(paths: Paths, opts: { roadmap: boolean; config: boo
   return created;
 }
 
-export function initCommand(paths: Paths, log: Logger): number {
-  const created = scaffoldDocs(paths, { roadmap: true, config: true });
-  const added = ensureGitignore(paths.root, ['.symphony/']);
+export function initCommand(paths: Paths, log: Logger, opts: { design?: boolean } = {}): number {
+  const created = scaffoldDocs(paths, { roadmap: true, config: true, design: opts.design });
+  const added = ensureGitignore(paths.root, ['.symphony/', ...(stopIgnoreEntry(paths) ? [stopIgnoreEntry(paths)!] : [])]);
   for (const p of created) log.info(`created ${p}`);
   if (added.length) log.info(`added ${added.join(', ')} to ${join(paths.root, '.gitignore')}`);
-  if (!created.length && !added.length) log.info('nothing to do; .docs/ and .symphony/ already initialised');
-  log.info('next: describe tasks in .docs/ROADMAP.md (+ .docs/tasks/NN-slug.md), then: symphony doctor && symphony run');
+  if (!created.length && !added.length) log.info(`nothing to do; ${rel(paths.root, paths.docs)} and .symphony/ already initialised`);
+  log.info(`next: describe tasks in ${rel(paths.root, paths.roadmap)} (+ ${rel(paths.root, paths.tasksDir)}/NN-slug.md), then: symphony doctor && symphony run`);
   log.info('have planning docs in another shape already? `symphony lint` shows what differs, `symphony prepare` lets the agent convert them');
   return 0;
 }
@@ -73,7 +75,7 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
   const cost = tasks.reduce((a, t) => a + (state.tasks[t.id]?.costUsd ?? 0), 0);
   const time = tasks.reduce((a, t) => a + (state.tasks[t.id]?.durationS ?? 0), 0);
   const blocked = tasks.filter((t) => state.tasks[t.id]?.status === 'blocked').map((t) => t.id);
-  log.plain(`\n${done}/${tasks.length} done · ${fmtDuration(time || undefined)} · ${fmtCost(cost || undefined)} · default provider ${config.provider}${blocked.length ? ` · awaiting a human: ${blocked.join(' ')}` : ''}${existsSync(paths.stop) ? ' · STOP present' : ''}`);
+  log.plain(`\n${done}/${tasks.length} done · ${fmtDuration(time || undefined)} · ${fmtCost(cost || undefined)} · default provider ${config.provider}${blocked.length ? ` · awaiting a human: ${blocked.join(' ')}` : ''}${stopPresent(paths) ? ` · STOP present (${rel(paths.root, paths.stop)})` : ''}`);
   return 0;
 }
 
@@ -114,10 +116,10 @@ export function clearHaltCommand(paths: Paths, state: State, log: Logger): numbe
  * Paste-ready brief for an LLM client: given an idea, produce the .docs/ package symphony consumes.
  * Printed to stdout so it can be piped: `symphony brief > brief.md` or `symphony brief | pbcopy`.
  */
-export function briefCommand(log: Logger): number {
+export function briefCommand(paths: Paths, log: Logger, opts: { design?: boolean } = {}): number {
   log.plain(`Turn the idea at the bottom into a planning package for an autonomous coding harness called symphony. Output ONLY the files listed below, each as a separate Markdown file at the exact path given (write the path as a heading or fenced-file marker so I can save them). Write for an autonomous agent that cannot ask questions: be concrete, name real paths, commands, and acceptance checks.
 
-${docsContract()}
+${docsContract(paths, opts)}
 
 Do not produce code or other files: the harness will drive an agent through the tasks later. If the idea is ambiguous, choose the simplest reasonable option and record it as an ADR instead of asking.
 

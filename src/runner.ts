@@ -5,8 +5,8 @@ import { resolveSession, type CliOverrides, type Config, type SessionSpec } from
 import { formatChecks, runDoctor } from './doctor.js';
 import { commitAll, describeCommit } from './git.js';
 import { createLogger, openRunSinks, type Logger } from './logger.js';
-import type { Paths } from './paths.js';
-import { buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, type PromptCtx } from './prompt.js';
+import { stopPresent, type Paths } from './paths.js';
+import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, type PromptCtx } from './prompt.js';
 import { getProvider } from './providers/index.js';
 import type { Provider, SpawnSpec } from './providers/types.js';
 import { parseResultBlock, type ResultBlock } from './result.js';
@@ -102,7 +102,7 @@ function mergeOutcome(first: SessionOutcome, second: SessionOutcome): SessionOut
 }
 
 interface SessionRun {
-  kind: 'task' | 'resume' | 'nudge';
+  kind: 'task' | 'resume' | 'nudge' | 'continue';
   logKind: 'task' | 'retry' | 'nudge';
   attempt: number;
   resumeId?: string;
@@ -167,18 +167,27 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
   log.info(`=== ${task.id} -> ${final.status.toUpperCase()} · ${fmtDuration(st.durationS)} · ${fmtCost(st.costUsd)} · ${final.summary} · git: ${st.commit}`);
 }
 
-function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError?: string): PromptCtx {
-  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, providerName: spec.providerName, model: spec.model, maxProgressBytes: ctx.config.maxProgressBytes, lastError };
+function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError: string | undefined, continuation: number): PromptCtx {
+  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError };
 }
 
 /** Abortable, STOP-aware backoff. Returns true when a STOP file appeared. */
 async function backoff(ctx: RunContext, ms: number): Promise<boolean> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline && !ctx.interrupted) {
-    if (existsSync(ctx.paths.stop)) return true;
+    if (stopPresent(ctx.paths)) return true;
     await sleep(Math.min(5000, deadline - Date.now()), ctx.abort.signal);
   }
-  return existsSync(ctx.paths.stop);
+  return stopPresent(ctx.paths);
+}
+
+/** Commit a `continue` session's work so a crash never loses it. */
+function commitIntermediate(ctx: RunContext, task: Task, st: TaskState): void {
+  const { paths, config, log } = ctx;
+  const message = renderTemplate(config.commitMessageTemplate, { id: task.id, title: task.title, status: 'continue' });
+  const commit = commitAll(paths.root, message);
+  if (commit.status === 'committed') log.info(`${task.id}: intermediate commit ${commit.sha} (${commit.files} file${commit.files === 1 ? '' : 's'})`);
+  else if (commit.status === 'failed') log.warn(`${task.id}: intermediate ${describeCommit(commit)}`);
 }
 
 export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome> {
@@ -189,17 +198,20 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   warnings.forEach((w) => log.warn(`${task.id}: ${w}`));
   const provider = getProvider(spec.providerName);
   const maxAttempts = Math.max(1, config.retry.maxAttempts);
+  const maxContinuations = Math.max(0, config.maxContinuations);
   ensureProgressFile(paths);
 
   let resumeId: string | undefined;
   let lastTransient: Classified | undefined;
+  let retryCount = 0;
+  let continuation = 0;
   let final: Final | undefined;
   let halt: Halted | undefined;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    if (attempt > 1 && lastTransient) {
-      const wait = config.retry.backoffSec[Math.min(attempt - 2, config.retry.backoffSec.length - 1)] ?? 30;
-      log.warn(`${task.id}: ${lastTransient.category}: ${lastTransient.message}. Retry ${attempt}/${maxAttempts} in ${wait}s ${resumeId ? `resuming session ${resumeId}` : 'with a fresh session'}.`);
+  for (let attempt = 1; ; attempt++) {
+    if (lastTransient) {
+      const wait = config.retry.backoffSec[Math.min(retryCount - 1, config.retry.backoffSec.length - 1)] ?? 30;
+      log.warn(`${task.id}: ${lastTransient.category}: ${lastTransient.message}. Retry ${retryCount}/${maxAttempts} in ${wait}s ${resumeId ? `resuming session ${resumeId}` : 'with a fresh session'}.`);
       const stopped = await backoff(ctx, wait * 1000);
       if (ctx.interrupted) { final = { status: 'failed', summary: 'interrupted during retry backoff', lastError: { category: 'interrupted', message: 'interrupted during retry backoff', transient: true, fatal: false, at: nowIso() } }; break; }
       if (stopped) { log.warn(`${task.id}: STOP present; not retrying. Remove ${paths.stop} and re-run to continue.`); return { status: st.status, stopped: true }; }
@@ -213,11 +225,15 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     delete st.finished;
     saveState(paths, state);
     patchRoadmap(ctx, task.id, 'running');
-    log.info(`=== ${task.id} ${task.title} (attempt ${st.attempts}${attempt > 1 ? `, retry ${attempt}/${maxAttempts}` : ''}) provider=${spec.providerName} model=${spec.model ?? 'default'} timeout=${spec.timeoutMin}min`);
+    log.info(`=== ${task.id} ${task.title} (session ${st.attempts}${retryCount > 0 ? `, retry ${retryCount}/${maxAttempts}` : ''}${continuation > 0 ? `, continuation ${continuation}/${maxContinuations}` : ''}) provider=${spec.providerName} model=${spec.model ?? 'default'} timeout=${spec.timeoutMin}min`);
 
-    const pc = promptCtx(ctx, task, st, spec, attempt === 1 ? st.lastError?.message : lastTransient?.message);
-    const prompt = resumeId && lastTransient ? buildResumePrompt(pc, lastTransient.message) : buildTaskPrompt(pc);
-    let outcome = await runOneSession(ctx, task, st, provider, spec, prompt, { kind: resumeId ? 'resume' : 'task', logKind: attempt > 1 ? 'retry' : 'task', attempt, resumeId, timeoutMin: spec.timeoutMin });
+    const pc = promptCtx(ctx, task, st, spec, lastTransient ? lastTransient.message : st.lastError?.message, continuation);
+    const prompt = lastTransient && resumeId
+      ? buildResumePrompt(pc, lastTransient.message)
+      : continuation > 0
+        ? buildContinuePrompt(pc)
+        : buildTaskPrompt(pc);
+    let outcome = await runOneSession(ctx, task, st, provider, spec, prompt, { kind: continuation > 0 && !lastTransient ? 'continue' : resumeId ? 'resume' : 'task', logKind: retryCount > 0 ? 'retry' : 'task', attempt, resumeId, timeoutMin: spec.timeoutMin });
     resumeId = outcome.sessionId ?? resumeId;
     let block: ResultBlock | undefined = parseResultBlock(outcome.result.text) ?? parseResultBlock(outcome.allText);
 
@@ -243,6 +259,20 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     }
 
     if (block && outcome.result.ok) {
+      if (block.status === 'continue') {
+        st.summary = block.summary || 'continuing in a fresh session';
+        saveState(paths, state);
+        if (continuation < maxContinuations) {
+          continuation += 1;
+          if (config.commitPerSession) commitIntermediate(ctx, task, st);
+          log.info(`${task.id}: session reported continue (${continuation}/${maxContinuations}); starting a fresh session for the next slice`);
+          resumeId = undefined;
+          lastTransient = undefined;
+          continue;
+        }
+        final = { status: 'failed', summary: `${block.summary || 'more work remains'} | gave up after ${maxContinuations} continuation sessions (maxContinuations)`, lastError: { category: 'task', message: 'continuation limit reached', transient: false, fatal: false, at: nowIso() } };
+        break;
+      }
       final = { status: block.status, summary: block.summary || block.status };
       if (block.status !== 'done') final.lastError = { category: 'task', message: block.summary || `model reported ${block.status}`, transient: false, fatal: false, at: nowIso() };
       break;
@@ -256,7 +286,8 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       halt = { at: nowIso(), taskId: task.id, category: classified.category, reason: classified.message };
       break;
     }
-    if (classified.transient && attempt < maxAttempts) {
+    if (classified.transient && retryCount < maxAttempts) {
+      retryCount += 1;
       lastTransient = classified;
       st.status = 'failed';
       st.lastError = lastError;
@@ -267,7 +298,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       if (!provider.supportsResume || !outcome.sessionId) resumeId = undefined;
       continue;
     }
-    final = { status: 'failed', summary: classified.transient ? `${summary} (gave up after ${attempt} attempts)` : summary, lastError };
+    final = { status: 'failed', summary: classified.transient ? `${summary} (gave up after ${retryCount} retries)` : summary, lastError };
     break;
   }
 
@@ -328,8 +359,8 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     }
   }
 
-  if (existsSync(paths.stop) && !flags.dryRun) {
-    log.warn(`${paths.stop} present: paused. Remove it and re-run to continue.`);
+  if (stopPresent(paths) && !flags.dryRun) {
+    log.warn(`${relative(paths.root, paths.stop)} present: paused. Remove it and re-run to continue.`);
     return 0;
   }
 
@@ -354,7 +385,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   if (flags.dryRun) {
     if (!first) { log.info('nothing to run'); return 0; }
     const st = state.tasks[first.id] ?? newTaskState(first.title);
-    const prompt = buildTaskPrompt(promptCtx(ctx, first, { ...st, attempts: st.attempts + 1 }, spec, st.lastError?.message));
+    const prompt = buildTaskPrompt(promptCtx(ctx, first, { ...st, attempts: st.attempts + 1 }, spec, st.lastError?.message, 0));
     const cmd = provider.buildCommand({ bin: spec.bin, prompt, promptFile: `${paths.runs}/${first.id}-<stamp>.prompt.md`, taskId: first.id, attempt: st.attempts + 1, kind: 'task', model: spec.model, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd, extraArgs: spec.extraArgs, cwd: paths.root });
     log.plain(`\nprovider: ${spec.providerName} [${spec.sources.provider}] · model: ${spec.model ?? 'provider default'} [${spec.sources.model}] · timeout ${spec.timeoutMin} min · idle ${spec.idleTimeoutMin} min · auto-approve ${spec.autoApprove}`);
     log.plain(`command: ${describeCmd(cmd)}\n`);
@@ -373,8 +404,8 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     let consecutiveFailures = 0;
     for (const task of todo) {
       if (ctx.interrupted) return ctx.signalName === 'SIGTERM' ? 143 : 130;
-      if (existsSync(paths.stop)) {
-        log.warn(`${paths.stop} present: pausing before ${task.id}. Remove it and re-run to continue.`);
+      if (stopPresent(paths)) {
+        log.warn(`${relative(paths.root, paths.stop)} present: pausing before ${task.id}. Remove it and re-run to continue.`);
         return 0;
       }
       const st = state.tasks[task.id];
@@ -389,10 +420,11 @@ export async function runCommand(ctx: RunContext): Promise<number> {
 
       if (out.status === 'done') { consecutiveFailures = 0; continue; }
       if (out.status === 'blocked') {
-        if (!flags.continueOnFailure) {
+        if (!flags.continueOnFailure && config.onBlocked === 'stop') {
           log.error(`stopping at ${task.id} (blocked): the session finished what it could; the human items are in its Hand-off. Re-run to continue past it, \`symphony accept ${task.id} --note ...\` to sign off, or \`symphony run --retry --only ${task.id}\` to redo.`);
           return 2;
         }
+        log.warn(`${task.id}: blocked (human input needed) but onBlocked=${config.onBlocked === 'continue' ? 'continue' : 'continue-on-failure'}; moving on.`);
         continue;
       }
       consecutiveFailures += 1;
@@ -435,13 +467,14 @@ export async function nudgeCommand(ctx: RunContext, rawId: string, note?: string
     saveState(paths, state);
     patchRoadmap(ctx, task.id, 'running');
     log.info(`=== ${task.id} nudge: resuming ${st.sessionId}`);
-    const outcome = await runOneSession(ctx, task, st, provider, spec, buildNudgePrompt(promptCtx(ctx, task, st, spec), note), { kind: 'nudge', logKind: 'nudge', attempt: st.attempts, resumeId: st.sessionId, timeoutMin: Math.min(spec.timeoutMin, config.nudgeTimeoutMin) });
+    const outcome = await runOneSession(ctx, task, st, provider, spec, buildNudgePrompt(promptCtx(ctx, task, st, spec, st.lastError?.message, 0), note), { kind: 'nudge', logKind: 'nudge', attempt: st.attempts, resumeId: st.sessionId, timeoutMin: Math.min(spec.timeoutMin, config.nudgeTimeoutMin) });
     st.nudged = true;
     const block = parseResultBlock(outcome.result.text) ?? parseResultBlock(outcome.allText);
     let final: Final;
     let halt: Halted | undefined;
     if (outcome.interrupted || ctx.interrupted) final = { status: 'failed', summary: 'interrupted', lastError: { category: 'interrupted', message: 'interrupted', transient: true, fatal: false, at: nowIso() } };
-    else if (block && outcome.result.ok) final = { status: block.status, summary: block.summary || block.status };
+    else if (block && outcome.result.ok && block.status === 'continue') final = { status: 'failed', summary: `${block.summary || 'more work remains'} | reported continue; run \`symphony run\` to continue in a fresh session`, lastError: { category: 'task', message: 'reported continue', transient: false, fatal: false, at: nowIso() } };
+    else if (block && outcome.result.ok) final = { status: block.status as TaskStatus, summary: block.summary || block.status };
     else {
       const c = classifyFailure(outcomeEvidence(outcome), config.halt.onCategories);
       final = { status: 'failed', summary: block ? `${block.summary} | ${c.category}: ${c.message}` : `${c.category}: ${c.message} (still no SYMPHONY_RESULT after nudge)`, lastError: mkError(c) };

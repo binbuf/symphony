@@ -1,4 +1,4 @@
-export type ProviderName = 'claude' | 'cursor' | 'opencode' | 'codex' | 'fake';
+export type ProviderName = 'claude' | 'cursor' | 'opencode' | 'codex' | 'gemini' | 'antigravity' | 'fake';
 
 export interface BuildCommandOpts {
   bin: string;
@@ -7,7 +7,7 @@ export interface BuildCommandOpts {
   promptFile: string;
   taskId: string;
   attempt: number;
-  kind: 'task' | 'resume' | 'nudge';
+  kind: 'task' | 'resume' | 'nudge' | 'continue';
   resumeId?: string;
   model?: string;
   autoApprove: boolean;

@@ -1,5 +1,7 @@
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { ClaudeParser } from './claude.js';
 import type { Provider } from './types.js';
 
@@ -24,10 +26,19 @@ export const fakeProvider: Provider = {
     const dir = process.env.SYMPHONY_FAKE_FIXTURES ?? join(o.cwd, '.symphony', 'fixtures');
     const candidates = [`${o.taskId}.${o.kind}.jsonl`, `${o.taskId}.jsonl`, `default.${o.kind}.jsonl`, 'default.jsonl'];
     const fixture = candidates.map((c) => join(dir, c)).find((p) => existsSync(p)) ?? join(dir, candidates[0]);
-    const script = join(import.meta.dirname, 'fake-agent.js');
+    // Prefer the compiled script; fall back to the TypeScript source (via tsx) when running from src.
+    let script = join(import.meta.dirname, 'fake-agent.js');
+    const loader: string[] = [];
+    if (!existsSync(script)) {
+      const ts = join(import.meta.dirname, 'fake-agent.ts');
+      if (existsSync(ts)) {
+        script = ts;
+        try { loader.push('--import', pathToFileURL(createRequire(import.meta.url).resolve('tsx')).href); } catch { /* let it fail loudly */ }
+      }
+    }
     return {
       bin: process.execPath,
-      args: [script, fixture],
+      args: [...loader, script, fixture],
       stdinPayload: o.prompt,
       env: { SYMPHONY_FAKE_TASK: o.taskId, SYMPHONY_FAKE_KIND: o.kind, SYMPHONY_FAKE_RESUME: o.resumeId ?? '' },
     };

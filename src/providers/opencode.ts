@@ -63,7 +63,7 @@ export const opencodeProvider: Provider = {
   supportsBudget: false,
   supportsResume: true,
   buildCommand(o) {
-    const args = ['run', '--format', 'json', '--thinking', '--dir', o.cwd];
+    const args = ['run', '--standalone', '--format', 'json', '--thinking', '--dir', o.cwd];
     if (o.resumeId) args.push('--session', o.resumeId);
     if (o.model) args.push('--model', o.model);
     if (o.autoApprove) args.push('--auto');

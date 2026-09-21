@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve } from 'node:path';
-import type { Paths } from './paths.js';
+import { isAbsolute, join, resolve } from 'node:path';
+import { rel, type Paths } from './paths.js';
 import type { Bullet, Roadmap } from './roadmap.js';
 
 export interface Task {
@@ -47,7 +47,7 @@ export function discoverTasks(paths: Paths, roadmap: Roadmap): { tasks: Task[]; 
       if (!m) continue;
       const n = Number(m[1]);
       const prev = byNum.get(n);
-      if (prev) throw new Error(`.docs/tasks: ${prev} and ${name} both claim task number ${n}. One file per task.`);
+      if (prev) throw new Error(`${rel(paths.root, paths.tasksDir)}: ${prev} and ${name} both claim task number ${n}. One file per task.`);
       byNum.set(n, name);
     }
   }
@@ -68,7 +68,7 @@ export function discoverTasks(paths: Paths, roadmap: Roadmap): { tasks: Task[]; 
       claimed.add(file);
       meta = parseFrontMatter(readFileSync(file, 'utf8')).meta;
     } else {
-      warnings.push(`${b.id}: no task file in .docs/tasks/ (the roadmap bullet will be the whole spec)`);
+      warnings.push(`${b.id}: no task file in ${rel(paths.root, paths.tasksDir)}/ (the roadmap bullet will be the whole spec)`);
     }
     return {
       id: b.id,
@@ -77,14 +77,14 @@ export function discoverTasks(paths: Paths, roadmap: Roadmap): { tasks: Task[]; 
       phase: b.phase,
       order,
       taskFile: file,
-      taskFileRel: file ? relative(paths.root, file) : undefined,
+      taskFileRel: file ? rel(paths.root, file) : undefined,
       meta,
     };
   });
 
   for (const [n, name] of byNum) {
     const p = join(paths.tasksDir, name);
-    if (!claimed.has(p)) warnings.push(`.docs/tasks/${name}: task ${n} has no bullet in ROADMAP.md; it will not run`);
+    if (!claimed.has(p)) warnings.push(`${rel(paths.root, p)}: task ${n} has no bullet in ROADMAP.md; it will not run`);
   }
   return { tasks, warnings };
 }

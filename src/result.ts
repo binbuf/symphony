@@ -1,7 +1,8 @@
-export type ReportedStatus = 'done' | 'blocked' | 'failed';
+export type ReportedStatus = 'done' | 'blocked' | 'failed' | 'continue';
 export interface ResultBlock { status: ReportedStatus; summary: string }
 
 const BLOCK_RE = /SYMPHONY_RESULT\s*([\s\S]*?)\s*END_SYMPHONY_RESULT/g;
+const STATUSES: ReportedStatus[] = ['done', 'blocked', 'failed', 'continue'];
 
 /**
  * Find the SYMPHONY_RESULT block. Models sometimes echo the template from the prompt, so the
@@ -14,8 +15,8 @@ export function parseResultBlock(text: string | undefined): ResultBlock | undefi
     const body = matches[i][1];
     const st = /^\s*status:\s*([A-Za-z]+)\s*$/m.exec(body);
     if (!st) continue;
-    const status = st[1].toLowerCase();
-    if (status !== 'done' && status !== 'blocked' && status !== 'failed') continue;
+    const status = st[1].toLowerCase() as ReportedStatus;
+    if (!STATUSES.includes(status)) continue;
     const sm = /^\s*summary:\s*(.+?)\s*$/m.exec(body);
     return { status, summary: sm ? sm[1] : '' };
   }

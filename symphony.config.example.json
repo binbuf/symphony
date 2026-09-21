@@ -23,8 +23,21 @@
       "model": "",
       "extraArgs": [],
       "idleTimeoutMin": 45
+    },
+    "gemini": {
+      "bin": "gemini",
+      "model": "",
+      "extraArgs": [],
+      "idleTimeoutMin": 45
+    },
+    "antigravity": {
+      "bin": "antigravity",
+      "model": "",
+      "extraArgs": [],
+      "idleTimeoutMin": 45
     }
   },
+  "paths": {},
   "autoApprove": true,
   "nudge": true,
   "timeoutMin": 240,
@@ -32,6 +45,10 @@
   "nudgeTimeoutMin": 45,
   "prepareTimeoutMin": 60,
   "maxProgressBytes": 32768,
+  "designDocs": true,
+  "maxContinuations": 4,
+  "commitPerSession": true,
+  "onBlocked": "stop",
   "retry": {
     "maxAttempts": 3,
     "backoffSec": [

@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
-import type { Paths } from './paths.js';
+import type { PathOverrides, Paths } from './paths.js';
 import type { ProviderName } from './providers/types.js';
 import type { Task } from './tasks.js';
 import { UsageError, fileExists, isRecord } from './util.js';
 
-export const PROVIDER_NAMES: ProviderName[] = ['claude', 'cursor', 'opencode', 'codex', 'fake'];
+export const PROVIDER_NAMES: ProviderName[] = ['claude', 'cursor', 'opencode', 'codex', 'gemini', 'antigravity', 'fake'];
 
 export interface ProviderConfig {
   bin: string;
@@ -17,6 +17,8 @@ export interface ProviderConfig {
 export interface Config {
   provider: ProviderName;
   providers: Record<ProviderName, ProviderConfig>;
+  /** Overrides for every user-facing location (docs, tasks, progress, design, adr, stop, state, runs, log). */
+  paths: PathOverrides;
   autoApprove: boolean;
   nudge: boolean;
   timeoutMin: number;
@@ -24,6 +26,14 @@ export interface Config {
   nudgeTimeoutMin: number;
   prepareTimeoutMin: number;
   maxProgressBytes: number;
+  /** When false, the design/ and adr/ folders are neither required nor used: tasks run standalone. */
+  designDocs: boolean;
+  /** How many extra fresh sessions a task may take when it reports `continue` (subtask iteration). */
+  maxContinuations: number;
+  /** Commit after every session, including intermediate `continue` sessions. */
+  commitPerSession: boolean;
+  /** What to do when a task reports `blocked`: 'stop' for a human, or 'continue' to the next task. */
+  onBlocked: 'stop' | 'continue';
   retry: { maxAttempts: number; backoffSec: number[] };
   halt: { maxConsecutiveFailures: number; maxAttemptsPerTask: number; onCategories: string[] };
   commitMessageTemplate: string;
@@ -45,8 +55,11 @@ export const DEFAULTS: Config = {
     cursor: { bin: 'agent', extraArgs: [], idleTimeoutMin: 45 },
     opencode: { bin: 'opencode', model: 'anthropic/claude-sonnet-4-5', extraArgs: [], idleTimeoutMin: 45 },
     codex: { bin: 'codex', extraArgs: [], idleTimeoutMin: 45 },
+    gemini: { bin: 'gemini', extraArgs: [], idleTimeoutMin: 45 },
+    antigravity: { bin: 'antigravity', extraArgs: [], idleTimeoutMin: 45 },
     fake: { bin: process.execPath, extraArgs: [] },
   },
+  paths: {},
   autoApprove: true,
   nudge: true,
   timeoutMin: 240,
@@ -54,6 +67,10 @@ export const DEFAULTS: Config = {
   nudgeTimeoutMin: 45,
   prepareTimeoutMin: 60,
   maxProgressBytes: 32768,
+  designDocs: true,
+  maxContinuations: 4,
+  commitPerSession: true,
+  onBlocked: 'stop',
   retry: { maxAttempts: 3, backoffSec: [30, 120, 300] },
   halt: {
     maxConsecutiveFailures: 2,
@@ -95,6 +112,22 @@ function stringArray(x: unknown, fallback: string[], where: string, warnings: st
   if (Array.isArray(x) && x.every((v) => typeof v === 'string')) return x as string[];
   warnings.push(`${where}: expected an array of strings; using default`);
   return fallback;
+}
+
+const PATH_KEYS = ['docs', 'roadmap', 'progress', 'tasks', 'design', 'adr', 'stop', 'state', 'runs', 'log'] as const;
+
+function pathOverrides(x: unknown, warnings: string[]): PathOverrides {
+  if (x === undefined || x === null) return {};
+  if (!isRecord(x)) { warnings.push('paths: expected an object; using defaults'); return {}; }
+  const out: PathOverrides = {};
+  for (const k of PATH_KEYS) {
+    const v = x[k];
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string' && v.trim()) out[k] = v.trim();
+    else warnings.push(`paths.${k}: expected a non-empty string; using default`);
+  }
+  for (const k of Object.keys(x)) if (!(PATH_KEYS as readonly string[]).includes(k)) warnings.push(`paths.${k}: unknown key ignored`);
+  return out;
 }
 
 /** Merge defaults ← config file ← CLI flags. Missing file = defaults. */
@@ -139,6 +172,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const config: Config = {
     provider: raw.provider === undefined ? DEFAULTS.provider : asProviderName(raw.provider, 'symphony.config.json provider'),
     providers,
+    paths: pathOverrides(raw.paths, warnings),
     autoApprove: boolOr(raw.autoApprove, DEFAULTS.autoApprove, 'autoApprove', warnings),
     nudge: boolOr(raw.nudge, DEFAULTS.nudge, 'nudge', warnings),
     timeoutMin: numberOr(raw.timeoutMin, DEFAULTS.timeoutMin, 'timeoutMin', warnings),
@@ -146,6 +180,15 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     nudgeTimeoutMin: numberOr(raw.nudgeTimeoutMin, DEFAULTS.nudgeTimeoutMin, 'nudgeTimeoutMin', warnings),
     prepareTimeoutMin: numberOr(raw.prepareTimeoutMin, DEFAULTS.prepareTimeoutMin, 'prepareTimeoutMin', warnings),
     maxProgressBytes: numberOr(raw.maxProgressBytes, DEFAULTS.maxProgressBytes, 'maxProgressBytes', warnings),
+    designDocs: boolOr(raw.designDocs, DEFAULTS.designDocs, 'designDocs', warnings),
+    maxContinuations: Math.max(0, numberOr(raw.maxContinuations, DEFAULTS.maxContinuations, 'maxContinuations', warnings)),
+    commitPerSession: boolOr(raw.commitPerSession, DEFAULTS.commitPerSession, 'commitPerSession', warnings),
+    onBlocked: (() => {
+      if (raw.onBlocked === undefined || raw.onBlocked === null) return DEFAULTS.onBlocked;
+      if (raw.onBlocked === 'stop' || raw.onBlocked === 'continue') return raw.onBlocked;
+      warnings.push(`onBlocked: expected "stop" or "continue", got ${JSON.stringify(raw.onBlocked)}; using ${DEFAULTS.onBlocked}`);
+      return DEFAULTS.onBlocked;
+    })(),
     retry: {
       maxAttempts: Math.max(1, numberOr(retryRaw.maxAttempts, DEFAULTS.retry.maxAttempts, 'retry.maxAttempts', warnings)),
       backoffSec: (() => {

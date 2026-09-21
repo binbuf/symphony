@@ -1,8 +1,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join } from 'node:path';
 import { PROVIDER_NAMES } from './config.js';
 import { gitToplevel } from './git.js';
-import type { Paths } from './paths.js';
+import { rel, type Paths } from './paths.js';
 import { parseRoadmap, type Roadmap } from './roadmap.js';
 import { discoverTasks, parseFrontMatter } from './tasks.js';
 import { squash } from './util.js';
@@ -40,19 +40,20 @@ function listMd(dir: string, depth: number, out: string[], root: string): void {
     const p = join(dir, name);
     let st; try { st = statSync(p); } catch { continue; }
     if (st.isDirectory()) { if (depth > 0 && !SKIP_DIRS.has(name)) listMd(p, depth - 1, out, root); }
-    else if (/\.md$/i.test(name)) out.push(relative(root, p));
+    else if (/\.md$/i.test(name)) out.push(rel(root, p));
   }
 }
 
-/** Planning documents living outside .docs/: root-level *.md with telling names and known planning dirs. */
+/** Planning documents living outside the configured docs dir: root-level *.md with telling names and known planning dirs. */
 export function scanCandidates(paths: Paths): string[] {
   const out: string[] = [];
   if (!existsSync(paths.root)) return out;
+  const docsRel = rel(paths.root, paths.docs);
   for (const name of readdirSync(paths.root).sort()) {
     const p = join(paths.root, name);
     let st; try { st = statSync(p); } catch { continue; }
     if (st.isFile() && CANDIDATE_FILE.test(name)) out.push(name);
-    else if (st.isDirectory() && !SKIP_DIRS.has(name) && CANDIDATE_DIRS.has(name.toLowerCase())) listMd(p, 2, out, paths.root);
+    else if (st.isDirectory() && !SKIP_DIRS.has(name) && name !== docsRel && CANDIDATE_DIRS.has(name.toLowerCase())) listMd(p, 2, out, paths.root);
   }
   return out;
 }
@@ -64,7 +65,7 @@ export function docsTree(paths: Paths): string[] {
     for (const name of readdirSync(dir).sort()) {
       const p = join(dir, name);
       let st; try { st = statSync(p); } catch { continue; }
-      out.push(`${relative(paths.root, p)}${st.isDirectory() ? '/' : ` (${st.size} B)`}`);
+      out.push(`${rel(paths.root, p)}${st.isDirectory() ? '/' : ` (${st.size} B)`}`);
       if (st.isDirectory()) walk(p, depth - 1);
     }
   };
@@ -72,10 +73,19 @@ export function docsTree(paths: Paths): string[] {
   return out;
 }
 
-export function lintDocs(paths: Paths): LintReport {
+export function lintDocs(paths: Paths, opts: { design?: boolean } = {}): LintReport {
+  const design = opts.design !== false;
   const f: Finding[] = [];
   const add = (level: LintLevel, code: string, message: string, path?: string) => f.push({ level, code, message, path });
   const candidates = scanCandidates(paths);
+  const d = {
+    docs: rel(paths.root, paths.docs),
+    roadmap: rel(paths.root, paths.roadmap),
+    progress: rel(paths.root, paths.progress),
+    tasks: rel(paths.root, paths.tasksDir),
+    design: rel(paths.root, paths.designDir),
+    adr: rel(paths.root, paths.adrDir),
+  };
   let roadmap: Roadmap | undefined;
   let taskCount = 0;
 
@@ -85,51 +95,51 @@ export function lintDocs(paths: Paths): LintReport {
 
   if (!existsSync(paths.docs)) {
     add('error', 'docs-missing', candidates.length
-      ? `.docs/ does not exist; planning documents found elsewhere: ${candidates.slice(0, 8).join(', ')}${candidates.length > 8 ? ', …' : ''}`
-      : '.docs/ does not exist and no planning documents were found (write .docs/ROADMAP.md, or use `symphony brief`)');
+      ? `${d.docs}/ does not exist; planning documents found elsewhere: ${candidates.slice(0, 8).join(', ')}${candidates.length > 8 ? ', …' : ''}`
+      : `${d.docs}/ does not exist and no planning documents were found (write ${d.roadmap}, or use \`symphony brief\`)`);
     return { findings: f, candidates, taskCount, ok: false };
   }
 
   for (const name of readdirSync(paths.docs)) {
     const lower = name.toLowerCase();
-    if (lower === 'roadmap.md' && name !== 'ROADMAP.md') add('error', 'roadmap-case', `found .docs/${name}; the harness reads .docs/ROADMAP.md (exact case)`, `.docs/${name}`);
-    if (lower === 'progress.md' && name !== 'PROGRESS.md') add('warn', 'progress-case', `found .docs/${name}; the harness writes .docs/PROGRESS.md (exact case)`, `.docs/${name}`);
-    if (lower === 'adr' || lower === 'adrs' || lower === 'decisions') add('error', 'adr-location', `.docs/${name}/ should be .docs/design/adr/`, `.docs/${name}`);
-    if (lower === 'tasks.md' || lower === 'todo.md' || lower === 'plan.md') add('error', 'docs-stray', `.docs/${name}: tasks must be bullets in ROADMAP.md with one file each under .docs/tasks/`, `.docs/${name}`);
+    if (lower === 'roadmap.md' && name !== 'ROADMAP.md') add('error', 'roadmap-case', `found ${d.docs}/${name}; the harness reads ${d.roadmap} (exact case)`, `${d.docs}/${name}`);
+    if (lower === 'progress.md' && name !== 'PROGRESS.md') add('warn', 'progress-case', `found ${d.docs}/${name}; the harness writes ${d.progress} (exact case)`, `${d.docs}/${name}`);
+    if (design && (lower === 'adr' || lower === 'adrs' || lower === 'decisions')) add('error', 'adr-location', `${d.docs}/${name}/ should be ${d.adr}/`, `${d.docs}/${name}`);
+    if (lower === 'tasks.md' || lower === 'todo.md' || lower === 'plan.md') add('error', 'docs-stray', `${d.docs}/${name}: tasks must be bullets in ${d.roadmap} with one file each under ${d.tasks}/`, `${d.docs}/${name}`);
   }
 
   if (!existsSync(paths.roadmap)) {
-    add('error', 'roadmap-missing', candidates.length ? `.docs/ROADMAP.md is missing; convert from: ${candidates.slice(0, 8).join(', ')}` : '.docs/ROADMAP.md is missing (write one, or use `symphony brief`)', '.docs/ROADMAP.md');
+    add('error', 'roadmap-missing', candidates.length ? `${d.roadmap} is missing; convert from: ${candidates.slice(0, 8).join(', ')}` : `${d.roadmap} is missing (write one, or use \`symphony brief\`)`, d.roadmap);
   } else {
     const text = readFileSync(paths.roadmap, 'utf8');
-    try { roadmap = parseRoadmap(text); } catch (e) { add('error', 'roadmap-parse', (e as Error).message, '.docs/ROADMAP.md'); }
+    try { roadmap = parseRoadmap(text); } catch (e) { add('error', 'roadmap-parse', (e as Error).message, d.roadmap); }
     if (roadmap) {
       taskCount = roadmap.bullets.length;
-      if (taskCount === 0) add('error', 'roadmap-empty', 'ROADMAP.md has no task bullets of the form "- [ ] T01 — Title"', '.docs/ROADMAP.md');
+      if (taskCount === 0) add('error', 'roadmap-empty', 'ROADMAP.md has no task bullets of the form "- [ ] T01 — Title"', d.roadmap);
       const parsed = new Set(roadmap.bullets.map((b) => b.lineIndex));
       let inFence = false;
       roadmap.lines.forEach((line, i) => {
         if (FENCE_RE.test(line)) { inFence = !inFence; return; }
         if (inFence || parsed.has(i)) return;
-        if (TASKISH_HEADING.test(line)) add('error', 'roadmap-unparsed', `line ${i + 1} looks like a task written as a heading; tasks must be top-level bullets: ${squash(line, 80)}`, '.docs/ROADMAP.md');
+        if (TASKISH_HEADING.test(line)) add('error', 'roadmap-unparsed', `line ${i + 1} looks like a task written as a heading; tasks must be top-level bullets: ${squash(line, 80)}`, d.roadmap);
         else if (TASKISH_LINE.test(line)) {
           const nested = /^\s+/.test(line);
-          add('error', 'roadmap-unparsed', `line ${i + 1} looks like a task but does not parse${nested ? ' (nested bullets are ignored; make it top-level)' : ' (expected "- [ ] T01 — Title")'}: ${squash(line, 80)}`, '.docs/ROADMAP.md');
+          add('error', 'roadmap-unparsed', `line ${i + 1} looks like a task but does not parse${nested ? ' (nested bullets are ignored; make it top-level)' : ' (expected "- [ ] T01 — Title")'}: ${squash(line, 80)}`, d.roadmap);
         }
       });
       for (let i = 1; i < roadmap.bullets.length; i++) {
         if (roadmap.bullets[i].num <= roadmap.bullets[i - 1].num) {
-          add('warn', 'roadmap-order', `task ids are not ascending in file order (${roadmap.bullets[i - 1].id} then ${roadmap.bullets[i].id}); execution follows file order, so renumber to avoid confusion`, '.docs/ROADMAP.md');
+          add('warn', 'roadmap-order', `task ids are not ascending in file order (${roadmap.bullets[i - 1].id} then ${roadmap.bullets[i].id}); execution follows file order, so renumber to avoid confusion`, d.roadmap);
           break;
         }
       }
-      if (taskCount > 0 && roadmap.bullets.every((b) => b.phase === '(no phase)')) add('info', 'roadmap-phases', 'no "## Phase" headings; every task will show phase "(no phase)"', '.docs/ROADMAP.md');
+      if (taskCount > 0 && roadmap.bullets.every((b) => b.phase === '(no phase)')) add('info', 'roadmap-phases', 'no "## Phase" headings; every task will show phase "(no phase)"', d.roadmap);
       if (taskCount > 0 && roadmap.bullets.every((b) => b.check === 'x')) add('info', 'roadmap-all-done', 'every task is already marked [x]; nothing would run');
 
       try {
         const { tasks, warnings } = discoverTasks(paths, roadmap);
         for (const w of warnings) {
-          if (/linked task file .* not found/.test(w)) add('error', 'task-link-broken', w, '.docs/ROADMAP.md');
+          if (/linked task file .* not found/.test(w)) add('error', 'task-link-broken', w, d.roadmap);
           else if (/no task file/.test(w)) add('warn', 'task-file-missing', w);
           else if (/has no bullet/.test(w)) add('warn', 'task-orphan', w);
           else add('warn', 'tasks', w);
@@ -143,7 +153,7 @@ export function lintDocs(paths: Paths): LintReport {
           if (meta.provider && !(PROVIDER_NAMES as string[]).includes(meta.provider)) add('error', 'task-frontmatter', `${t.taskFileRel}: front matter provider "${meta.provider}" is not one of ${PROVIDER_NAMES.join(', ')}`, t.taskFileRel);
         }
       } catch (e) {
-        add('error', 'tasks-dir', (e as Error).message, '.docs/tasks');
+        add('error', 'tasks-dir', (e as Error).message, d.tasks);
       }
     }
   }
@@ -151,15 +161,17 @@ export function lintDocs(paths: Paths): LintReport {
   if (existsSync(paths.tasksDir)) {
     for (const name of readdirSync(paths.tasksDir)) {
       if (!/\.md$/i.test(name) || TASK_FILE_RE.test(name) || /^(template|readme)\.md$/i.test(name)) continue;
-      add('warn', 'task-filename', `.docs/tasks/${name} does not follow NN-slug.md and will not be matched to a task`, `.docs/tasks/${name}`);
+      add('warn', 'task-filename', `${d.tasks}/${name} does not follow NN-slug.md and will not be matched to a task`, `${d.tasks}/${name}`);
     }
-  } else add('warn', 'tasks-dir-missing', '.docs/tasks/ does not exist; every task should have a detail file there');
+  } else add('warn', 'tasks-dir-missing', `${d.tasks}/ does not exist; every task should have a detail file there`);
 
-  if (!existsSync(paths.designDir)) add('warn', 'design-missing', '.docs/design/ does not exist; architecture docs live there');
-  else if (!readdirSync(paths.designDir).some((n) => /\.md$/i.test(n))) add('info', 'design-empty', '.docs/design/ has no architecture docs yet');
-  if (!existsSync(paths.adrDir)) add('info', 'adr-missing', '.docs/design/adr/ does not exist; it is created on init/prepare');
-  if (!existsSync(paths.progress)) add('info', 'progress-missing', '.docs/PROGRESS.md does not exist; it is created on the first run');
-  if (candidates.length) add('info', 'candidates', `planning documents outside .docs/: ${candidates.slice(0, 10).join(', ')}${candidates.length > 10 ? `, … (${candidates.length})` : ''}`);
+  if (design) {
+    if (!existsSync(paths.designDir)) add('warn', 'design-missing', `${d.design}/ does not exist; architecture docs live there`);
+    else if (!readdirSync(paths.designDir).some((n) => /\.md$/i.test(n))) add('info', 'design-empty', `${d.design}/ has no architecture docs yet`);
+    if (!existsSync(paths.adrDir)) add('info', 'adr-missing', `${d.adr}/ does not exist; it is created on init/prepare`);
+  }
+  if (!existsSync(paths.progress)) add('info', 'progress-missing', `${d.progress} does not exist; it is created on the first run`);
+  if (candidates.length) add('info', 'candidates', `planning documents outside ${d.docs}/: ${candidates.slice(0, 10).join(', ')}${candidates.length > 10 ? `, … (${candidates.length})` : ''}`);
 
   return { findings: f, candidates, roadmap, taskCount, ok: !f.some((x) => x.level === 'error') };
 }

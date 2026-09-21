@@ -29,3 +29,7 @@ test('missing or malformed block → undefined', () => {
 test('blocked with empty summary', () => {
   assert.deepEqual(parseResultBlock('SYMPHONY_RESULT\nstatus: blocked\nEND_SYMPHONY_RESULT'), { status: 'blocked', summary: '' });
 });
+
+test('continue is a valid reported status', () => {
+  assert.deepEqual(parseResultBlock('SYMPHONY_RESULT\nstatus: continue\nsummary: half done\nEND_SYMPHONY_RESULT'), { status: 'continue', summary: 'half done' });
+});

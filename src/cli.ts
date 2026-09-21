@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { acceptCommand, briefCommand, clearHaltCommand, initCommand, statusCommand } from './commands.js';
-import { loadConfig, resolveSession, type CliOverrides } from './config.js';
+import { DEFAULTS, loadConfig, resolveSession, type CliOverrides } from './config.js';
 import { formatChecks, runDoctor } from './doctor.js';
 import { formatLint, lintDocs } from './lint.js';
 import { prepareCommand } from './prepare.js';
@@ -15,7 +15,7 @@ import { discoverTasks, type Task } from './tasks.js';
 import { UsageError, fileExists } from './util.js';
 import { readFileSync } from 'node:fs';
 
-const HELP = `symphony — run an LLM coding agent through .docs/ROADMAP.md, one fresh session per task
+const HELP = `symphony — run an LLM coding agent through your roadmap, one fresh session per task
 
 Usage
   symphony run     [--prepare] [--provider P] [--model M] [--from T03] [--to T10] [--only T05,T06] [--retry]
@@ -23,20 +23,23 @@ Usage
                    [--budget USD] [--clear-halt]
   symphony status  [--json]              progress table (or JSON)
   symphony doctor                        preflight: binaries, auth, git, roadmap, halt/STOP/lock
-  symphony lint                          check the project root and .docs/ against the expected layout (no LLM)
-  symphony prepare [--dry-run]           lint, then let the configured agent convert/repair .docs/ and commit
-  symphony init                          scaffold .docs/ (ROADMAP, PROGRESS, tasks/, design/, adr/) + config + .gitignore
+  symphony lint                          check the project root and docs/ against the expected layout (no LLM)
+  symphony prepare [--dry-run]           lint, then let the configured agent convert/repair the docs and commit
+  symphony init                          scaffold the docs/ package (ROADMAP, PROGRESS, tasks/, design/, adr/) + config + .gitignore
   symphony accept  T05 [--note "..."]    human sign-off on a blocked/failed task (counts as done)
   symphony nudge   T05 [--note "..."]    resume a task's last session and ask it to close out
   symphony clear-halt                    lift a halt so run can start again
-  symphony brief                         print a paste-ready prompt that makes any LLM client emit .docs/ in this format
+  symphony brief                         print a paste-ready prompt that makes any LLM client emit the docs package in this format
 
-Providers: claude (Claude Code) · cursor (Cursor agent) · opencode · codex (Codex CLI) · fake (fixture replay)
+Providers: claude (Claude Code) · cursor (Cursor agent) · opencode · codex (Codex CLI) · gemini (Gemini CLI) · antigravity (Google Antigravity) · fake (fixture replay)
 Provider/model precedence: --provider/--model > SYMPHONY_PROVIDER/SYMPHONY_MODEL > task front matter
 > .symphony/symphony.config.json > defaults. All providers run with permissions bypassed unless --safe.
+Every location (docs, tasks, progress, design, adr, stop, state, runs, log) is overridable via the
+"paths" section of .symphony/symphony.config.json.
 
 Controls
-  touch .symphony/STOP     pause at the next task boundary (nothing is killed)
+  touch .stop              pause at the next task boundary (nothing is killed); configurable via paths.stop
+  touch .symphony/STOP     legacy alias for the above
   Ctrl-C                   stop the current session, record it as unfinished, exit 130
 
 Exit codes: 0 ok/paused · 1 unexpected error · 2 stopped on a blocked/failed task · 3 halted · 4 usage/preflight · 130/143 interrupted
@@ -93,8 +96,6 @@ export async function main(argv: string[]): Promise<number> {
   const cmd = positionals[0] ?? (v.help ? 'help' : 'help');
   if (v.help || cmd === 'help') { process.stdout.write(HELP); return 0; }
 
-  const paths = resolvePaths(v.root);
-  const log = createLogger(cmd === 'init' || cmd === 'brief' ? undefined : paths.log);
   const cli: CliOverrides = {
     provider: v.provider,
     model: v.model,
@@ -106,14 +107,25 @@ export async function main(argv: string[]): Promise<number> {
   if (cli.timeoutMin !== undefined && !(cli.timeoutMin > 0)) throw new UsageError('--timeout-min must be a positive number');
   if (cli.budgetUsd !== undefined && !(cli.budgetUsd > 0)) throw new UsageError('--budget must be a positive number');
 
-  if (cmd === 'init') return initCommand(paths, log);
-  if (cmd === 'brief') return briefCommand(log);
+  if (cmd === 'init' || cmd === 'brief') {
+    const base = resolvePaths(v.root);
+    let cfg = DEFAULTS;
+    try { cfg = loadConfig(base, cli).config; } catch { /* scaffolding can proceed with defaults */ }
+    const paths = resolvePaths(v.root, cfg.paths);
+    const log = createLogger(undefined);
+    return cmd === 'init' ? initCommand(paths, log, { design: cfg.designDocs }) : briefCommand(paths, log, { design: cfg.designDocs });
+  }
 
-  const { config, warnings: cfgWarnings, fileExists: cfgExists } = loadConfig(paths, cli);
+  // Config may relocate the docs/tasks/progress/design/stop folders, so read it from the fixed
+  // .symphony/ location first, then resolve the effective paths.
+  const base = resolvePaths(v.root);
+  const { config, warnings: cfgWarnings, fileExists: cfgExists } = loadConfig(base, cli);
+  const paths = resolvePaths(v.root, config.paths);
+  const log = createLogger(paths.log);
   cfgWarnings.forEach((w) => log.warn(w));
   if (!cfgExists && cmd !== 'doctor') log.info(`no ${paths.config}; using defaults`);
   if (cmd === 'lint') {
-    const report = lintDocs(paths);
+    const report = lintDocs(paths, { design: config.designDocs });
     formatLint(report).forEach((l) => log.plain(l));
     return report.ok ? 0 : 2;
   }

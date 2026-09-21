@@ -40,7 +40,7 @@ test('missing .docs with planning docs elsewhere → docs-missing error + candid
   mkdirSync(join(dir, 'docs', 'adr'), { recursive: true });
   writeFileSync(join(dir, 'docs', 'architecture.md'), '# arch\n');
   writeFileSync(join(dir, 'docs', 'adr', '001-db.md'), '# adr\n');
-  const paths = resolvePaths(dir);
+  const paths = resolvePaths(dir, { docs: '.docs' });
   assert.deepEqual(scanCandidates(paths), ['PLAN.md', 'ROADMAP.md', 'docs/adr/001-db.md', 'docs/architecture.md']);
   const r = lintDocs(paths);
   assert.equal(r.ok, false);
@@ -66,7 +66,7 @@ test('malformed .docs: wrong case, misplaced adr, task-like lines that do not pa
     '',
   ].join('\n'));
   writeFileSync(join(paths.tasksDir, 'task-one.md'), '# no prefix\n');
-  writeFileSync(join(paths.tasksDir, '03-three.md'), '---\nprovider: gemini\n---\n# T03\n## Goal\n## Scope\n## Done when\n## Hand-off\n');
+  writeFileSync(join(paths.tasksDir, '03-three.md'), '---\nprovider: not-a-provider\n---\n# T03\n## Goal\n## Scope\n## Done when\n## Hand-off\n');
   const r = lintDocs(paths);
   assert.equal(r.ok, false);
   const errs = codes(r, 'error');
@@ -88,4 +88,20 @@ test('empty roadmap and duplicate ids are errors', () => {
   assert.ok(codes(lintDocs(paths), 'error').includes('roadmap-empty'));
   writeFileSync(paths.roadmap, '- [ ] T01 — a\n- [ ] 1 — b\n');
   assert.ok(codes(lintDocs(paths), 'error').includes('roadmap-parse'));
+});
+
+test('designDocs: false drops design/adr requirements and lints clean without a design folder', () => {
+  const dir = repo();
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.tasksDir, { recursive: true });
+  writeFileSync(paths.roadmap, '# R\n\n## Phase 1 — A\n\n- [ ] T01 — First → [tasks/01-first.md](tasks/01-first.md)\n');
+  writeFileSync(join(paths.tasksDir, '01-first.md'), '# T01 — First\n\n## Goal\nx\n\n## Scope\n- [ ] a\n\n## Done when\n- [ ] b\n\n## Hand-off\n_(tbd)_\n');
+  writeFileSync(paths.progress, '# Progress notes\n');
+  const on = lintDocs(paths);
+  assert.ok(codes(on).includes('design-missing'));
+  assert.ok(codes(on).includes('adr-missing'));
+  const off = lintDocs(paths, { design: false });
+  assert.ok(!codes(off).includes('design-missing'));
+  assert.ok(!codes(off).includes('adr-missing'));
+  assert.equal(off.ok, true, JSON.stringify(off.findings));
 });
