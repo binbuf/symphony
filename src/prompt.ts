@@ -84,6 +84,7 @@ function docPaths(paths: Paths) {
     tasks: rel(paths.root, paths.tasksDir),
     design: rel(paths.root, paths.designDir),
     adr: rel(paths.root, paths.adrDir),
+    logs: rel(paths.root, paths.logsDir),
   };
 }
 
@@ -139,6 +140,7 @@ Attempt: ${ctx.attempt} · continuation: ${ctx.continuation} · provider: ${ctx.
 ## The planning contract
 - ${d.roadmap} is the ordered task list. Read it for context on neighbouring tasks. Do not edit the [ ]/[~]/[x] marker or the trailing "⟵" tag on any bullet; the harness owns those. Follow-up work you discover goes into ${d.progress} under "## Follow-ups", not into the roadmap.
 - ${d.progress} is the shared notebook for the whole run; its current content is inlined below. Before you finish, append a section "## ${task.id} — ${task.title}" with what later tasks need to know: real paths, commands that work, contract deviations, gotchas. Facts, not narrative. Never delete other sections. If a later session will need to continue this task, say exactly what remains.
+- ${d.logs}/TNN.md is the harness's per-task run log (status, timing and what each session reported). Read it for history if useful, but never create or edit files there; the harness regenerates them.
 ${designBullets}- The task file's "## Hand-off" section (create it if missing) is where you report what landed, what deviated from the plan and why, and what the next task must know. Replace any placeholder text.
 ${noTaskFileNote}${designPresent}Progress so far: done [${ids(ctx, (s) => (DONE_STATES as string[]).includes(s))}] · blocked/failed [${ids(ctx, (s) => s === 'blocked' || s === 'failed')}]
 

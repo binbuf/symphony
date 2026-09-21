@@ -7,7 +7,19 @@ export type TaskStatus = 'pending' | 'running' | 'done' | 'blocked' | 'failed' |
 export const DONE_STATES: TaskStatus[] = ['done', 'accepted'];
 export const SKIP_STATES: TaskStatus[] = ['done', 'accepted', 'blocked'];
 
-export interface LogRef { kind: 'task' | 'retry' | 'nudge'; jsonl: string; log: string; prompt: string }
+export interface LogRef {
+  kind: 'task' | 'retry' | 'nudge';
+  jsonl: string;
+  log: string;
+  prompt: string;
+  /** Reported result status for this session (done/continue/blocked/failed) or the failure category. */
+  status?: string;
+  /** One-line high-level summary the session reported. */
+  summary?: string;
+  started?: string;
+  durationS?: number;
+  costUsd?: number;
+}
 
 export interface LastError { category: string; message: string; transient: boolean; fatal: boolean; at: string }
 

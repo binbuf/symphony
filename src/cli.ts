@@ -34,7 +34,7 @@ Usage
 Providers: claude (Claude Code) · cursor (Cursor agent) · opencode · codex (Codex CLI) · gemini (Gemini CLI) · antigravity (Google Antigravity) · fake (fixture replay)
 Provider/model precedence: --provider/--model > SYMPHONY_PROVIDER/SYMPHONY_MODEL > task front matter
 > .symphony/symphony.config.json > defaults. All providers run with permissions bypassed unless --safe.
-Every location (docs, tasks, progress, design, adr, stop, state, runs, log) is overridable via the
+Every location (docs, tasks, progress, design, adr, logs, stop, state, runs, log) is overridable via the
 "paths" section of .symphony/symphony.config.json.
 
 Controls

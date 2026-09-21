@@ -17,7 +17,7 @@ export interface ProviderConfig {
 export interface Config {
   provider: ProviderName;
   providers: Record<ProviderName, ProviderConfig>;
-  /** Overrides for every user-facing location (docs, tasks, progress, design, adr, stop, state, runs, log). */
+  /** Overrides for every user-facing location (docs, tasks, progress, design, adr, logs, stop, state, runs, log). */
   paths: PathOverrides;
   autoApprove: boolean;
   nudge: boolean;
@@ -114,7 +114,7 @@ function stringArray(x: unknown, fallback: string[], where: string, warnings: st
   return fallback;
 }
 
-const PATH_KEYS = ['docs', 'roadmap', 'progress', 'tasks', 'design', 'adr', 'stop', 'state', 'runs', 'log'] as const;
+const PATH_KEYS = ['docs', 'roadmap', 'progress', 'tasks', 'design', 'adr', 'logs', 'stop', 'state', 'runs', 'log'] as const;
 
 function pathOverrides(x: unknown, warnings: string[]): PathOverrides {
   if (x === undefined || x === null) return {};

@@ -157,3 +157,29 @@ export function patchRoadmapFile(path: string, id: string, status: RoadmapStatus
   atomicWriteSync(path, rm.lines.join(rm.eol));
   return 'patched';
 }
+
+export const STATUS_START = '<!-- symphony:status -->';
+export const STATUS_END = '<!-- /symphony:status -->';
+
+/**
+ * Insert or replace the harness-owned pipeline status block delimited by the STATUS_START/STATUS_END
+ * comments. Task bullets and every other byte are left alone.
+ */
+export function patchRoadmapStatus(path: string, block: string): void {
+  const text = readFileSync(path, 'utf8');
+  const rm = parseRoadmap(text);
+  const lines = rm.lines.slice();
+  const body = block.replace(/\r\n/g, '\n').replace(/\s+$/, '').split('\n');
+  let start = lines.findIndex((l) => l.trim() === STATUS_START);
+  let end = lines.findIndex((l) => l.trim() === STATUS_END);
+  if (start !== -1 && end !== -1 && end > start) {
+    lines.splice(start, end - start + 1, STATUS_START, ...body, STATUS_END);
+  } else {
+    if (start !== -1) lines.splice(start, 1);
+    end = lines.findIndex((l) => l.trim() === STATUS_END);
+    if (end !== -1) lines.splice(end, 1);
+    while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
+    lines.push('', STATUS_START, ...body, STATUS_END, '');
+  }
+  atomicWriteSync(path, lines.join(rm.eol));
+}

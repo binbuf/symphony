@@ -10,6 +10,8 @@ export interface PathOverrides {
   tasks?: string;
   design?: string;
   adr?: string;
+  /** Per-task run logs (`TNN.md`). Default `docs/logs/`. */
+  logs?: string;
   /** Graceful-pause sentinel. Default `.stop` in the project root. */
   stop?: string;
   state?: string;
@@ -25,6 +27,8 @@ export interface Paths {
   tasksDir: string;
   designDir: string;
   adrDir: string;
+  /** Per-task run logs (`TNN.md`), pipeline progress snapshots written after each task. */
+  logsDir: string;
   symphony: string;
   state: string;
   runs: string;
@@ -83,6 +87,7 @@ export function resolvePaths(rootOverride?: string, overrides: PathOverrides = {
     tasksDir,
     designDir,
     adrDir: abs(root, overrides.adr ?? join(designDir, 'adr')),
+    logsDir: abs(root, overrides.logs ?? join(docs, 'logs')),
     symphony,
     state: abs(root, overrides.state ?? join(symphony, 'state.json')),
     runs: abs(root, overrides.runs ?? join(symphony, 'runs')),

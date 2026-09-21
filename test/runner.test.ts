@@ -58,6 +58,18 @@ test('a task that reports continue is re-run in a fresh session until done, comm
     assert.ok(readFileSync(join(dir, 'part1.txt'), 'utf8').includes('part 1'));
     assert.ok(readFileSync(join(dir, 'part2.txt'), 'utf8').includes('part 2'));
     assert.match(readFileSync(paths.roadmap, 'utf8'), /\[x\] T01/);
+    // Per-task run log captures each session's reported status + summary.
+    const taskLog = readFileSync(join(paths.logsDir, 'T01.md'), 'utf8');
+    assert.match(taskLog, /# T01 — Do the thing/);
+    assert.match(taskLog, /Status: done/);
+    assert.match(taskLog, /summary: first half done/);
+    assert.match(taskLog, /summary: all done/);
+    // ROADMAP.md carries the pipeline status block at the end.
+    const roadmapText = readFileSync(paths.roadmap, 'utf8');
+    assert.match(roadmapText, /<!-- symphony:status -->/);
+    assert.match(roadmapText, /1\/1 done/);
+    assert.match(roadmapText, /- Completed: T01/);
+    assert.match(roadmapText, /- Remaining: none/);
     const log = execFileSync('git', ['-C', dir, 'log', '--oneline'], { encoding: 'utf8' });
     assert.match(log, /T01: Do the thing \[continue\]/);
     assert.match(log, /T01: Do the thing \[done\]/);

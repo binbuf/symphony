@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULTS, type Config } from './config.js';
-import { ADR_TEMPLATE, DESIGN_README, ROADMAP_TEMPLATE, TASK_TEMPLATE, docsContract } from './contract.js';
+import { ADR_TEMPLATE, DESIGN_README, LOGS_README, ROADMAP_TEMPLATE, TASK_TEMPLATE, docsContract } from './contract.js';
 import { ensureGitignore } from './git.js';
 import type { Logger } from './logger.js';
 import { rel, stopIgnoreEntry, stopPresent, type Paths } from './paths.js';
@@ -26,6 +26,8 @@ export function scaffoldDocs(paths: Paths, opts: { roadmap: boolean; config: boo
   if (opts.roadmap) writeIfMissing(paths.roadmap, ROADMAP_TEMPLATE, created);
   writeIfMissing(paths.progress, PROGRESS_HEADER, created);
   writeIfMissing(join(paths.tasksDir, 'TEMPLATE.md'), TASK_TEMPLATE, created);
+  ensureDir(paths.logsDir);
+  writeIfMissing(join(paths.logsDir, 'README.md'), LOGS_README, created);
   if (opts.design !== false) {
     ensureDir(paths.adrDir);
     writeIfMissing(join(paths.designDir, 'README.md'), DESIGN_README, created);

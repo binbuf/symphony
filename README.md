@@ -69,6 +69,8 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 docs/
   ROADMAP.md            phases as "##" headings; one top-level bullet per task, in execution order
   PROGRESS.md           the agent's shared notebook (learnings for later tasks); created if missing
+  logs/TNN.md           the harness's per-task run log: status, provider/model, timing, cost and each
+                        session's reported status + summary; regenerated after every task
   tasks/NN-slug.md      one detail file per task: Goal / Context / Scope / Out of scope / Design notes / Done when / Hand-off
   tasks/TEMPLATE.md     the template `init` writes
   design/*.md           architecture docs the agent reads before coding and updates when behaviour changes
@@ -96,6 +98,11 @@ model: gemini-2.5-pro
 timeoutMin: 90
 ---
 ```
+
+At the end of every task the harness also rewrites a **pipeline status block** at the bottom of `ROADMAP.md`
+(between `<!-- symphony:status -->` and `<!-- /symphony:status -->`): what is done, blocked, failed and left,
+plus the last finished task and any halt. It is the one place to see the pipeline's high-level state at a
+glance. Do not edit that block by hand; everything outside the markers stays yours.
 
 **Starting from an idea?** `symphony brief` prints a prompt. Give any LLM your idea plus that text; it emits
 the docs package in this format, and you drop the files into the project next to `.symphony/`.
@@ -209,7 +216,7 @@ override it per run (see **Providers** for the precedence order).
 | `provider` | `claude` | `claude` · `cursor` · `opencode` · `codex` · `gemini` · `antigravity` |
 | `providers.<name>.bin` `.model` `.extraArgs` `.budgetUsd` `.idleTimeoutMin` | see `symphony.config.example.json` | binary, model, extra CLI args, per-task budget (Claude), stall timeout override |
 | `paths.docs` | `docs` (legacy `.docs` honoured) | planning package directory |
-| `paths.roadmap` `.progress` `.tasks` `.design` `.adr` | derived from `paths.docs` | individual overrides, absolute or root-relative |
+| `paths.roadmap` `.progress` `.tasks` `.design` `.adr` `.logs` | derived from `paths.docs` | individual overrides, absolute or root-relative |
 | `paths.stop` | `.stop` | graceful-pause sentinel (absolute or root-relative) |
 | `paths.state` `.runs` `.log` | under `.symphony/` | where harness state, session logs and the event log live |
 | `autoApprove` | `true` | bypass permission prompts (`--safe` sets false for one run) |
@@ -237,6 +244,7 @@ create, require, lint or prompt for `design/` or `adr/`, and no ADR/design-updat
 ## Logs and state
 
 ```
+docs/logs/T05.md                               per-task run log: status, provider/model, timing, cost and each session's summary
 .symphony/runs/T05-20260917T231530.jsonl       raw provider NDJSON, byte-faithful
 .symphony/runs/T05-20260917T231530.log         rendered [think]/[text]/[tool] stream, longer lines than stdout
 .symphony/runs/T05-20260917T231530.prompt.md   the exact prompt sent
@@ -245,6 +253,8 @@ create, require, lint or prompt for `design/` or `adr/`, and no ADR/design-updat
 .symphony/state.json                           per-task state and the halt flag; delete it and progress is rebuilt from the roadmap markers
 ```
 
+Every task gets a `docs/logs/TNN.md` (path overridable with `paths.logs`). It is rewritten in full after each
+session and committed with the task, so `git log` plus the logs give a per-task and pipeline-wide history.
 Retries append `-r2`, nudges `-nudge`, continuation sessions `-rN` too. `paths.state`/`.runs`/`.log` move these.
 
 ## Platform support

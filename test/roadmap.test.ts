@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { canonicalId, parseRoadmap, patchRoadmapFile, renderBulletLine, statusFromMarkers } from '../src/roadmap.js';
+import { canonicalId, parseRoadmap, patchRoadmapFile, patchRoadmapStatus, renderBulletLine, statusFromMarkers } from '../src/roadmap.js';
 
 const SAMPLE = `# Roadmap
 
@@ -97,4 +97,21 @@ test('patchRoadmapFile rewrites one line and preserves every other byte, CRLF an
   writeFileSync(path, '- [ ] T01 — A');
   patchRoadmapFile(path, 'T01', 'failed');
   assert.equal(readFileSync(path, 'utf8'), '- [~] T01 — A ⟵ failed');
+});
+
+test('patchRoadmapStatus inserts and replaces the managed block without touching task bullets', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-roadmap-'));
+  const path = join(dir, 'ROADMAP.md');
+  writeFileSync(path, '# Roadmap\n\n## Phase 1\n\n- [ ] T01 — A\n- [ ] T02 — B\n');
+  patchRoadmapStatus(path, '**status** 1/2 done\n- Remaining: T02');
+  let text = readFileSync(path, 'utf8');
+  assert.match(text, /<!-- symphony:status -->\n\*\*status\*\* 1\/2 done\n- Remaining: T02\n<!-- \/symphony:status -->/);
+  assert.ok(text.endsWith('\n'));
+  assert.equal(parseRoadmap(text).bullets.length, 2); // status lines are not parsed as tasks
+
+  patchRoadmapStatus(path, '**status** 2/2 done');
+  text = readFileSync(path, 'utf8');
+  assert.equal((text.match(/<!-- symphony:status -->/g) ?? []).length, 1);
+  assert.match(text, /\*\*status\*\* 2\/2 done/);
+  assert.doesNotMatch(text, /1\/2 done/);
 });

@@ -5,6 +5,7 @@ import { resolveSession, type CliOverrides, type Config, type SessionSpec } from
 import { formatChecks, runDoctor } from './doctor.js';
 import { commitAll, describeCommit } from './git.js';
 import { createLogger, openRunSinks, type Logger } from './logger.js';
+import { writeTaskLog } from './logs.js';
 import { stopPresent, type Paths } from './paths.js';
 import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, type PromptCtx } from './prompt.js';
 import { getProvider } from './providers/index.js';
@@ -12,7 +13,8 @@ import type { Provider, SpawnSpec } from './providers/types.js';
 import { parseResultBlock, type ResultBlock } from './result.js';
 import { canonicalId, patchRoadmapFile, type Roadmap } from './roadmap.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
-import { DONE_STATES, SKIP_STATES, acquireLock, newTaskState, releaseLock, saveState, type Halted, type LastError, type State, type TaskState, type TaskStatus } from './state.js';
+import { updatePipelineStatus } from './status.js';
+import { DONE_STATES, SKIP_STATES, acquireLock, newTaskState, releaseLock, saveState, type Halted, type LastError, type LogRef, type State, type TaskState, type TaskStatus } from './state.js';
 import type { Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, stamp } from './util.js';
 
@@ -116,7 +118,8 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
   const sinks = openRunSinks(paths.runs, `${task.id}-${stamp()}${suffix}`);
   writeFileSync(sinks.promptPath, prompt);
   const rel = (p: string) => relative(paths.root, p);
-  st.logs.push({ kind: r.logKind, jsonl: rel(sinks.jsonlPath), log: rel(sinks.logPath), prompt: rel(sinks.promptPath) });
+  const entry: LogRef = { kind: r.logKind, jsonl: rel(sinks.jsonlPath), log: rel(sinks.logPath), prompt: rel(sinks.promptPath), started: nowIso() };
+  st.logs.push(entry);
 
   const cmd = provider.buildCommand({
     bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: task.id, attempt: r.attempt, kind: r.kind,
@@ -143,8 +146,20 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
   st.durationS += Math.round(outcome.durationMs / 1000);
   if (outcome.costUsd !== undefined) st.costUsd = (st.costUsd ?? 0) + outcome.costUsd;
   if (outcome.sessionId) st.sessionId = outcome.sessionId;
+  // Record what this session reported for the docs run log: the high-level result status + summary.
+  const reported = parseResultBlock(outcome.result.text) ?? parseResultBlock(outcome.allText);
+  entry.status = reported?.status ?? outcome.result.errorSubtype ?? (outcome.result.ok ? 'ok' : 'no-result');
+  entry.summary = reported?.summary || (outcome.result.ok ? snapshotText(outcome) : outcome.result.errorSubtype);
+  entry.durationS = Math.round(outcome.durationMs / 1000);
+  if (outcome.costUsd !== undefined) entry.costUsd = outcome.costUsd;
   saveState(paths, state);
   return outcome;
+}
+
+/** Last non-empty assistant line, a compact fallback when a session produced no result summary. */
+function snapshotText(outcome: SessionOutcome): string | undefined {
+  const line = outcome.allText.split('\n').map((l) => l.trim()).filter(Boolean).pop();
+  return line ? line.slice(0, 300) : undefined;
 }
 
 function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, halt?: Halted): void {
@@ -158,6 +173,13 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
   // Marker first so the task's own commit carries the final [x]/[~] state.
   patchRoadmap(ctx, task.id, final.status);
   const message = renderTemplate(config.commitMessageTemplate, { id: task.id, title: task.title, status: final.status });
+  // Per-task run log and pipeline snapshot are written before the commit so they land in it too.
+  try {
+    writeTaskLog(paths, task, st, { commitPreview: message });
+  } catch (e) {
+    log.warn(`${task.id}: could not write ${ctx.paths.logsDir} log: ${(e as Error).message}`);
+  }
+  updatePipelineStatus(paths, ctx.tasks, state, log);
   const commit = commitAll(paths.root, message);
   st.commit = describeCommit(commit);
   if (commit.status === 'failed') log.warn(`${task.id}: ${st.commit}`);
@@ -335,6 +357,7 @@ export function haltBanner(ctx: RunContext, h: Halted): void {
 function setHalt(ctx: RunContext, h: Halted): number {
   ctx.state.halted = h;
   saveState(ctx.paths, ctx.state);
+  updatePipelineStatus(ctx.paths, ctx.tasks, ctx.state, ctx.log);
   haltBanner(ctx, h);
   return 3;
 }
@@ -438,6 +461,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     }
     const done = ctx.tasks.filter((t) => DONE_STATES.includes(state.tasks[t.id]?.status ?? 'pending')).length;
     const blocked = ctx.tasks.filter((t) => state.tasks[t.id]?.status === 'blocked').map((t) => t.id);
+    updatePipelineStatus(paths, ctx.tasks, state, log);
     log.info(`run finished: ${done}/${ctx.tasks.length} done${blocked.length ? `; awaiting a human: ${blocked.join(' ')}` : ''}`);
     return 0;
   } finally {
