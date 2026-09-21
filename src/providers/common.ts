@@ -39,10 +39,17 @@ export function newHints(): ClassifyHints {
   return { apiErrorCategories: [], errorTexts: [] };
 }
 
-/** Linux caps a single argv string at 128 KB; Windows caps the whole command line at ~32 KB. */
-export const ARGV_PROMPT_LIMIT = process.platform === 'win32' ? 24 * 1024 : 64 * 1024;
-
-export function argvPrompt(prompt: string, promptFile: string): string {
-  if (Buffer.byteLength(prompt, 'utf8') <= ARGV_PROMPT_LIMIT) return prompt;
+/**
+ * The runner always writes the full prompt to `promptFile` before the adapter builds its command,
+ * so adapters never need to carry that payload on argv. OS argv limits are platform-specific and
+ * apply to the whole command line (Windows caps it near 32 KB, Linux caps a single arg at 128 KB),
+ * so any byte threshold on the prompt alone is a broken contract. Instead: send the prompt over
+ * stdin, attach it as a file where the CLI supports it, or pass a short bootstrap that names the
+ * prompt file.
+ */
+export function fileBootstrap(promptFile: string): string {
   return `Read the file ${promptFile} and follow the instructions in it exactly. It is your complete task briefing; do not start work before reading all of it.`;
 }
+
+/** Bootstrap for CLIs that accept the prompt as an attached file (e.g. opencode `--file`). */
+export const ATTACHED_BOOTSTRAP = 'Follow the instructions in the attached file exactly. It is your complete task briefing; do not start work before reading all of it.';

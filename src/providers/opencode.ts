@@ -1,5 +1,5 @@
 import { isRecord, num, str } from '../util.js';
-import { argvPrompt, hintFromInput, newHints, toText, tryJson } from './common.js';
+import { ATTACHED_BOOTSTRAP, hintFromInput, newHints, toText, tryJson } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
 
 /**
@@ -63,11 +63,15 @@ export const opencodeProvider: Provider = {
   supportsBudget: false,
   supportsResume: true,
   buildCommand(o) {
-    const args = ['run', '--standalone', '--format', 'json', '--thinking', '--dir', o.cwd];
+    // The working directory is set via the spawn cwd; opencode has no `--dir` flag (the directory is
+    // positional for the top-level command). Pass only flags this CLI understands.
+    const args = ['run', '--standalone', '--format', 'json', '--thinking'];
     if (o.resumeId) args.push('--session', o.resumeId);
     if (o.model) args.push('--model', o.model);
     if (o.autoApprove) args.push('--auto');
-    args.push(...o.extraArgs, argvPrompt(o.prompt, o.promptFile));
+    // The full prompt is attached with `--file`; argv only carries a short bootstrap so an oversized
+    // prompt can never overflow the OS command-line limit.
+    args.push('--file', o.promptFile, ...o.extraArgs, ATTACHED_BOOTSTRAP);
     return { bin: o.bin, args };
   },
   createParser: () => new OpenCodeParser(),

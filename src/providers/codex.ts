@@ -1,5 +1,5 @@
 import { isRecord, num, str } from '../util.js';
-import { argvPrompt, hintFromInput, newHints, toText, tryJson } from './common.js';
+import { hintFromInput, newHints, toText, tryJson } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
 
 /**
@@ -129,9 +129,9 @@ export const codexProvider: Provider = {
     if (o.autoApprove) args.push('--dangerously-bypass-approvals-and-sandbox');
     else args.push('--sandbox', 'workspace-write', '--ask-for-approval', 'never');
     args.push(...o.extraArgs);
-    const usesStdin = Buffer.byteLength(o.prompt, 'utf8') > 8 * 1024;
-    args.push(usesStdin ? '-' : argvPrompt(o.prompt, o.promptFile));
-    return { bin: o.bin, args, stdinPayload: usesStdin ? o.prompt : undefined };
+    // `-` reads the prompt from stdin; never place the prompt on argv.
+    args.push('-');
+    return { bin: o.bin, args, stdinPayload: o.prompt };
   },
   createParser: () => new CodexParser(),
 };

@@ -1,4 +1,4 @@
-import { argvPrompt } from './common.js';
+import { fileBootstrap } from './common.js';
 import { GenericParser } from './generic.js';
 import type { Provider } from './types.js';
 
@@ -16,7 +16,7 @@ export const antigravityProvider: Provider = {
     const args = ['-p', '--output-format', 'json', '--workspace', o.cwd];
     if (o.autoApprove) args.push('--dangerously-skip-permissions');
     if (o.model) args.push('--model', o.model);
-    args.push(...o.extraArgs, argvPrompt(o.prompt, o.promptFile));
+    args.push(...o.extraArgs, fileBootstrap(o.promptFile));
     return { bin: o.bin, args };
   },
   createParser: () => new GenericParser(),

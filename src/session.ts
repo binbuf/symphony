@@ -68,12 +68,29 @@ export function startSession(o: SessionOpts): Session {
   const texts: string[] = [];
   let stderrTail = '';
 
-  const child: ChildProcess = spawn(o.spec.bin, o.spec.args, {
-    cwd: o.cwd,
-    stdio: ['pipe', 'pipe', 'pipe'],
-    detached,
-    env: { ...process.env, ...(o.spec.env ?? {}) },
-  });
+  let child: ChildProcess;
+  try {
+    child = spawn(o.spec.bin, o.spec.args, {
+      cwd: o.cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached,
+      env: { ...process.env, ...(o.spec.env ?? {}) },
+    });
+  } catch (e) {
+    // Some launch failures (notably ENAMETOOLONG on Windows) are thrown synchronously by spawn()
+    // instead of emitting 'error'. Contain them so one bad launch cannot abort the whole run.
+    const spawnError = e instanceof Error ? e.message : String(e);
+    const result: ResultEvent = { kind: 'result', ok: false, text: '', errorSubtype: 'spawn_error', synthesized: true };
+    const outcome: SessionOutcome = {
+      result, allText: '', costUsd: undefined, exitCode: null, signal: null,
+      timedOut: false, stalled: false, interrupted: false, spawnError, stderrTail: '',
+      durationMs: Date.now() - t0, hints: parser.hints(), sawResult: false, sawError: false,
+    };
+    const line = `[error] could not start provider: ${spawnError}`;
+    if (o.live !== false) process.stdout.write(`${line}\n`);
+    o.sinks.log.write(`${line}\n`);
+    return { done: Promise.resolve(outcome), kill: () => {} };
+  }
   const pid = child.pid;
 
   const signalTree = (sig: NodeJS.Signals) => {

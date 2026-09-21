@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ClaudeParser, claudeProvider } from '../src/providers/claude.js';
 import { CodexParser, codexProvider } from '../src/providers/codex.js';
-import { ARGV_PROMPT_LIMIT, argvPrompt } from '../src/providers/common.js';
+import { ATTACHED_BOOTSTRAP, fileBootstrap } from '../src/providers/common.js';
 import { CursorParser, cursorProvider } from '../src/providers/cursor.js';
 import { OpenCodeParser, opencodeProvider } from '../src/providers/opencode.js';
 import type { BuildCommandOpts } from '../src/providers/types.js';
@@ -66,9 +66,9 @@ test('cursor parser: tool_call reduction and result', () => {
   assert.deepEqual(r, { kind: 'result', ok: true, text: 'bye', sessionId: 'c1', durationMs: 5, errorSubtype: undefined });
 });
 
-test('cursor buildCommand: prompt is the last positional; --force only when auto-approving', () => {
+test('cursor buildCommand: prompt file bootstrap is the last positional; --force only when auto-approving', () => {
   const c = cursorProvider.buildCommand(opts({ model: 'm' }));
-  assert.equal(c.args[c.args.length - 1], 'do it');
+  assert.equal(c.args[c.args.length - 1], fileBootstrap('/tmp/p.md'));
   assert.ok(c.args.includes('--force') && c.args.includes('--trust') && c.args.includes('-p'));
   assert.equal(c.stdinPayload, undefined);
   assert.ok(!cursorProvider.buildCommand(opts({ autoApprove: false })).args.includes('--force'));
@@ -89,13 +89,15 @@ test('opencode parser: init once, reasoning, tool dedupe, error', () => {
   assert.ok(p.hints().errorTexts[0].includes('invalid api key'));
 });
 
-test('opencode buildCommand: --auto by default, --session on resume', () => {
+test('opencode buildCommand: prompt attached via --file, --auto by default, --session on resume', () => {
   const c = opencodeProvider.buildCommand(opts({ model: 'anthropic/x', resumeId: 'sess' }));
   assert.equal(c.args[0], 'run');
   assert.ok(c.args.includes('--auto'));
   assert.ok(c.args.join(' ').includes('--session sess'));
-  assert.ok(c.args.join(' ').includes('--dir /proj'));
-  assert.equal(c.args[c.args.length - 1], 'do it');
+  assert.ok(c.args.join(' ').includes('--file /tmp/p.md'));
+  assert.equal(c.args[c.args.length - 1], ATTACHED_BOOTSTRAP);
+  assert.equal(c.stdinPayload, undefined);
+  assert.ok(!c.args.includes('--dir'));
 });
 
 test('codex parser: thread, items, turn.completed → result with last message; turn.failed → error result', () => {
@@ -121,12 +123,13 @@ test('codex parser: thread, items, turn.completed → result with last message; 
   assert.ok(q.hints().errorTexts[0].includes('usage limit'));
 });
 
-test('codex buildCommand: full bypass by default, sandbox in safe mode, resume subcommand', () => {
+test('codex buildCommand: full bypass by default, sandbox in safe mode, resume subcommand, prompt on stdin', () => {
   const c = codexProvider.buildCommand(opts({ model: 'o3' }));
   assert.deepEqual(c.args.slice(0, 2), ['exec', '--json']);
   assert.ok(c.args.includes('--dangerously-bypass-approvals-and-sandbox'));
   assert.ok(c.args.join(' ').includes('--cd /proj'));
-  assert.equal(c.args[c.args.length - 1], 'do it');
+  assert.equal(c.args[c.args.length - 1], '-');
+  assert.equal(c.stdinPayload, 'do it');
   const s = codexProvider.buildCommand(opts({ autoApprove: false, resumeId: 'th1' }));
   assert.deepEqual(s.args.slice(0, 3), ['exec', 'resume', 'th1']);
   assert.ok(s.args.join(' ').includes('--sandbox workspace-write'));
@@ -136,8 +139,7 @@ test('codex buildCommand: full bypass by default, sandbox in safe mode, resume s
   assert.equal(big.stdinPayload?.length, 9000);
 });
 
-test('argvPrompt falls back to a bootstrap above the argv limit', () => {
-  assert.equal(argvPrompt('small', '/p'), 'small');
-  const big = 'y'.repeat(ARGV_PROMPT_LIMIT + 1);
-  assert.ok(argvPrompt(big, '/tmp/x.prompt.md').includes('/tmp/x.prompt.md'));
+test('prompt channels: bootstrap names the prompt file, never the payload', () => {
+  assert.ok(fileBootstrap('/tmp/x.prompt.md').includes('/tmp/x.prompt.md'));
+  assert.ok(ATTACHED_BOOTSTRAP.length > 0);
 });

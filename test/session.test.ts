@@ -83,3 +83,14 @@ test('missing binary → spawnError, no hang', async () => {
   assert.match(out.spawnError ?? '', /ENOENT/);
   assert.equal(out.result.ok, false);
 });
+
+test('synchronous spawn throw (ENAMETOOLONG) is contained as a spawnError, not a run-wide crash', { skip: process.platform !== 'win32' }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-sess-'));
+  const sinks = openRunSinks(dir, 'T01-toolong');
+  const s = startSession({ spec: { bin: process.execPath, args: ['-e', '0', 'x'.repeat(40_000)] }, provider: claudeProvider, cwd: dir, timeoutMs: 5000, idleTimeoutMs: 0, sinks, liveMaxChars: 100, logMaxChars: 100, color: false, live: false });
+  const out = await s.done;
+  await sinks.close();
+  assert.match(out.spawnError ?? '', /ENAMETOOLONG/);
+  assert.equal(out.result.ok, false);
+  assert.equal(out.result.errorSubtype, 'spawn_error');
+});
