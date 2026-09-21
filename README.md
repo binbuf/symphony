@@ -10,6 +10,13 @@ All run with permission prompts bypassed so nothing ever waits on a human (`--sa
 run). Connectors/MCP configured inside each agent are respected: symphony only launches the CLI and reads its
 NDJSON, so an agent with connectors keeps them.
 
+## Contents
+
+- [Install](#install) · [Commands](#commands) · [The docs contract](#the-docs-contract)
+- [What a run does](#what-a-run-does) · [When things stop](#when-things-stop)
+- [Providers](#providers) · [Config](#config) · [Logs and state](#logs-and-state)
+- [Platform support](#platform-support) · [Developing the harness](#developing-the-harness) · [Notes](#notes)
+
 ## Install
 
 ```bash
@@ -48,7 +55,7 @@ launcher works from `cmd.exe`.
 | `lint` | check the project root and docs against the expected layout; no LLM; exit 2 on errors |
 | `prepare [--dry-run]` | lint, then let the configured agent convert/repair the docs in place, re-lint, commit |
 | `brief` | print a paste-ready prompt so any LLM turns an idea into the docs package in this exact format |
-| `accept T05 [--note "…"]` | human sign-off on a blocked/failed task; counts as done, bullet becomes `[x] ⟵ accepted` |
+| `accept T05[,T06…] [--note "…"]` | human sign-off on one or more blocked/failed tasks; counts as done, bullet becomes `[x] ⟵ accepted` |
 | `nudge T05 [--note "…"]` | resume a task's last session and ask it to close out with a result block |
 | `clear-halt` | lift a halt so `run` can start again |
 
@@ -179,7 +186,7 @@ move past blocked tasks and leave them for later sign-off.
 |---|---|---|---|---|
 | `claude` | `claude` | `-p --output-format stream-json --verbose`, prompt on stdin | `--dangerously-skip-permissions` | `--permission-mode acceptEdits --permission-prompts none` |
 | `cursor` | `agent` | `-p --output-format stream-json --workspace <root> --trust <prompt>` | `--force` | no `--force` |
-| `opencode` | `opencode` | `run --format json --thinking --dir <root> <prompt>` | `--auto` | no `--auto` |
+| `opencode` | `opencode` | `run --standalone --format json --thinking --dir <root> <prompt>` | `--auto` | no `--auto` |
 | `codex` | `codex` | `exec --json --color never --skip-git-repo-check --cd <root> <prompt>` | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write --ask-for-approval never` |
 | `gemini` | `gemini` | `--output-format json --prompt <prompt>` | `--yolo` | no `--yolo` |
 | `antigravity` | `antigravity` | `-p --output-format json --workspace <root> <prompt>` | `--dangerously-skip-permissions` | no bypass flag |
@@ -188,10 +195,14 @@ move past blocked tasks and leave them for later sign-off.
 Models: pass `--model`, or set `providers.<name>.model` (OpenCode wants `provider/model`, e.g.
 `anthropic/claude-sonnet-4-5`). Session resume for retries and nudges uses `--resume` (Claude, Cursor),
 `--session` (OpenCode) and `exec resume <id>` (Codex); Gemini and Antigravity do not advertise resume, so
-retries start fresh. Cost is reported by Claude only. Each provider's argv can be corrected for your install
-with `providers.<name>.bin` and `providers.<name>.extraArgs`; unknown stream shapes are parsed best-effort.
+retries start fresh. Cost is surfaced for Claude (per session) and OpenCode (cumulative); `--budget` is
+Claude-only. Each provider's argv can be corrected for your install with `providers.<name>.bin` and
+`providers.<name>.extraArgs`; unknown stream shapes are parsed best-effort.
 
-## Config (`.symphony/symphony.config.json`, every key optional)
+## Config
+
+Every key is optional and lives in `.symphony/symphony.config.json`; CLI flags and environment variables
+override it per run (see **Providers** for the precedence order).
 
 | key | default | meaning |
 |---|---|---|
@@ -203,7 +214,7 @@ with `providers.<name>.bin` and `providers.<name>.extraArgs`; unknown stream sha
 | `paths.state` `.runs` `.log` | under `.symphony/` | where harness state, session logs and the event log live |
 | `autoApprove` | `true` | bypass permission prompts (`--safe` sets false for one run) |
 | `nudge`, `nudgeTimeoutMin` | `true`, `45` | resume once to collect a missing result block |
-| `timeoutMin`, `idleTimeoutMin` | `240`, `20` | wall clock per session; kill after this long with no output |
+| `timeoutMin`, `idleTimeoutMin` | `240`, `20` | max wall clock per session; kill after this long with no output |
 | `prepareTimeoutMin` | `60` | wall clock for the `prepare` session |
 | `maxProgressBytes` | `32768` | tail of PROGRESS.md inlined into each prompt |
 | `designDocs` | `true` | when `false`, `design/` and `adr/` are neither required nor used: tasks run standalone |
@@ -248,14 +259,15 @@ no process groups. `npm run clean` and the test script avoid POSIX-only commands
 ```bash
 npm install
 npm run dev -- run --root /path/to/project       # run from source via tsx
-npm test                                          # node --test, 49 tests
+npm test                                          # node --test, 53 tests
 npm run typecheck && npm run build                # tsc → dist/
 node dist/tools/parse-check.js claude session.jsonl [--render]   # replay a provider log through the parser
 ```
 
-The `fake` provider replays Claude-format NDJSON fixtures from `SYMPHONY_FAKE_FIXTURES` (`<taskId>.jsonl`,
-`<taskId>.task.jsonl`, `<taskId>.continue.jsonl`, `<taskId>.resume.jsonl`, `<taskId>.nudge.jsonl`,
-`prepare.jsonl`, `default.jsonl`). Control lines the fake agent interprets instead of echoing:
+The `fake` provider replays Claude-format NDJSON fixtures from `SYMPHONY_FAKE_FIXTURES` (default
+`.symphony/fixtures`), matched in order `<taskId>.<kind>.jsonl` → `<taskId>.jsonl` → `default.<kind>.jsonl` →
+`default.jsonl`, where `kind` is `task`, `continue`, `resume` or `nudge` (the `prepare` session uses taskId
+`prepare`, kind `task`). Control lines the fake agent interprets instead of echoing:
 `fake_write {path, content}`, `fake_rm {path}`, `fake_stderr {text}`, `fake_sleep {ms}`, `fake_exit {code}`.
 That is enough to exercise retries, nudges, continuations, halts, and `prepare` without spending anything.
 
