@@ -31,6 +31,10 @@ export interface PromptCtx {
   inlineDesignDocs?: boolean;
   /** Byte cap for the inlined repo map (default 16384). */
   maxIndexBytes?: number;
+  /** Byte cap for the inlined task file body (default: uncapped). */
+  maxTaskBytes?: number;
+  /** Pre-generated repo map to inline instead of reading `paths.index` (used by `--dry-run`). */
+  indexBody?: string;
 }
 
 export const PROGRESS_HEADER = `# Progress notes
@@ -64,9 +68,18 @@ export function nextAdrNumber(adrDir: string): string {
   return String(max + 1).padStart(4, '0');
 }
 
-function taskFileBody(task: Task): string | undefined {
+/** Keep the head of a long task file (Goal/Scope matter most) and say where the full file is. */
+function capTaskBody(text: string, maxBytes: number | undefined, displayName: string): string {
+  if (!maxBytes || Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  const buf = Buffer.from(text, 'utf8');
+  const kb = (n: number): string => `${Math.round(n / 1024)} KB`;
+  return `${buf.subarray(0, maxBytes).toString('utf8')}\n\n[… task file truncated: showing the first ${kb(maxBytes)} of ${kb(buf.length)}; read ${displayName} for the full text …]`;
+}
+
+function taskFileBody(task: Task, maxBytes?: number): string | undefined {
   if (!task.taskFile) return undefined;
-  return parseFrontMatter(readFileSync(task.taskFile, 'utf8')).body.trim();
+  const body = parseFrontMatter(readFileSync(task.taskFile, 'utf8')).body.trim();
+  return capTaskBody(body, maxBytes, task.taskFileRel ?? task.taskFile);
 }
 
 function ids(ctx: PromptCtx, pick: (status: string) => boolean): string {
@@ -94,7 +107,7 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
   const { paths, task } = ctx;
   const d = docPaths(paths);
   const docs = listDesignDocs(paths);
-  const body = taskFileBody(task);
+  const body = taskFileBody(task, ctx.maxTaskBytes);
   const taskFileRel = task.taskFileRel ?? defaultTaskFileRel(paths, task);
   const noTaskFileNote = body === undefined
     ? `- No task file exists for this task. The roadmap bullet is the entire specification. Before implementing, create ${taskFileRel} with Goal, Scope, Done when, and Hand-off sections, and put your understanding of the task there.\n`
@@ -113,7 +126,7 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
   const designPresent = ctx.designDocs ? `Design docs present: ${designList}\nADRs present: ${adrList}\n` : '';
   const inlinedDocs = ctx.designDocs && ctx.inlineDesignDocs !== false ? selectTaskDesignDocs(paths, body) : [];
   const designInlinedBlock = renderInlinedDocs(inlinedDocs);
-  const repoMapBody = readIndexCapped(paths.index, ctx.maxIndexBytes ?? DEFAULT_MAX_INDEX_BYTES, d.index);
+  const repoMapBody = ctx.indexBody ?? readIndexCapped(paths.index, ctx.maxIndexBytes ?? DEFAULT_MAX_INDEX_BYTES, d.index);
 
   const steps: string[] = [
     `Read the task file (inlined below)${ctx.designDocs ? ' and every Context or design doc it names' : ''}, then implement exactly its Scope. Out-of-scope items belong to other tasks: note them in the Hand-off instead of doing them.`,

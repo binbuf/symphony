@@ -33,6 +33,27 @@ test('rate limit → transient, not fatal', () => {
   assert.equal(c.category, 'rate_limit'); assert.equal(c.transient, true); assert.equal(c.fatal, false);
 });
 
+test('"rate limit reached" text is a transient rate limit, not a fatal usage limit', () => {
+  const c = classifyFailure({ ...base, resultText: 'Rate limit reached. Please retry in a moment.' }, FATAL);
+  assert.equal(c.category, 'rate_limit');
+  assert.equal(c.fatal, false);
+  assert.equal(c.transient, true);
+});
+
+test('a subscription usage limit is still fatal', () => {
+  const c = classifyFailure({ ...base, resultText: 'You have hit your limit. Resets at 3pm.' }, FATAL);
+  assert.equal(c.category, 'usage_limit');
+  assert.equal(c.fatal, true);
+});
+
+test('"please run <command>" is not mistaken for an auth failure', () => {
+  const c = classifyFailure({ ...base, stderrTail: 'Please run `npm install` before building', sawResult: false }, FATAL);
+  assert.notEqual(c.category, 'auth');
+  assert.equal(c.fatal, false);
+  const login = classifyFailure({ ...base, stderrTail: 'Not logged in. Please run /login', sawResult: false }, FATAL);
+  assert.equal(login.category, 'auth');
+});
+
 test('network reset → transient', () => {
   const c = classifyFailure({ ...base, stderrTail: 'FetchError: read ECONNRESET', sawResult: false }, FATAL);
   assert.equal(c.category, 'network'); assert.equal(c.transient, true);

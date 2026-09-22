@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { DEFAULTS, loadConfig, resolveSession } from '../src/config.js';
+import { DEFAULTS, loadConfig, resolveSession, resolveVerify } from '../src/config.js';
 import { resolvePaths } from '../src/paths.js';
 import type { Task } from '../src/tasks.js';
 
@@ -155,4 +155,58 @@ test('caps, verify, hooks and git settings parse, with CLI caps overriding', () 
   assert.deepEqual(bad.config.git.extraIgnore, []);
   assert.ok(bad.warnings.some((w) => w.includes('hooks.afterTask')));
   assert.ok(bad.warnings.some((w) => w.includes('git.extraIgnore')));
+});
+
+test('verify resolution: front matter > config > inferred package.json test script', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-verify-'));
+  const cfg = { ...DEFAULTS };
+  assert.equal(resolveVerify(cfg, task(), dir), undefined);
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'node --test' } }));
+  const inferred = resolveVerify(cfg, task(), dir);
+  assert.deepEqual(inferred, { command: 'npm test', timeoutMin: DEFAULTS.verifyTimeoutMin, source: 'package.json' });
+  assert.equal(resolveVerify({ ...cfg, inferVerify: false }, task(), dir), undefined);
+  assert.equal(resolveVerify({ ...cfg, verifyCommand: 'make check' }, task(), dir)?.source, 'config');
+  const byTask = resolveVerify(cfg, task({ verify: 'npm run verify' }), dir);
+  assert.equal(byTask?.command, 'npm run verify');
+  assert.equal(byTask?.source, 'task front matter');
+  // npm's placeholder script is not a real verification command.
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }));
+  assert.equal(resolveVerify(cfg, task(), dir), undefined);
+});
+
+test('cost cap, task byte cap and non-positive timeouts/caps validate and fall back', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cost-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({ maxCostUsdPerRun: 2.5, maxTaskBytes: 1024, inferVerify: false }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.maxCostUsdPerRun, 2.5);
+  assert.equal(config.maxTaskBytes, 1024);
+  assert.equal(config.inferVerify, false);
+  assert.equal(warnings.length, 0);
+  assert.equal(loadConfig(paths, { maxCostUsd: 4 }).config.maxCostUsdPerRun, 4);
+
+  writeFileSync(paths.config, JSON.stringify({ timeoutMin: 0, maxIndexBytes: -1, maxTaskBytes: 0 }));
+  const bad = loadConfig(paths, {});
+  assert.equal(bad.config.timeoutMin, DEFAULTS.timeoutMin);
+  assert.equal(bad.config.maxIndexBytes, DEFAULTS.maxIndexBytes);
+  assert.equal(bad.config.maxTaskBytes, DEFAULTS.maxTaskBytes);
+  assert.equal(bad.warnings.filter((w) => /positive/.test(w)).length, 3);
+
+  // idleTimeoutMin 0 is meaningful (it disables stall detection), so it must stay 0.
+  writeFileSync(paths.config, JSON.stringify({ idleTimeoutMin: 0, providers: { claude: { idleTimeoutMin: 0 } } }));
+  const idle = loadConfig(paths, {});
+  assert.equal(idle.config.idleTimeoutMin, 0);
+  assert.equal(idle.config.providers.claude.idleTimeoutMin, 0);
+  assert.equal(idle.warnings.length, 0);
+});
+
+test('front matter timeoutMin must be a positive number and warns otherwise', () => {
+  const ok = resolveSession(DEFAULTS, task({ timeoutMin: '7' }), {}, {});
+  assert.equal(ok.spec.timeoutMin, 7);
+  const bad = resolveSession(DEFAULTS, task({ timeoutMin: '0' }), {}, {});
+  assert.equal(bad.spec.timeoutMin, DEFAULTS.timeoutMin);
+  assert.ok(bad.warnings.some((w) => /timeoutMin/.test(w)));
+  const negative = resolveSession(DEFAULTS, task({ timeoutMin: '-5' }), {}, {});
+  assert.equal(negative.spec.timeoutMin, DEFAULTS.timeoutMin);
 });

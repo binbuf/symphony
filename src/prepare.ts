@@ -4,7 +4,7 @@ import { classifyFailure } from './classify.js';
 import { scaffoldDocs } from './commands.js';
 import { resolveSession, type SessionSpec } from './config.js';
 import { docsContract } from './contract.js';
-import { commitAll, describeCommit, ensureGitignore } from './git.js';
+import { commitAll, currentBranch, describeCommit, ensureGitignore } from './git.js';
 import { docsTree, formatLint, lintDocs, type LintReport } from './lint.js';
 import { openRunSinks } from './logger.js';
 import { rel, stopIgnoreEntry } from './paths.js';
@@ -105,6 +105,7 @@ export async function runDocsSession(
   const out = await session.done;
   ctx.active = undefined;
   await sinks.close();
+  ctx.runCostUsd = (ctx.runCostUsd ?? 0) + (out.costUsd ?? 0);
 
   if (out.interrupted || ctx.interrupted) {
     log.warn(`${opts.label} interrupted; ${docsRel}/ may be half-written (check git status)`);
@@ -167,6 +168,7 @@ const created = scaffoldDocs(paths, { roadmap: false, config: false, design: con
   if (!preflight(ctx, spec, provider, { skipRoadmap: true })) { log.error('preflight failed; fix the ✗ items above'); return 4; }
 
   acquireLock(paths);
+  ctx.startBranch = currentBranch(paths.root);
   const stopHeartbeat = startLockHeartbeat(paths);
   try {
     const label = `prepare: repairing ${docsRel}/ (${report.findings.filter((x) => x.level === 'error').length} errors, ${report.candidates.length} outside documents)`;
@@ -176,7 +178,7 @@ const created = scaffoldDocs(paths, { roadmap: false, config: false, design: con
     const after = lintDocs(paths, { design: config.designDocs });
     log.plain('--- lint (after)');
     formatLint(after).forEach((l) => log.plain(l));
-    const commit = commitAll(paths.root, `docs: normalise ${docsRel} for symphony [prepare]`, (m) => log.warn(m), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore });
+    const commit = commitAll(paths.root, `docs: normalise ${docsRel} for symphony [prepare]`, (m) => log.warn(m), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore, expectedBranch: ctx.startBranch });
     log.info(`prepare: git ${describeCommit(commit)}${outcome.costUsd !== undefined ? ` · $${outcome.costUsd.toFixed(2)}` : ''}`);
     if (!after.ok) { log.error(`${docsRel}/ is still not in the expected format; fix the ✗ items by hand or run \`symphony prepare\` again`); return 2; }
     return 0;

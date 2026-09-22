@@ -98,3 +98,20 @@ test('buildPreparePrompt renders from the template with no leftover placeholders
   assert.match(text, /- notes\/idea\.md/);
   assert.match(text, /SYMPHONY_RESULT/);
 });
+
+test('a very large task file is truncated with a pointer to the full path', () => {
+  const { ctx } = fixture();
+  writeFileSync(ctx.task.taskFile!, '# T01 — First task\n\n## Goal\n' + 'x'.repeat(4000) + '\n');
+  const text = buildTaskPrompt({ ...ctx, maxTaskBytes: 200 });
+  assert.match(text, /task file truncated: showing the first/);
+  assert.match(text, /read docs\/tasks\/01-first\.md for the full text/);
+  assert.ok(!text.includes('x'.repeat(500)), 'the body tail should not be inlined');
+});
+
+test('an explicit indexBody is inlined instead of the on-disk INDEX.md', () => {
+  const { ctx } = fixture();
+  const text = buildTaskPrompt({ ...ctx, indexBody: '# Project index\n\n## Source map\n- `src/app.ts` — main' });
+  assert.match(text, /--- PROJECT INDEX \(docs\/INDEX\.md\) ---/);
+  assert.match(text, /src\/app\.ts/);
+  assert.doesNotMatch(text, /not generated yet/);
+});

@@ -1,4 +1,5 @@
 /* Standalone script spawned by the fake provider. No imports from the rest of the harness. */
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -29,6 +30,12 @@ for (const line of readFileSync(fixture, 'utf8').split('\n')) {
       process.stderr.write(`${String(ev.text ?? '')}\n`);
     } else if (ev.type === 'fake_sleep') {
       await wait(Number(ev.ms ?? 0));
+    } else if (ev.type === 'fake_run') {
+      // Run a shell command in the project (used by tests to simulate e.g. an agent switching branches).
+      const r = spawnSync(String(ev.command ?? ''), { shell: true, cwd: process.cwd(), encoding: 'utf8' });
+      if (r.stdout) process.stdout.write(String(r.stdout));
+      if (r.stderr) process.stderr.write(String(r.stderr));
+      if (r.status !== 0) exitCode = r.status ?? 1;
     } else if (ev.type === 'fake_exit') {
       exitCode = Number(ev.code ?? 0);
     }

@@ -14,6 +14,7 @@ import type { Provider } from './types.js';
  * where kind is task | resume | nudge. Control lines the fake agent interprets instead of echoing:
  *   {"type":"fake_write","path":"rel/file","content":"..."}   write a file (simulated work)
  *   {"type":"fake_rm","path":"rel/file-or-dir"}                   delete a file or directory
+ *   {"type":"fake_run","command":"git checkout -b other"}      run a shell command in the project
  *   {"type":"fake_stderr","text":"..."}                        print to stderr
  *   {"type":"fake_sleep","ms":1500}                            pause
  *   {"type":"fake_exit","code":1}                              exit code at the end

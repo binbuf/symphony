@@ -1,8 +1,11 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { acceptCommand, briefCommand, clearHaltCommand, initCommand, resetCommand, statusCommand } from './commands.js';
+import { acceptCommand, briefCommand, clearHaltCommand, initCommand, logsCommand, resetCommand, statusCommand } from './commands.js';
 import { DEFAULTS, loadConfig, resolveSession, type CliOverrides } from './config.js';
-import { formatChecks, runDoctor } from './doctor.js';
+import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { formatLint, lintDocs } from './lint.js';
 import { prepareCommand } from './prepare.js';
 import { replanCommand } from './replan.js';
@@ -14,16 +17,16 @@ import { nudgeCommand, runCommand, type RunContext, type RunFlags } from './runn
 import { loadState, reconcile, saveState, type State } from './state.js';
 import { discoverTasks, type Task } from './tasks.js';
 import { UsageError, fileExists } from './util.js';
-import { readFileSync } from 'node:fs';
 
 const HELP = `symphony — run an LLM coding agent through your roadmap, one fresh session per task
 
 Usage
   symphony run     [--prepare] [--provider P] [--model M] [--from T03] [--to T10] [--only T05,T06] [--retry]
                    [--continue-on-failure] [--dry-run] [--safe] [--no-nudge] [--timeout-min N] [--max-tasks N]
-                   [--max-iterations N] [--budget USD] [--clear-halt]
+                   [--max-iterations N] [--budget USD] [--max-cost USD] [--clear-halt]
   symphony status  [--json]              progress table (or JSON)
-  symphony doctor                        preflight: binaries, auth, git, roadmap, halt/STOP/lock
+  symphony logs    [T05]                 print a task's per-run log (docs/logs/T05.md); with no id, list them
+  symphony doctor                        preflight: binaries, auth, git, roadmap, verify, halt/STOP/lock
   symphony lint                          check the project root and docs/ against the expected layout (no LLM)
   symphony prepare [--dry-run]           lint, then let the configured agent convert/repair the docs and commit
   symphony replan  [--direction FILE]    stop-and-pivot: let the agent rewrite the plan for a new direction and commit
@@ -35,6 +38,7 @@ Usage
   symphony nudge   T05 [--note "..."]    resume a task's last session and ask it to close out
   symphony clear-halt                    lift a halt so run can start again
   symphony brief                         print a paste-ready prompt that makes any LLM client emit the docs package in this format
+  symphony --version                     print the version
 
 Providers: claude (Claude Code) · cursor (Cursor agent) · opencode · codex (Codex CLI) · gemini (Gemini CLI) · antigravity (Google Antigravity) · fake (fixture replay)
 Provider/model precedence: --provider/--model > SYMPHONY_PROVIDER/SYMPHONY_MODEL > task front matter
@@ -45,7 +49,10 @@ Every location (docs, tasks, progress, design, adr, logs, stop, state, runs, log
 Limits
   --max-tasks N            process at most N tasks this run (config maxTasksPerRun)
   --max-iterations N       at most N sessions per task, retries and continuations included (config maxIterationsPerTask)
-  verifyCommand            shell command the harness runs after a task reports done; non-zero demotes it to failed
+  --budget USD             per-task budget passed to the provider (Claude only)
+  --max-cost USD           stop the run once reported session cost reaches this (config maxCostUsdPerRun; 0 = off)
+  verifyCommand            shell command the harness runs after a task reports done; per-task "verify:" wins.
+                           Unset: the package.json test script is used when one exists (inferVerify)
 
 Controls
   touch .stop              pause at the next task boundary (nothing is killed); configurable via paths.stop
@@ -77,6 +84,18 @@ function loadProject(paths: Paths, log: Logger): Loaded {
   return { paths, roadmap, tasks, state, warnings };
 }
 
+/** Version of the harness, read from the package.json beside the build (falls back to 'dev'). */
+export const VERSION: string = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8')) as { version?: unknown };
+    return typeof pkg.version === 'string' && pkg.version ? pkg.version : 'dev';
+  } catch {
+    return 'dev';
+  }
+})();
+
+const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'init', 'accept', 'reset', 'nudge', 'clear-halt', 'brief', 'help']);
+
 export async function main(argv: string[]): Promise<number> {
   const { values: v, positionals } = parseArgs({
     args: argv,
@@ -84,6 +103,7 @@ export async function main(argv: string[]): Promise<number> {
     strict: true,
     options: {
       help: { type: 'boolean', short: 'h' },
+      version: { type: 'boolean', short: 'V' },
       root: { type: 'string' },
       provider: { type: 'string' },
       model: { type: 'string' },
@@ -99,6 +119,7 @@ export async function main(argv: string[]): Promise<number> {
       'max-tasks': { type: 'string' },
       'max-iterations': { type: 'string' },
       budget: { type: 'string' },
+      'max-cost': { type: 'string' },
       'clear-halt': { type: 'boolean' },
       prepare: { type: 'boolean' },
       direction: { type: 'string' },
@@ -111,7 +132,9 @@ export async function main(argv: string[]): Promise<number> {
     },
   });
   const cmd = positionals[0] ?? (v.help ? 'help' : 'help');
+  if (v.version) { process.stdout.write(`${VERSION}\n`); return 0; }
   if (v.help || cmd === 'help') { process.stdout.write(HELP); return 0; }
+  if (!COMMANDS.has(cmd)) throw new UsageError(`unknown command "${cmd}"\n\n${HELP}`);
 
   const cli: CliOverrides = {
     provider: v.provider,
@@ -120,6 +143,7 @@ export async function main(argv: string[]): Promise<number> {
     maxTasks: v['max-tasks'] !== undefined ? Number(v['max-tasks']) : undefined,
     maxIterations: v['max-iterations'] !== undefined ? Number(v['max-iterations']) : undefined,
     budgetUsd: v.budget !== undefined ? Number(v.budget) : undefined,
+    maxCostUsd: v['max-cost'] !== undefined ? Number(v['max-cost']) : undefined,
     safe: v.safe,
     noNudge: v['no-nudge'],
   };
@@ -127,6 +151,7 @@ export async function main(argv: string[]): Promise<number> {
   if (cli.maxTasks !== undefined && !(cli.maxTasks >= 0)) throw new UsageError('--max-tasks must be zero or a positive number');
   if (cli.maxIterations !== undefined && !(cli.maxIterations >= 0)) throw new UsageError('--max-iterations must be zero or a positive number');
   if (cli.budgetUsd !== undefined && !(cli.budgetUsd > 0)) throw new UsageError('--budget must be a positive number');
+  if (cli.maxCostUsd !== undefined && !(cli.maxCostUsd >= 0)) throw new UsageError('--max-cost must be zero or a positive number');
 
   if (cmd === 'init' || cmd === 'brief') {
     const base = resolvePaths(v.root);
@@ -169,6 +194,8 @@ export async function main(argv: string[]): Promise<number> {
   switch (cmd) {
     case 'status':
       return statusCommand(paths, config, loaded.state, loaded.tasks, log, v.json === true);
+    case 'logs':
+      return logsCommand(paths, loaded.tasks, positionals[1], log);
     case 'accept': {
       const ids = positionals.slice(1).flatMap((s) => s.split(','));
       if (!ids.length) throw new UsageError('accept: give one or more task ids, e.g. symphony accept T05');
@@ -179,12 +206,21 @@ export async function main(argv: string[]): Promise<number> {
     case 'reset': {
       const id = positionals[1];
       if (!id && v.all !== true) throw new UsageError('reset: give a task id, e.g. symphony reset T05 [--revert], or --all to clear everything');
-      return resetCommand(paths, loaded.state, loaded.tasks, id, { revert: v.revert === true, all: v.all === true, log });
+      return resetCommand(paths, loaded.state, loaded.tasks, id, { revert: v.revert === true, all: v.all === true, log, commitTemplate: config.commitMessageTemplate });
     }
     case 'doctor': {
       const { spec, warnings } = resolveSession(config, loaded.tasks[0], cli, process.env, (p) => getProvider(p).supportsBudget);
       warnings.forEach((w) => log.warn(w));
-      const checks = runDoctor({ paths, config, state: loaded.state, spec, provider: getProvider(spec.providerName), taskCount: loaded.tasks.length, roadmapError: loaded.roadmapError });
+      const extraProviders: ExtraProvider[] = [];
+      const seen = new Set([spec.providerName]);
+      for (const t of loaded.tasks) {
+        const rs = resolveSession(config, t, cli, process.env, (p) => getProvider(p).supportsBudget);
+        if (seen.has(rs.spec.providerName)) continue;
+        seen.add(rs.spec.providerName);
+        rs.warnings.forEach((w) => log.warn(`${t.id}: ${w}`));
+        extraProviders.push({ spec: rs.spec, provider: getProvider(rs.spec.providerName), label: t.id });
+      }
+      const checks = runDoctor({ paths, config, state: loaded.state, spec, provider: getProvider(spec.providerName), extraProviders, taskCount: loaded.tasks.length, roadmapError: loaded.roadmapError });
       formatChecks(checks).forEach((l) => log.plain(l));
       return checks.some((c) => c.level === 'fail') ? 4 : 0;
     }
@@ -241,11 +277,20 @@ function installSignalHandlers(ctx: RunContext): void {
   process.on('SIGTERM', onSignal);
 }
 
-main(process.argv.slice(2))
-  .then((code) => { process.exitCode = code; setTimeout(() => process.exit(code), 250).unref(); })
-  .catch((e: unknown) => {
-    if (e instanceof UsageError) { process.stderr.write(`symphony: ${e.message}\n`); process.exitCode = e.exitCode; return; }
-    if (e instanceof Error && e.name === 'TypeError' && /Unknown option|Option .* argument/.test(e.message)) { process.stderr.write(`symphony: ${e.message}\n\n${HELP}`); process.exitCode = 4; return; }
-    process.stderr.write(`symphony: unexpected error: ${(e as Error)?.stack ?? String(e)}\n`);
-    process.exitCode = 1;
-  });
+/** True when this module is the process entry point (so tests can import it without running the CLI). */
+function isEntryPoint(): boolean {
+  const arg = process.argv[1];
+  if (!arg) return false;
+  try { return resolve(arg) === fileURLToPath(import.meta.url); } catch { return false; }
+}
+
+if (isEntryPoint()) {
+  main(process.argv.slice(2))
+    .then((code) => { process.exitCode = code; setTimeout(() => process.exit(code), 250).unref(); })
+    .catch((e: unknown) => {
+      if (e instanceof UsageError) { process.stderr.write(`symphony: ${e.message}\n`); process.exitCode = e.exitCode; return; }
+      if (e instanceof Error && e.name === 'TypeError' && /Unknown option|Option .* argument/.test(e.message)) { process.stderr.write(`symphony: ${e.message}\n\n${HELP}`); process.exitCode = 4; return; }
+      process.stderr.write(`symphony: unexpected error: ${(e as Error)?.stack ?? String(e)}\n`);
+      process.exitCode = 1;
+    });
+}

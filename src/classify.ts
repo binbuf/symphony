@@ -27,11 +27,14 @@ const TRANSIENT: ErrorCategory[] = ['rate_limit', 'overloaded', 'server', 'netwo
 
 const RULES: Array<[ErrorCategory, RegExp]> = [
   ['billing', /credit balance|insufficient (funds|credits|balance)|billing|payment required|\b402\b|out of credits|account (is )?on hold|top up/i],
+  // rate_limit must come before usage_limit: "rate limit reached" would otherwise match usage_limit's
+  // "limit reached" and halt the run on what is only a transient throttle.
+  ['rate_limit', /\b429\b|rate[ _-]?limit|too many requests/i],
   ['usage_limit', /usage limit|hit your limit|plan limit|limit reached|resets at \d/i],
-  ['auth', /not (logged|signed) in|unauthori[sz]ed|\b40[13]\b|invalid (api[ _]?key|token|credentials?)|authentication|token (has )?expired|please (run|log ?in)|login required|oauth/i],
+  // "please login" phrases, but not a bare "please run <anything>".
+  ['auth', /not (logged|signed) in|unauthori[sz]ed|\b40[13]\b|invalid (api[ _]?key|token|credentials?)|authentication|token (has )?expired|please\s+(?:run\s+|use\s+)?[`"']?\/?(?:log ?in|sign ?in)\b|login required|oauth/i],
   ['model', /model[_ ]not[_ ]found|unknown model|invalid model|model .{1,60}(does not exist|not (found|available|supported))/i],
   ['config', /unknown (option|argument|flag|command)|invalid_request|invalid request|too many arguments|missing required/i],
-  ['rate_limit', /\b429\b|rate[ _-]?limit|too many requests/i],
   ['overloaded', /overloaded|\b529\b|capacity/i],
   ['server', /\b50[023]\b|internal server error|service unavailable|bad gateway|upstream/i],
   ['network', /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|socket hang up|fetch failed|network (error|failure)|connection (reset|closed|refused|lost|error)|disconnected|unable to connect|dns/i],

@@ -3,7 +3,7 @@ import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { scaffoldDocs } from './commands.js';
 import { resolveSession } from './config.js';
 import { docsContract } from './contract.js';
-import { commitAll, describeCommit, ensureGitignore } from './git.js';
+import { commitAll, currentBranch, describeCommit, ensureGitignore } from './git.js';
 import { docsTree, formatLint, lintDocs, type LintReport } from './lint.js';
 import type { Logger } from './logger.js';
 import { rel, stopIgnoreEntry, type Paths } from './paths.js';
@@ -197,6 +197,7 @@ export async function replanCommand(ctx: RunContext, opts: ReplanOptions): Promi
   if (!preflight(ctx, spec, provider, { skipRoadmap: true })) { log.error('preflight failed; fix the ✗ items above'); return 4; }
 
   acquireLock(paths);
+  ctx.startBranch = currentBranch(paths.root);
   const stopHeartbeat = startLockHeartbeat(paths);
   try {
     const label = `replan: rewriting ${docsRel}/ from ${direction.path}`;
@@ -241,7 +242,7 @@ export async function replanCommand(ctx: RunContext, opts: ReplanOptions): Promi
     }
     updatePipelineStatus(paths, newTasks, state, log);
 
-    const commit = commitAll(paths.root, `docs: replan ${docsRel} [replan]`, (m) => log.warn(m), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore });
+    const commit = commitAll(paths.root, `docs: replan ${docsRel} [replan]`, (m) => log.warn(m), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore, expectedBranch: ctx.startBranch });
     log.info(`replan: git ${describeCommit(commit)}${outcome.costUsd !== undefined ? ` · $${outcome.costUsd.toFixed(2)}` : ''}`);
     log.info(`replan: ${newTasks.length} task${newTasks.length === 1 ? '' : 's'} in the new plan; next: \`symphony run\``);
     return 0;

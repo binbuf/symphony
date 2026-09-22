@@ -3,8 +3,8 @@ import { relative } from 'node:path';
 import { classifyFailure, type Classified, type FailureEvidence } from './classify.js';
 import { resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
 import { writeProgressDigest } from './context.js';
-import { formatChecks, runDoctor } from './doctor.js';
-import { commitAll, describeCommit } from './git.js';
+import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
+import { commitAll, currentBranch, describeCommit } from './git.js';
 import { fireHook } from './hooks.js';
 import { createLogger, openRunSinks, type Logger } from './logger.js';
 import { writeTaskLog } from './logs.js';
@@ -12,7 +12,7 @@ import { stopPresent, type Paths } from './paths.js';
 import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, type PromptCtx } from './prompt.js';
 import { getProvider } from './providers/index.js';
 import type { Provider, SpawnSpec } from './providers/types.js';
-import { writeIndex } from './repomap.js';
+import { generateIndex, writeIndex } from './repomap.js';
 import { parseResultBlock, type ResultBlock } from './result.js';
 import { canonicalId, patchRoadmapFile, type Roadmap } from './roadmap.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
@@ -45,6 +45,10 @@ export interface RunContext {
   signalName?: string;
   active?: Session;
   abort: AbortController;
+  /** Branch HEAD pointed at when the run started; commits refuse to land elsewhere. */
+  startBranch?: string;
+  /** Session cost reported during this invocation, for the provider-agnostic run budget. */
+  runCostUsd?: number;
 }
 
 interface Final { status: TaskStatus; summary: string; lastError?: LastError }
@@ -163,6 +167,7 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
   await sinks.close();
   st.durationS += Math.round(outcome.durationMs / 1000);
   if (outcome.costUsd !== undefined) st.costUsd = (st.costUsd ?? 0) + outcome.costUsd;
+  ctx.runCostUsd = (ctx.runCostUsd ?? 0) + (outcome.costUsd ?? 0);
   if (outcome.sessionId) st.sessionId = outcome.sessionId;
   // Record what this session reported for the docs run log: the high-level result status + summary.
   const reported = parseResultBlock(outcome.result.text) ?? parseResultBlock(outcome.allText);
@@ -188,22 +193,51 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
   if (final.status === 'done') delete st.lastError; else if (final.lastError) st.lastError = final.lastError;
   delete st.pid;
 
-  // Marker first so the task's own commit carries the final [x]/[~] state.
-  patchRoadmap(ctx, task.id, final.status);
-  // Keep the generated digest and repo map in the same commit as the task that changed them.
-  refreshDerivedDocs(ctx);
-  const message = renderTemplate(config.commitMessageTemplate, { id: task.id, title: task.title, status: final.status });
-  // Per-task run log and pipeline snapshot are written before the commit so they land in it too.
-  try {
-    writeTaskLog(paths, task, st, { commitPreview: message });
-  } catch (e) {
-    log.warn(`${task.id}: could not write ${ctx.paths.logsDir} log: ${(e as Error).message}`);
+  const writeArtifacts = (status: TaskStatus): string => {
+    // Marker first so the task's own commit carries the final [x]/[~] state.
+    patchRoadmap(ctx, task.id, status);
+    // Keep the generated digest and repo map in the same commit as the task that changed them.
+    refreshDerivedDocs(ctx);
+    const message = renderTemplate(config.commitMessageTemplate, { id: task.id, title: task.title, status });
+    // Per-task run log and pipeline snapshot are written before the commit so they land in it too.
+    try {
+      writeTaskLog(paths, task, st, { commitPreview: message });
+    } catch (e) {
+      log.warn(`${task.id}: could not write ${ctx.paths.logsDir} log: ${(e as Error).message}`);
+    }
+    updatePipelineStatus(paths, ctx.tasks, state, log);
+    return message;
+  };
+  const commitOnce = (message: string) => commitAll(paths.root, message, (m) => log.warn(`${task.id}: ${m}`), {
+    autoIgnoreUntracked: config.git.autoIgnoreUntracked,
+    extraIgnore: config.git.extraIgnore,
+    expectedBranch: ctx.startBranch,
+  });
+
+  const message = writeArtifacts(final.status);
+  let commit = commitOnce(message);
+  if (commit.status === 'failed') {
+    log.warn(`${task.id}: ${commit.detail}; retrying the commit once`);
+    commit = commitOnce(message);
   }
-  updatePipelineStatus(paths, ctx.tasks, state, log);
-  const commit = commitAll(paths.root, message, (m) => log.warn(`${task.id}: ${m}`), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore });
-  st.commit = describeCommit(commit);
-  if (commit.status === 'committed') st.commitSha = commit.sha;
-  if (commit.status === 'failed') log.warn(`${task.id}: ${st.commit}`);
+  if (commit.status === 'failed') {
+    // A task must never be recorded done when its work could not be committed. Demote it so the next
+    // run (or a human) sees the problem; the work itself stays in the tree.
+    const reason = `commit failed: ${commit.detail}`;
+    log.error(`${task.id}: ${reason}; demoting ${final.status} -> failed`);
+    final.status = 'failed';
+    final.summary = reason;
+    final.lastError = { category: 'commit', message: reason, transient: false, fatal: false, at: nowIso() };
+    st.status = 'failed';
+    st.summary = reason;
+    st.lastError = final.lastError;
+    delete st.commitSha;
+    writeArtifacts('failed');
+    st.commit = reason;
+  } else {
+    st.commit = describeCommit(commit);
+    if (commit.status === 'committed') st.commitSha = commit.sha;
+  }
 
   if (halt) state.halted = halt;
   saveState(paths, state);
@@ -216,12 +250,13 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
     SYMPHONY_COMMIT: st.commitSha ?? '',
     SYMPHONY_PROVIDER: st.provider ?? '',
     SYMPHONY_MODEL: st.model ?? '',
+    SYMPHONY_COST: st.costUsd !== undefined ? st.costUsd.toFixed(2) : '',
   }, (m) => log.warn(`${task.id}: ${m}`));
   log.info(`=== ${task.id} -> ${final.status.toUpperCase()} · ${fmtDuration(st.durationS)} · ${fmtCost(st.costUsd)} · ${final.summary} · git: ${st.commit}`);
 }
 
-function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError: string | undefined, continuation: number): PromptCtx {
-  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes };
+function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError: string | undefined, continuation: number, indexBody?: string): PromptCtx {
+  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody };
 }
 
 /** Abortable, STOP-aware backoff. Returns true when a STOP file appeared. */
@@ -238,7 +273,9 @@ async function backoff(ctx: RunContext, ms: number): Promise<boolean> {
 function commitIntermediate(ctx: RunContext, task: Task, st: TaskState): void {
   const { paths, config, log } = ctx;
   const message = renderTemplate(config.commitMessageTemplate, { id: task.id, title: task.title, status: 'continue' });
-  const commit = commitAll(paths.root, message, (m) => log.warn(`${task.id}: ${m}`), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore });
+  const commitAllOpts = { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore, expectedBranch: ctx.startBranch };
+  let commit = commitAll(paths.root, message, (m) => log.warn(`${task.id}: ${m}`), commitAllOpts);
+  if (commit.status === 'failed') commit = commitAll(paths.root, message, (m) => log.warn(`${task.id}: ${m}`), commitAllOpts);
   if (commit.status === 'committed') log.info(`${task.id}: intermediate commit ${commit.sha} (${commit.files} file${commit.files === 1 ? '' : 's'})`);
   else if (commit.status === 'failed') log.warn(`${task.id}: intermediate ${describeCommit(commit)}`);
 }
@@ -336,7 +373,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         break;
       }
       if (block.status === 'done') {
-        const verify = resolveVerify(config, task);
+        const verify = resolveVerify(config, task, paths.root);
         if (verify) {
           log.info(`${task.id}: running verify: ${verify.command}`);
           const res = runVerify(paths.root, verify.command, verify.timeoutMin * 60_000);
@@ -423,8 +460,8 @@ function setHalt(ctx: RunContext, h: Halted): number {
   return 3;
 }
 
-export function preflight(ctx: RunContext, spec: SessionSpec | undefined, provider: Provider | undefined, opts: { ignoreHalt?: boolean; skipAuth?: boolean; skipRoadmap?: boolean } = {}): boolean {
-  const checks = runDoctor({ paths: ctx.paths, config: ctx.config, state: ctx.state, spec, provider, taskCount: ctx.tasks.length, ignoreHalt: opts.ignoreHalt, skipAuth: opts.skipAuth, skipRoadmap: opts.skipRoadmap });
+export function preflight(ctx: RunContext, spec: SessionSpec | undefined, provider: Provider | undefined, opts: { ignoreHalt?: boolean; skipAuth?: boolean; skipRoadmap?: boolean; extraProviders?: ExtraProvider[] } = {}): boolean {
+  const checks = runDoctor({ paths: ctx.paths, config: ctx.config, state: ctx.state, spec, provider, extraProviders: opts.extraProviders, taskCount: ctx.tasks.length, ignoreHalt: opts.ignoreHalt, skipAuth: opts.skipAuth, skipRoadmap: opts.skipRoadmap });
   for (const line of formatChecks(checks)) ctx.log.plain(line);
   return !checks.some((c) => c.level === 'fail');
 }
@@ -437,6 +474,8 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       log.warn(`clearing halt from ${state.halted.at} (${state.halted.category}: ${state.halted.reason})`);
       delete state.halted;
       saveState(paths, state);
+    } else if (flags.dryRun) {
+      log.warn(`still halted (${state.halted.category}: ${state.halted.reason}); --dry-run shows what would run after \`symphony clear-halt\``);
     } else {
       haltBanner(ctx, state.halted);
       return 3;
@@ -457,7 +496,19 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   const { spec, warnings } = resolveSession(config, first, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
   warnings.forEach((w) => log.warn(w));
   const provider = getProvider(spec.providerName);
-  if (!preflight(ctx, spec, provider, { skipAuth: flags.dryRun })) {
+  // Tasks may override the provider in front matter: preflight every provider this run will use.
+  const extraProviders: ExtraProvider[] = [];
+  {
+    const seen = new Set([spec.providerName]);
+    for (const t of todo) {
+      const rs = resolveSession(config, t, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+      if (seen.has(rs.spec.providerName)) continue;
+      seen.add(rs.spec.providerName);
+      rs.warnings.forEach((w) => log.warn(`${t.id}: ${w}`));
+      extraProviders.push({ spec: rs.spec, provider: getProvider(rs.spec.providerName), label: t.id });
+    }
+  }
+  if (!preflight(ctx, spec, provider, { skipAuth: flags.dryRun, ignoreHalt: flags.dryRun, extraProviders })) {
     log.error('preflight failed; fix the ✗ items above (or run: symphony doctor)');
     return 4;
   }
@@ -470,11 +521,13 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     if (!todo.length) { log.info('nothing to run'); return 0; }
     const capNote = config.maxTasksPerRun > 0 && todo.length > config.maxTasksPerRun ? ` (capped to ${config.maxTasksPerRun} by maxTasksPerRun)` : '';
     log.plain(`\n${todo.length} task${todo.length === 1 ? '' : 's'} would run${capNote}: ${todo.map((t) => t.id).join(' ')}`);
+    // Build a fresh repo map in memory so the preview matches what a real run would send.
+    const previewIndex = config.repoMap ? generateIndex(paths) : undefined;
     for (const t of todo) {
       const rs = resolveSession(config, t, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
       const tProvider = getProvider(rs.spec.providerName);
       const st = state.tasks[t.id] ?? newTaskState(t.title);
-      const prompt = buildTaskPrompt(promptCtx(ctx, t, { ...st, attempts: st.attempts + 1 }, rs.spec, st.lastError?.message, 0));
+      const prompt = buildTaskPrompt(promptCtx(ctx, t, { ...st, attempts: st.attempts + 1 }, rs.spec, st.lastError?.message, 0, previewIndex));
       const cmd = tProvider.buildCommand({ bin: rs.spec.bin, prompt, promptFile: `${paths.runs}/${t.id}-<stamp>.prompt.md`, taskId: t.id, attempt: st.attempts + 1, kind: 'task', model: rs.spec.model, autoApprove: rs.spec.autoApprove, budgetUsd: rs.spec.budgetUsd, extraArgs: rs.spec.extraArgs, cwd: paths.root });
       log.plain(`\n=== ${t.id} — ${t.title}`);
       log.plain(`provider: ${rs.spec.providerName} [${rs.spec.sources.provider}] · model: ${rs.spec.model ?? 'provider default'} [${rs.spec.sources.model}] · timeout ${rs.spec.timeoutMin} min · idle ${rs.spec.idleTimeoutMin} min · auto-approve ${rs.spec.autoApprove}`);
@@ -495,6 +548,15 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     todo = todo.slice(0, config.maxTasksPerRun);
   }
 
+  const runCost = (): number => ctx.runCostUsd ?? 0;
+  const budgetHalt = (): number | undefined => {
+    if (config.maxCostUsdPerRun <= 0 || runCost() < config.maxCostUsdPerRun) return undefined;
+    return setHalt(ctx, {
+      at: nowIso(), category: 'budget',
+      reason: `sessions reported $${runCost().toFixed(2)} during this run (maxCostUsdPerRun = $${config.maxCostUsdPerRun.toFixed(2)}); raise the cap or \`symphony clear-halt\` to continue`,
+    });
+  };
+
   const runLoop = async (): Promise<number> => {
     let consecutiveFailures = 0;
     for (const task of todo) {
@@ -503,6 +565,8 @@ export async function runCommand(ctx: RunContext): Promise<number> {
         log.warn(`${relative(paths.root, paths.stop)} present: pausing before ${task.id}. Remove it and re-run to continue.`);
         return 0;
       }
+      const spend = budgetHalt();
+      if (spend !== undefined) return spend;
       const st = state.tasks[task.id];
       if (st && st.status === 'failed' && st.attempts >= config.halt.maxAttemptsPerTask && !flags.retry) {
         return setHalt(ctx, { at: nowIso(), taskId: task.id, category: 'attempts', reason: `${task.id} has failed ${st.attempts} times (halt.maxAttemptsPerTask = ${config.halt.maxAttemptsPerTask}); last: ${st.lastError?.message ?? st.summary ?? '?'}. Fix the cause, then \`symphony run --clear-halt --retry --only ${task.id}\`` });
@@ -512,6 +576,8 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       if (out.stopped) return 0;
       if (out.halt) return setHalt(ctx, out.halt);
       if (out.interrupted) return ctx.signalName === 'SIGTERM' ? 143 : 130;
+      const overBudget = budgetHalt();
+      if (overBudget !== undefined) return overBudget;
 
       if (out.status === 'done') { consecutiveFailures = 0; continue; }
       if (out.status === 'blocked') {
@@ -540,11 +606,15 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     const done = ctx.tasks.filter((t) => DONE_STATES.includes(state.tasks[t.id]?.status ?? 'pending')).length;
     const blocked = ctx.tasks.filter((t) => state.tasks[t.id]?.status === 'blocked').map((t) => t.id);
     updatePipelineStatus(paths, ctx.tasks, state, log);
-    log.info(`run finished: ${done}/${ctx.tasks.length} done${blocked.length ? `; awaiting a human: ${blocked.join(' ')}` : ''}`);
+    log.info(`run finished: ${done}/${ctx.tasks.length} done${blocked.length ? `; awaiting a human: ${blocked.join(' ')}` : ''}${runCost() > 0 ? ` · $${runCost().toFixed(2)} reported this run` : ''}`);
     return 0;
   };
 
+  const preSpend = budgetHalt();
+  if (preSpend !== undefined) return preSpend;
+
   acquireLock(paths);
+  ctx.startBranch = currentBranch(paths.root);
   const stopHeartbeat = startLockHeartbeat(paths);
   let code: number;
   try {
@@ -557,6 +627,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     SYMPHONY_ROOT: paths.root,
     SYMPHONY_EXIT: String(code),
     SYMPHONY_STATUS: code === 0 ? 'ok' : code === 2 ? 'stopped' : code === 3 ? 'halted' : 'error',
+    SYMPHONY_COST: runCost() > 0 ? runCost().toFixed(2) : '',
   }, (m) => log.warn(m));
   return code;
 }
@@ -578,6 +649,7 @@ export async function nudgeCommand(ctx: RunContext, rawId: string, note?: string
   if (!preflight(ctx, spec, provider)) return 4;
 
   acquireLock(paths);
+  ctx.startBranch = currentBranch(paths.root);
   const stopHeartbeat = startLockHeartbeat(paths);
   try {
     st.status = 'running';

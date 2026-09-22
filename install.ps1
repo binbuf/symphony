@@ -28,7 +28,8 @@ Copy-Item -Recurse -Force (Join-Path $here 'dist') (Join-Path $dest 'dist')
 foreach ($f in @('symphony', 'symphony.ps1', 'symphony.cmd', 'README.md', 'symphony.config.example.json')) {
   Copy-Item -Force (Join-Path $here $f) $dest
 }
-Set-Content -Path (Join-Path $dest 'package.json') -Value "{`n  `"name`": `"symphony`",`n  `"type`": `"module`",`n  `"private`": true`n}`n"
+$version = (Get-Content (Join-Path $here 'package.json') -Raw | ConvertFrom-Json).version
+Set-Content -Path (Join-Path $dest 'package.json') -Value "{`n  `"name`": `"symphony`",`n  `"version`": `"$version`",`n  `"type`": `"module`",`n  `"private`": true`n}`n"
 Set-Content -Path (Join-Path $dest '.gitignore') -Value "*`n"
 
 $cfg = Join-Path $dest 'symphony.config.json'

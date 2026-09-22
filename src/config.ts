@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { PathOverrides, Paths } from './paths.js';
 import type { ProviderName } from './providers/types.js';
 import type { Task } from './tasks.js';
@@ -52,6 +53,8 @@ export interface Config {
   repoMap: boolean;
   /** Byte cap for the inlined repo map. */
   maxIndexBytes: number;
+  /** Byte cap for the inlined task file body. */
+  maxTaskBytes: number;
   /** When false, the design/ and adr/ folders are neither required nor used: tasks run standalone. */
   designDocs: boolean;
   /** How many extra fresh sessions a task may take when it reports `continue` (subtask iteration). */
@@ -60,6 +63,8 @@ export interface Config {
   maxIterationsPerTask: number;
   /** Max tasks a single `run` invocation will process. 0 = unlimited. */
   maxTasksPerRun: number;
+  /** Stop the run once the session cost reported during this invocation reaches this many USD. 0 = unlimited. */
+  maxCostUsdPerRun: number;
   /** Commit after every session, including intermediate `continue` sessions. */
   commitPerSession: boolean;
   /** What to do when a task reports `blocked`: 'stop' for a human, or 'continue' to the next task. */
@@ -71,6 +76,8 @@ export interface Config {
   verifyCommand?: string;
   /** Wall clock for the verify command. */
   verifyTimeoutMin: number;
+  /** When no verifyCommand is configured, use the project's package.json test script (`npm test`) as the verify command. */
+  inferVerify: boolean;
   hooks: HooksConfig;
   git: GitConfig;
 }
@@ -80,6 +87,7 @@ export interface CliOverrides {
   model?: string;
   timeoutMin?: number;
   budgetUsd?: number;
+  maxCostUsd?: number;
   safe?: boolean;
   noNudge?: boolean;
   maxTasks?: number;
@@ -109,10 +117,12 @@ export const DEFAULTS: Config = {
   inlineDesignDocs: true,
   repoMap: true,
   maxIndexBytes: 16384,
+  maxTaskBytes: 32768,
   designDocs: true,
   maxContinuations: 4,
   maxIterationsPerTask: 0,
   maxTasksPerRun: 0,
+  maxCostUsdPerRun: 0,
   commitPerSession: true,
   onBlocked: 'stop',
   retry: { maxAttempts: 3, backoffSec: [30, 120, 300] },
@@ -124,6 +134,7 @@ export const DEFAULTS: Config = {
   commitMessageTemplate: '{id}: {title} [{status}]',
   verifyCommand: undefined,
   verifyTimeoutMin: 30,
+  inferVerify: true,
   hooks: {},
   git: { autoIgnoreUntracked: true, extraIgnore: [] },
 };
@@ -146,6 +157,26 @@ function numberOr(x: unknown, fallback: number, where: string, warnings: string[
   if (typeof x === 'number' && Number.isFinite(x)) return x;
   warnings.push(`${where}: expected a number, got ${JSON.stringify(x)}; using ${fallback}`);
   return fallback;
+}
+
+/** Like numberOr, but a value that is not strictly positive falls back with a warning. */
+function positiveOr(x: unknown, fallback: number, where: string, warnings: string[]): number {
+  const n = numberOr(x, fallback, where, warnings);
+  if (!(n > 0)) {
+    warnings.push(`${where}: expected a positive number, got ${JSON.stringify(x ?? n)}; using ${fallback}`);
+    return fallback;
+  }
+  return n;
+}
+
+/** Like numberOr, but a value below `min` falls back with a warning. */
+function atLeastOr(x: unknown, fallback: number, min: number, where: string, warnings: string[]): number {
+  const n = numberOr(x, fallback, where, warnings);
+  if (!(n >= min)) {
+    warnings.push(`${where}: expected a number >= ${min}, got ${JSON.stringify(x ?? n)}; using ${fallback}`);
+    return fallback;
+  }
+  return n;
 }
 
 function boolOr(x: unknown, fallback: boolean, where: string, warnings: string[]): boolean {
@@ -216,7 +247,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         model: typeof val.model === 'string' && val.model ? val.model : base.model,
         extraArgs: stringArray(val.extraArgs, base.extraArgs, `providers.${name}.extraArgs`, warnings),
         budgetUsd: val.budgetUsd === undefined || val.budgetUsd === null ? base.budgetUsd : numberOr(val.budgetUsd, 0, `providers.${name}.budgetUsd`, warnings),
-        idleTimeoutMin: val.idleTimeoutMin === undefined || val.idleTimeoutMin === null ? base.idleTimeoutMin : numberOr(val.idleTimeoutMin, DEFAULTS.idleTimeoutMin, `providers.${name}.idleTimeoutMin`, warnings),
+        idleTimeoutMin: val.idleTimeoutMin === undefined || val.idleTimeoutMin === null ? base.idleTimeoutMin : atLeastOr(val.idleTimeoutMin, DEFAULTS.idleTimeoutMin, 0, `providers.${name}.idleTimeoutMin`, warnings),
       };
     }
   }
@@ -232,19 +263,21 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     paths: pathOverrides(raw.paths, warnings),
     autoApprove: boolOr(raw.autoApprove, DEFAULTS.autoApprove, 'autoApprove', warnings),
     nudge: boolOr(raw.nudge, DEFAULTS.nudge, 'nudge', warnings),
-    timeoutMin: numberOr(raw.timeoutMin, DEFAULTS.timeoutMin, 'timeoutMin', warnings),
-    idleTimeoutMin: numberOr(raw.idleTimeoutMin, DEFAULTS.idleTimeoutMin, 'idleTimeoutMin', warnings),
-    nudgeTimeoutMin: numberOr(raw.nudgeTimeoutMin, DEFAULTS.nudgeTimeoutMin, 'nudgeTimeoutMin', warnings),
-    prepareTimeoutMin: numberOr(raw.prepareTimeoutMin, DEFAULTS.prepareTimeoutMin, 'prepareTimeoutMin', warnings),
-    maxProgressBytes: numberOr(raw.maxProgressBytes, DEFAULTS.maxProgressBytes, 'maxProgressBytes', warnings),
+    timeoutMin: positiveOr(raw.timeoutMin, DEFAULTS.timeoutMin, 'timeoutMin', warnings),
+    idleTimeoutMin: atLeastOr(raw.idleTimeoutMin, DEFAULTS.idleTimeoutMin, 0, 'idleTimeoutMin', warnings),
+    nudgeTimeoutMin: positiveOr(raw.nudgeTimeoutMin, DEFAULTS.nudgeTimeoutMin, 'nudgeTimeoutMin', warnings),
+    prepareTimeoutMin: positiveOr(raw.prepareTimeoutMin, DEFAULTS.prepareTimeoutMin, 'prepareTimeoutMin', warnings),
+    maxProgressBytes: positiveOr(raw.maxProgressBytes, DEFAULTS.maxProgressBytes, 'maxProgressBytes', warnings),
     progressDigest: boolOr(raw.progressDigest, DEFAULTS.progressDigest, 'progressDigest', warnings),
     inlineDesignDocs: boolOr(raw.inlineDesignDocs, DEFAULTS.inlineDesignDocs, 'inlineDesignDocs', warnings),
     repoMap: boolOr(raw.repoMap, DEFAULTS.repoMap, 'repoMap', warnings),
-    maxIndexBytes: numberOr(raw.maxIndexBytes, DEFAULTS.maxIndexBytes, 'maxIndexBytes', warnings),
+    maxIndexBytes: positiveOr(raw.maxIndexBytes, DEFAULTS.maxIndexBytes, 'maxIndexBytes', warnings),
+    maxTaskBytes: positiveOr(raw.maxTaskBytes, DEFAULTS.maxTaskBytes, 'maxTaskBytes', warnings),
     designDocs: boolOr(raw.designDocs, DEFAULTS.designDocs, 'designDocs', warnings),
     maxContinuations: Math.max(0, numberOr(raw.maxContinuations, DEFAULTS.maxContinuations, 'maxContinuations', warnings)),
     maxIterationsPerTask: Math.max(0, numberOr(raw.maxIterationsPerTask, DEFAULTS.maxIterationsPerTask, 'maxIterationsPerTask', warnings)),
     maxTasksPerRun: Math.max(0, numberOr(raw.maxTasksPerRun, DEFAULTS.maxTasksPerRun, 'maxTasksPerRun', warnings)),
+    maxCostUsdPerRun: Math.max(0, numberOr(raw.maxCostUsdPerRun, DEFAULTS.maxCostUsdPerRun, 'maxCostUsdPerRun', warnings)),
     commitPerSession: boolOr(raw.commitPerSession, DEFAULTS.commitPerSession, 'commitPerSession', warnings),
     onBlocked: (() => {
       if (raw.onBlocked === undefined || raw.onBlocked === null) return DEFAULTS.onBlocked;
@@ -269,7 +302,8 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     },
     commitMessageTemplate: typeof raw.commitMessageTemplate === 'string' && raw.commitMessageTemplate ? raw.commitMessageTemplate : DEFAULTS.commitMessageTemplate,
     verifyCommand: hookString(raw.verifyCommand, 'verifyCommand', warnings),
-    verifyTimeoutMin: numberOr(raw.verifyTimeoutMin, DEFAULTS.verifyTimeoutMin, 'verifyTimeoutMin', warnings),
+    verifyTimeoutMin: positiveOr(raw.verifyTimeoutMin, DEFAULTS.verifyTimeoutMin, 'verifyTimeoutMin', warnings),
+    inferVerify: boolOr(raw.inferVerify, DEFAULTS.inferVerify, 'inferVerify', warnings),
     hooks: {
       afterTask: hookString(hooksRaw.afterTask, 'hooks.afterTask', warnings),
       onHalt: hookString(hooksRaw.onHalt, 'hooks.onHalt', warnings),
@@ -285,6 +319,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   if (cli.timeoutMin !== undefined) config.timeoutMin = cli.timeoutMin;
   if (cli.maxTasks !== undefined) config.maxTasksPerRun = Math.max(0, cli.maxTasks);
   if (cli.maxIterations !== undefined) config.maxIterationsPerTask = Math.max(0, cli.maxIterations);
+  if (cli.maxCostUsd !== undefined) config.maxCostUsdPerRun = Math.max(0, cli.maxCostUsd);
   if (cli.safe) config.autoApprove = false;
   if (cli.noNudge) config.nudge = false;
   return { config, fileExists: exists, warnings };
@@ -339,7 +374,12 @@ export function resolveSession(
     warnings.push(`opencode models are "provider/model" (e.g. anthropic/claude-sonnet-4-5); got "${model}"`);
   }
 
-  const timeoutMin = meta.timeoutMin && Number.isFinite(Number(meta.timeoutMin)) ? Number(meta.timeoutMin) : config.timeoutMin;
+  let timeoutMin = config.timeoutMin;
+  if (meta.timeoutMin !== undefined && meta.timeoutMin !== '') {
+    const n = Number(meta.timeoutMin);
+    if (Number.isFinite(n) && n > 0) timeoutMin = n;
+    else warnings.push(`${task?.taskFileRel ?? 'task front matter'}: timeoutMin "${meta.timeoutMin}" is not a positive number; using ${config.timeoutMin}`);
+  }
 
   return {
     spec: {
@@ -358,11 +398,40 @@ export function resolveSession(
 }
 
 /**
- * The independent check the harness runs after a task reports `done`. Per-task front matter wins.
+ * The independent check the harness runs after a task reports `done`. Per-task front matter wins,
+ * then `verifyCommand`, then (when `inferVerify` is on) the project's package.json test script.
  * Provider-agnostic: it is a plain shell command run in the project root.
  */
-export function resolveVerify(config: Config, task: Task | undefined): { command: string; timeoutMin: number } | undefined {
-  const command = (task?.meta?.verify ?? '').trim() || (config.verifyCommand ?? '').trim();
-  if (!command) return undefined;
-  return { command, timeoutMin: config.verifyTimeoutMin };
+export interface ResolvedVerify {
+  command: string;
+  timeoutMin: number;
+  /** Where the command came from: task front matter, config, or package.json inference. */
+  source: 'task front matter' | 'config' | 'package.json';
+}
+
+const NPM_DEFAULT_TEST = /^\s*echo\s+["']?Error:\s*no test specified["']?\s*&&\s*exit\s+1\s*$/i;
+
+/** The `npm test` command when package.json defines a real test script, else undefined. */
+export function inferVerifyCommand(root: string): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as unknown;
+    if (!isRecord(parsed) || !isRecord(parsed.scripts)) return undefined;
+    const test = parsed.scripts.test;
+    if (typeof test !== 'string' || !test.trim() || NPM_DEFAULT_TEST.test(test)) return undefined;
+    return 'npm test';
+  } catch {
+    return undefined;
+  }
+}
+
+export function resolveVerify(config: Config, task: Task | undefined, root?: string): ResolvedVerify | undefined {
+  const fromTask = (task?.meta?.verify ?? '').trim();
+  if (fromTask) return { command: fromTask, timeoutMin: config.verifyTimeoutMin, source: 'task front matter' };
+  const fromConfig = (config.verifyCommand ?? '').trim();
+  if (fromConfig) return { command: fromConfig, timeoutMin: config.verifyTimeoutMin, source: 'config' };
+  if (config.inferVerify && root) {
+    const inferred = inferVerifyCommand(root);
+    if (inferred) return { command: inferred, timeoutMin: config.verifyTimeoutMin, source: 'package.json' };
+  }
+  return undefined;
 }

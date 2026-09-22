@@ -15,7 +15,7 @@ Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Goo
 - **Everything lands in git.** Each task ends in a commit that carries the code, the roadmap marker, the task's hand-off, the design updates and the run log. `git log` is the pipeline's history; `git revert` is the undo.
 - **Resumable and inspectable.** Kill it, crash it, or pause it with a file — state and roadmap markers let the next run pick up exactly where it left off. Every session's exact prompt, rendered log and raw NDJSON are saved.
 - **Provider-agnostic.** The same plan and lifecycle work with any of the six agent CLIs, or the built-in `fake` provider for testing the harness itself without spending anything.
-- **Guardrails you control.** An independent `verifyCommand` after every `done`, retry/halt policies, per-task budgets and iteration caps, and lifecycle hooks for notifications or CI.
+- **Guardrails you control.** An independent verify command after every `done` (your `verifyCommand`, a per-task `verify:`, or the project's `npm test`), retry/halt policies, per-task and per-run cost caps, and lifecycle hooks for notifications or CI.
 
 ## Quick start
 
@@ -66,7 +66,7 @@ Or override per run: `./.symphony/symphony run --provider codex --model gpt-5`. 
 ```bash
 cd /path/to/your/project
 ./.symphony/symphony init      # scaffold docs/ (never overwrites anything)
-./.symphony/symphony doctor    # preflight: node, git, roadmap, provider binary + auth, halt/STOP/lock
+./.symphony/symphony doctor    # preflight: node, git, roadmap, every provider a task uses + auth, verify, halt/STOP/lock
 ./.symphony/symphony run       # work through the roadmap, one fresh session per task
 ```
 
@@ -93,7 +93,7 @@ On Windows use `./.symphony/symphony.ps1` (or `.symphony\symphony.cmd` from `cmd
 
 ### Preflight — `doctor`
 
-Run it before the first `run` and after changing providers or config. It checks, in order: Node version, that the project is a git repository (and whether the worktree is dirty), that `ROADMAP.md` exists and parses, that the provider binary is on `PATH`, that it is authenticated, and whether a halt, STOP sentinel or another live run (lock) would block you. Failures exit `4`; warnings do not stop a run. `run` repeats these checks itself before every invocation.
+Run it before the first `run` and after changing providers or config. It checks, in order: Node version, that the project is a git repository (and whether the worktree is dirty), that `ROADMAP.md` exists and parses, that the binary of every provider a task will use is on `PATH` (per-task front matter included), that they are authenticated, that an independent verify command exists (warning when nothing will check a `done`), and whether a halt, STOP sentinel or another live run (lock) would block you. Failures exit `4`; warnings do not stop a run. `run` repeats these checks itself before every invocation.
 
 ### `init` — scaffold the plan
 
@@ -142,9 +142,9 @@ docs/
    - `blocked` — a human decision or external dependency is genuinely required.
    - `failed` — anything else.
 
-5. **Verifies independently (optional).** If `verifyCommand` (or a per-task `verify:` in the task file's front matter, which wins) is set, the harness runs that shell command itself after a `done`. A non-zero exit demotes the task to `failed` and records the command, exit code and output tail in the logs. Provider-agnostic: any command, any stack.
+5. **Verifies independently.** A per-task `verify:` (front matter) wins, then `verifyCommand`; when neither is set the harness uses the project's `package.json` test script (`npm test`) if one exists (`inferVerify: false` disables that). It runs the command itself after a `done`. A non-zero exit demotes the task to `failed` and records the command, exit code and output tail in the logs. Provider-agnostic: any command, any stack.
 6. **Writes the record.** `docs/logs/TNN.md` (status, provider/model, timing, cost, commit, each session's reported status and summary), then regenerates the pipeline status block at the bottom of `ROADMAP.md`.
-7. **Commits everything** with `git add -A && git commit -m "T01: <title> [<status>]"` (template configurable). Before staging, an ephemeral-file guard keeps secrets and build junk out of the commit by adding them to `.gitignore` — agent-created source files still land.
+7. **Commits everything** with `git add -A && git commit -m "T01: <title> [<status>]"` (template configurable). Before staging, an ephemeral-file guard keeps secrets and build junk out of the commit by adding them to `.gitignore` — agent-created source files still land. A failed commit is retried once; if it still fails the task is demoted to `failed` rather than recorded `done`, because its work is not in git. Commits also refuse to run if a session switched branches (`HEAD` is checked against the branch the run started on).
 8. **Starts the next task in a new session.** Each session is also instructed to append a `## Txx` section to `PROGRESS.md`, fill the task file's `## Hand-off`, run the named tests in the foreground, and update the design docs/ADRs its work touched.
 
 ### Mid-run: how the harness keeps going
@@ -158,6 +158,8 @@ docs/
 | `continue` past `maxContinuations` | treated as failed |
 | `maxIterationsPerTask` / `maxTasksPerRun` / `--budget` reached | the task fails gracefully, or the run processes only the first N tasks, with a clear summary |
 | `touch .stop` (path configurable) | pauses at the next task boundary, exit `0`; nothing is killed. `touch .symphony/STOP` is the legacy alias |
+| commit fails (pre-commit hook, signing, `index.lock`) or a session switched branches | retried once; if it still fails the task is demoted to `failed` instead of recorded `done`, because its work did not land in git |
+| reported session cost crosses `maxCostUsdPerRun` | halts the run before the next task; `clear-halt` to continue |
 | Ctrl-C | kills the current session, records the task unfinished, exits `130`; press twice to force quit |
 | another run already active | refuses to start, exit `4` (lock file holds the live pid and a heartbeat) |
 
@@ -272,14 +274,15 @@ Set `"designDocs": false` to run a plain series of tasks: the harness does not c
 
 ## CLI reference
 
-Every command accepts `--root DIR` (default: the project containing `.symphony/`). Exit codes are listed [below](#exit-codes).
+Every command accepts `--root DIR` (default: the project containing `.symphony/`). `symphony --version` prints the version. Exit codes are listed [below](#exit-codes).
 
 | command | what it does |
 |---|---|
 | `run` | run every unfinished task in roadmap order, committing after each; resumes where it left off |
 | `run --prepare` | run `prepare` first, then start only if `docs/` lints clean |
 | `status [--json]` | progress table (or machine-readable JSON) |
-| `doctor` | preflight: node, git repo, roadmap, provider binary + auth, halt / STOP / lock |
+| `logs [T05]` | print a task's per-run log (`docs/logs/T05.md`); with no id, list the log files |
+| `doctor` | preflight: node, git repo, roadmap, provider binary + auth, verify command, halt / STOP / lock |
 | `init` | create the docs skeleton, `tasks/TEMPLATE.md`, `design/adr/0000-template.md`, config, `.gitignore` entry |
 | `lint` | check the project root and docs against the expected layout; no LLM; exit 2 on errors |
 | `prepare [--dry-run]` | lint, then let the configured agent convert/repair the docs in place, re-lint, commit |
@@ -307,6 +310,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `--max-tasks N` | process at most N tasks this run |
 | `--max-iterations N` | at most N sessions per task, retries and continuations included |
 | `--budget USD` | per-task budget (Claude only) |
+| `--max-cost USD` | stop the run once reported session cost reaches this (`maxCostUsdPerRun`; 0 = off) |
 | `--clear-halt` | clear a sticky halt and start |
 
 ## Providers
@@ -348,12 +352,15 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `inlineDesignDocs` | `true` | inline the design docs a task names in its Context / Design notes, not just list them |
 | `repoMap` | `true` | generate `docs/INDEX.md` (design-doc summaries + a source map) before each task and inline it |
 | `maxIndexBytes` | `16384` | byte cap for the inlined repo map |
+| `maxTaskBytes` | `32768` | byte cap for the inlined task file body (the full file stays on disk) |
 | `designDocs` | `true` | when `false`, `design/` and `adr/` are neither required nor used: tasks run standalone |
 | `maxContinuations` | `4` | extra fresh sessions a task may take after reporting `continue` |
 | `maxIterationsPerTask`, `maxTasksPerRun` | `0`, `0` | provider-agnostic caps (0 = unlimited): sessions per task in a run, and tasks per run |
+| `maxCostUsdPerRun` | `0` | stop the run when the session cost reported during this invocation reaches this many USD (0 = unlimited; providers that do not report cost cannot be capped) |
 | `commitPerSession` | `true` | commit each `continue` slice, not just the final result |
 | `onBlocked` | `stop` | `stop` at a blocked task for a human, or `continue` to the next task |
 | `verifyCommand`, `verifyTimeoutMin` | –, `30` | shell command the harness runs itself after `done`; non-zero demotes to failed (per-task `verify:` wins) |
+| `inferVerify` | `true` | when no verify command is configured, use the project's `package.json` test script (`npm test`) |
 | `hooks.afterTask` `.onBlocked` `.onHalt` `.onRunEnd` | – | shell commands run on lifecycle events (see [Hooks](#hooks)) |
 | `git.autoIgnoreUntracked`, `git.extraIgnore` | `true`, `[]` | before committing, keep untracked ephemeral/secret files out of the commit by adding their patterns to `.gitignore` |
 | `retry.maxAttempts`, `retry.backoffSec` | `3`, `[30,120,300]` | transient-error retries |
@@ -366,10 +373,10 @@ Four optional shell hooks let the harness notify or trigger anything without bui
 
 | hook | when | environment |
 |---|---|---|
-| `hooks.afterTask` | after every task finishes | `SYMPHONY_TASK`, `SYMPHONY_TITLE`, `SYMPHONY_STATUS`, `SYMPHONY_SUMMARY`, `SYMPHONY_COMMIT`, `SYMPHONY_PROVIDER`, `SYMPHONY_MODEL` |
+| `hooks.afterTask` | after every task finishes | `SYMPHONY_TASK`, `SYMPHONY_TITLE`, `SYMPHONY_STATUS`, `SYMPHONY_SUMMARY`, `SYMPHONY_COMMIT`, `SYMPHONY_PROVIDER`, `SYMPHONY_MODEL`, `SYMPHONY_COST` |
 | `hooks.onBlocked` | a task reports `blocked` | `SYMPHONY_TASK`, `SYMPHONY_TITLE`, `SYMPHONY_SUMMARY` |
 | `hooks.onHalt` | the run halts on a fatal error | `SYMPHONY_TASK`, `SYMPHONY_HALT_CATEGORY`, `SYMPHONY_HALT_REASON` |
-| `hooks.onRunEnd` | `run` finishes | `SYMPHONY_EXIT`, `SYMPHONY_STATUS` (`ok` · `stopped` · `halted` · `error`) |
+| `hooks.onRunEnd` | `run` finishes | `SYMPHONY_EXIT`, `SYMPHONY_STATUS` (`ok` · `stopped` · `halted` · `error`), `SYMPHONY_COST` |
 
 All hooks also get `SYMPHONY_ROOT`. Example:
 
@@ -390,7 +397,7 @@ docs/INDEX.md                                  generated repo map, rewritten bef
 .symphony/state.json                           per-task state and the halt flag; delete it and progress is rebuilt from the roadmap markers
 ```
 
-Every task gets a `docs/logs/TNN.md` (path overridable with `paths.logs`). It is rewritten in full after each session and committed with the task, so `git log` plus the logs give a per-task and pipeline-wide history. It also records the verify command's result when one is configured. Retries append `-r2`, nudges `-nudge`, continuation sessions `-rN` too. `paths.state`/`.runs`/`.log` move these.
+Every task gets a `docs/logs/TNN.md` (path overridable with `paths.logs`). It is rewritten in full after each session and committed with the task, so `git log` plus the logs give a per-task and pipeline-wide history. It also records the verify command's result when one is configured. `symphony logs T05` prints one from the terminal. Retries append `-r2`, nudges `-nudge`, continuation sessions `-rN` too. `paths.state`/`.runs`/`.log` move these.
 
 ## Platform support
 
@@ -417,11 +424,13 @@ npm run typecheck && npm run build                # tsc → dist/
 node dist/tools/parse-check.js claude session.jsonl [--render]   # replay a provider log through the parser
 ```
 
-The `fake` provider replays Claude-format NDJSON fixtures from `SYMPHONY_FAKE_FIXTURES` (default `.symphony/fixtures`), matched in order `<taskId>.<kind>.jsonl` → `<taskId>.jsonl` → `default.<kind>.jsonl` → `default.jsonl`, where `kind` is `task`, `continue`, `resume` or `nudge` (the `prepare` session uses taskId `prepare`, kind `task`). Control lines the fake agent interprets instead of echoing: `fake_write {path, content}`, `fake_rm {path}`, `fake_stderr {text}`, `fake_sleep {ms}`, `fake_exit {code}`. That is enough to exercise retries, nudges, continuations, halts, and `prepare` without spending anything.
+The `fake` provider replays Claude-format NDJSON fixtures from `SYMPHONY_FAKE_FIXTURES` (default `.symphony/fixtures`), matched in order `<taskId>.<kind>.jsonl` → `<taskId>.jsonl` → `default.<kind>.jsonl` → `default.jsonl`, where `kind` is `task`, `continue`, `resume` or `nudge` (the `prepare` session uses taskId `prepare`, kind `task`). Control lines the fake agent interprets instead of echoing: `fake_write {path, content}`, `fake_rm {path}`, `fake_run {command}`, `fake_stderr {text}`, `fake_sleep {ms}`, `fake_exit {code}`. That is enough to exercise retries, nudges, continuations, halts, branch switches, and `prepare` without spending anything.
 
 ## Notes
 
-- **Never pushes.** symphony commits to the current branch only.
+- **Never pushes.** symphony commits to the current branch only, and refuses to commit at all if a session switched branches mid-run.
+- `--max-cost` and `maxCostUsdPerRun` can only enforce what a provider reports: Claude (per session) and OpenCode (per session) do; Codex reports tokens instead.
+- `doctor` warns when neither `verifyCommand` nor a `package.json` test script exists, because then a task's `done` cannot be independently confirmed.
 - `--safe` on Claude denies every shell command outright (nobody can answer the prompt), so expect `blocked` results.
 - The Gemini and Antigravity adapters follow their documented CLI shapes but were not exercised against a live binary here; adjust `providers.<name>.bin`/`extraArgs` for your install. Claude Code is launched with its normal configuration, so MCP servers/connectors configured there keep working.
 - The whole `.symphony/` directory is gitignored: the installer writes `*` into `.symphony/.gitignore` and adds `.symphony/` to the project's `.gitignore`. To track the harness in a repo instead, delete `.symphony/.gitignore`, drop the root entry, and ignore `runs/`, `state.json`, `symphony.log`, `lock`, and your stop file.

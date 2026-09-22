@@ -18,9 +18,12 @@ export function gitToplevel(root: string): string | undefined {
   return r.code === 0 ? r.stdout : undefined;
 }
 
+/** Current branch name; works on an unborn branch (before the first commit) and reports detached HEAD. */
 export function currentBranch(root: string): string {
+  const sym = git(root, ['symbolic-ref', '--short', '-q', 'HEAD']);
+  if (sym.code === 0 && sym.stdout) return sym.stdout;
   const r = git(root, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  return r.code === 0 ? r.stdout : '(no commits)';
+  return r.code === 0 ? r.stdout : '(no branch)';
 }
 
 export function dirtyFiles(root: string): string[] {
@@ -142,8 +145,30 @@ export type CommitOutcome =
   | { status: 'committed'; sha: string; files: number }
   | { status: 'failed'; detail: string };
 
+/**
+ * The literal subject prefix a task's commits start with, derived from the configured commit message
+ * template: `{id}: {title} [{status}]` → `T05: `. Used to find a task's commits for `reset --revert`
+ * even when the template has been customised. Undefined when the template does not contain `{id}`.
+ */
+export function commitPrefix(template: string, id: string): string | undefined {
+  const i = template.indexOf('{id}');
+  if (i === -1) return undefined;
+  const before = template.slice(0, i);
+  // A placeholder before {id} means the subject has no literal prefix to match on.
+  if (before.includes('{')) return undefined;
+  const after = template.slice(i + 4);
+  const next = after.indexOf('{');
+  return `${before}${id}${next === -1 ? after : after.slice(0, next)}`;
+}
+
 /** `git add -A && git commit` when the tree is dirty. Never pushes. */
-export function commitAll(root: string, message: string, log?: (m: string) => void, opts: { autoIgnoreUntracked?: boolean; extraIgnore?: string[] } = {}): CommitOutcome {
+export function commitAll(root: string, message: string, log?: (m: string) => void, opts: { autoIgnoreUntracked?: boolean; extraIgnore?: string[]; expectedBranch?: string } = {}): CommitOutcome {
+  if (opts.expectedBranch !== undefined) {
+    const branch = currentBranch(root);
+    if (branch !== opts.expectedBranch) {
+      return { status: 'failed', detail: `branch changed from ${opts.expectedBranch} to ${branch}; refusing to commit (an agent session switched branches)` };
+    }
+  }
   const guard = guardGitignore(root, { enabled: opts.autoIgnoreUntracked, extra: opts.extraIgnore });
   if (guard.added.length && log) log(`auto-ignored ephemeral/secret files via .gitignore: ${guard.added.join(', ')}`);
   if (guard.committed.length && log) log(`committing ${guard.committed.length} untracked file(s): ${guard.committed.slice(0, 8).join(', ')}${guard.committed.length > 8 ? ', …' : ''}`);
@@ -158,14 +183,14 @@ export function commitAll(root: string, message: string, log?: (m: string) => vo
   return { status: 'committed', sha, files: files.length };
 }
 
-/** Full commit hashes whose subject starts with `<id>:`, newest first. Used by `reset --revert`. */
-export function commitsForTask(root: string, id: string): string[] {
+/** Full commit hashes whose subject starts with `prefix` (default `<id>:`), newest first. Used by `reset --revert`. */
+export function commitsForTask(root: string, id: string, prefix = `${id}:`): string[] {
   const r = git(root, ['log', '--format=%H%x09%s']);
   if (r.code !== 0 || !r.stdout) return [];
   return r.stdout
     .split('\n')
     .map((l) => l.split('\t'))
-    .filter(([, subject]) => subject?.startsWith(`${id}:`))
+    .filter(([, subject]) => subject?.startsWith(prefix))
     .map(([sha]) => sha);
 }
 

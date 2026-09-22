@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULTS } from '../src/config.js';
+import { currentBranch } from '../src/git.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths } from '../src/paths.js';
 import { runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
@@ -187,4 +188,127 @@ test('run caps at maxTasksPerRun and fires afterTask hooks per finished task', a
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
+});
+
+test('a done task whose commit keeps failing is retried and then demoted to failed', async () => {
+  const { dir, paths, task } = project();
+  writeFileSync(join(dir, '.git', 'hooks', 'pre-commit'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), startBranch: currentBranch(dir) };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'failed');
+    assert.equal(state.tasks.T01.status, 'failed');
+    assert.match(state.tasks.T01.summary ?? '', /commit failed/);
+    assert.match(readFileSync(paths.roadmap, 'utf8'), /\[~\] T01/);
+    assert.equal(state.tasks.T01.commitSha, undefined);
+    // No commit exists: git add staged the files, but the failing hook aborted every commit.
+    assert.throws(() => execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { stdio: 'ignore' }));
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a session that switches branches fails the task instead of committing elsewhere', async () => {
+  const { dir, paths, task } = project();
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'fake_run', command: 'git checkout -q -b sidebranch' }),
+    JSON.stringify({ type: 'fake_write', path: 'x.txt', content: 'x' }),
+    claudeResult('done', 'did it'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), startBranch: currentBranch(dir) };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'failed');
+    assert.match(state.tasks.T01.summary ?? '', /branch changed/);
+    assert.equal(currentBranch(dir), 'sidebranch');
+    assert.equal(execFileSync('git', ['-C', dir, 'ls-files'], { encoding: 'utf8' }).trim(), '');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('run halts when reported session cost crosses maxCostUsdPerRun', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cost-'));
+  execFileSync('git', ['-C', dir, 'init', '-q']);
+  execFileSync('git', ['-C', dir, 'config', 'user.email', 't@t']);
+  execFileSync('git', ['-C', dir, 'config', 'user.name', 't']);
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.tasksDir, { recursive: true });
+  writeFileSync(paths.roadmap, '# R\n\n## Phase 1\n\n- [ ] T01 — One\n- [ ] T02 — Two\n');
+  writeFileSync(paths.progress, '# Progress notes\n');
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  const costResult = (id: string) => JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, session_id: `s-${id}`, total_cost_usd: 1,
+    result: `SYMPHONY_RESULT\nstatus: done\nsummary: ${id} done\nEND_SYMPHONY_RESULT`,
+  });
+  for (const id of ['T01', 'T02']) {
+    writeFileSync(join(fixtures, `${id}.task.jsonl`), [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: `s-${id}` }),
+      costResult(id),
+    ].join('\n') + '\n');
+  }
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+  const tasks: Task[] = [
+    { id: 'T01', num: 1, title: 'One', phase: 'Phase 1', order: 0, meta: { provider: 'fake' } },
+    { id: 'T02', num: 2, title: 'Two', phase: 'Phase 1', order: 1, meta: { provider: 'fake' } },
+  ];
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxCostUsdPerRun: 1 };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks, state, interrupted: false, abort: new AbortController() };
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 3);
+    assert.equal(state.halted?.category, 'budget');
+    assert.equal(state.tasks.T01.status, 'done');
+    assert.equal(state.tasks.T02, undefined);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('--dry-run previews the plan while halted without clearing the halt or running', async () => {
+  const { paths, task } = project();
+  const state: State = loadState(paths);
+  state.halted = { at: new Date().toISOString(), category: 'auth', reason: 'nope' };
+  const config = { ...DEFAULTS, provider: 'fake' as const };
+  const ctx: RunContext = { paths, config, cli: {}, flags: { ...flags, dryRun: true }, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    assert.ok(state.halted, 'dry-run must not clear the sticky halt');
+    assert.equal(state.tasks.T01, undefined);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('preflight fails when a later task uses a provider whose binary is missing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-pre-'));
+  execFileSync('git', ['-C', dir, 'init', '-q']);
+  execFileSync('git', ['-C', dir, 'config', 'user.email', 't@t']);
+  execFileSync('git', ['-C', dir, 'config', 'user.name', 't']);
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.tasksDir, { recursive: true });
+  writeFileSync(paths.roadmap, '# R\n\n## Phase 1\n\n- [ ] T01 — One\n- [ ] T02 — Two\n');
+  writeFileSync(paths.progress, '# Progress notes\n');
+  const tasks: Task[] = [
+    { id: 'T01', num: 1, title: 'One', phase: 'Phase 1', order: 0, meta: { provider: 'fake' } },
+    { id: 'T02', num: 2, title: 'Two', phase: 'Phase 1', order: 1, meta: { provider: 'gemini' } },
+  ];
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    providers: { ...DEFAULTS.providers, gemini: { ...DEFAULTS.providers.gemini, bin: 'symphony-no-such-binary-xyz' } },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks, state, interrupted: false, abort: new AbortController() };
+  const code = await runCommand(ctx);
+  assert.equal(code, 4);
+  assert.equal(state.tasks.T01, undefined);
 });

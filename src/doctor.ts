@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import type { Config, SessionSpec } from './config.js';
+import { resolveVerify, type Config, type SessionSpec } from './config.js';
 import { dirtyFiles, gitAvailable, gitToplevel } from './git.js';
 import { rel, stopPresent, type Paths } from './paths.js';
 import type { Provider } from './providers/types.js';
@@ -8,12 +8,17 @@ import { liveLock, type State } from './state.js';
 
 export interface Check { name: string; level: 'ok' | 'warn' | 'fail'; detail: string }
 
+/** A provider used by some task's front matter, checked alongside the primary provider. */
+export interface ExtraProvider { spec: SessionSpec; provider: Provider; label?: string }
+
 export interface DoctorInput {
   paths: Paths;
   config: Config;
   state: State;
   spec?: SessionSpec;
   provider?: Provider;
+  /** Additional providers this run will launch (per-task front matter overrides). */
+  extraProviders?: ExtraProvider[];
   taskCount?: number;
   roadmapError?: string;
   /** `run --clear-halt` clears before checking. */
@@ -61,23 +66,37 @@ export function runDoctor(i: DoctorInput): Check[] {
   else if (i.taskCount === 0) add('roadmap', 'warn', 'ROADMAP.md has no task bullets yet');
   else add('roadmap', 'ok', `${i.taskCount ?? '?'} task${i.taskCount === 1 ? '' : 's'}`);
 
+  const checkProvider = (spec: SessionSpec, provider: Provider, label?: string): void => {
+    const where = label ? ` (${label})` : '';
+    if (provider.name === 'fake') {
+      add('provider', 'ok', `fake provider (fixture replay)${where}`);
+      return;
+    }
+    const v = probe(spec.bin, ['--version']);
+    if (v.enoent) add('provider', 'fail', `${spec.bin} not found on PATH (provider ${provider.name}${where}); set providers.${provider.name}.bin`);
+    else if (v.timedOut) add('provider', 'warn', `${spec.bin} --version did not answer within 15 s`);
+    else add('provider', v.ok ? 'ok' : 'warn', `${provider.name} via ${spec.bin}${v.out ? ` (${v.out})` : ''} · model ${spec.model ?? 'provider default'} [${spec.sources.model}]${where}`);
+    if (!v.enoent && !i.skipAuth) {
+      if (provider.authCheckArgs) {
+        const a = probe(spec.bin, provider.authCheckArgs);
+        if (a.timedOut) add('auth', 'warn', `${spec.bin} ${provider.authCheckArgs.join(' ')} did not answer within 15 s`);
+        else add('auth', a.ok ? 'ok' : 'fail', a.ok ? `authenticated${where}${a.out ? ` (${a.out.slice(0, 120)})` : ''}` : `not authenticated${where}: ${a.out || 'non-zero exit'}`);
+      } else add('auth', 'warn', `${provider.name}${where}: no auth probe available; first session will tell`);
+    }
+  };
+
   if (i.spec && i.provider) {
-    if (i.provider.name === 'fake') add('provider', 'ok', 'fake provider (fixture replay)');
-    else {
-      const v = probe(i.spec.bin, ['--version']);
-      if (v.enoent) add('provider', 'fail', `${i.spec.bin} not found on PATH (provider ${i.provider.name}); set providers.${i.provider.name}.bin`);
-      else if (v.timedOut) add('provider', 'warn', `${i.spec.bin} --version did not answer within 15 s`);
-      else add('provider', v.ok ? 'ok' : 'warn', `${i.provider.name} via ${i.spec.bin}${v.out ? ` (${v.out})` : ''} · model ${i.spec.model ?? 'provider default'} [${i.spec.sources.model}]`);
-      if (!v.enoent && !i.skipAuth) {
-        if (i.provider.authCheckArgs) {
-          const a = probe(i.spec.bin, i.provider.authCheckArgs);
-          if (a.timedOut) add('auth', 'warn', `${i.spec.bin} ${i.provider.authCheckArgs.join(' ')} did not answer within 15 s`);
-          else add('auth', a.ok ? 'ok' : 'fail', a.ok ? `authenticated${a.out ? ` (${a.out.slice(0, 120)})` : ''}` : `not authenticated: ${a.out || 'non-zero exit'}`);
-        } else add('auth', 'warn', `${i.provider.name}: no auth probe available; first session will tell`);
-      }
+    checkProvider(i.spec, i.provider);
+    for (const extra of i.extraProviders ?? []) {
+      if (extra.provider.name === i.provider.name && extra.spec.bin === i.spec.bin) continue;
+      checkProvider(extra.spec, extra.provider, extra.label);
     }
     if (!i.spec.autoApprove) add('permissions', 'warn', 'safe mode: the agent may edit files but shell commands need approval nobody can give; expect blocked results');
   }
+
+  const verify = resolveVerify(i.config, undefined, i.paths.root);
+  if (verify) add('verify', 'ok', `${verify.command} [${verify.source}]`);
+  else add('verify', 'warn', 'no verifyCommand and no package.json test script: a task that reports "done" is not independently checked');
 
   if (stopPresent(i.paths)) add('stop', 'warn', `${rel(i.paths.root, i.paths.stop)} present; run pauses until it is removed`);
   if (i.state.halted && !i.ignoreHalt) add('halt', 'fail', `halted at ${i.state.halted.at}${i.state.halted.taskId ? ` on ${i.state.halted.taskId}` : ''} (${i.state.halted.category}): ${i.state.halted.reason} — run: symphony clear-halt`);

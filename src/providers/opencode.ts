@@ -62,6 +62,7 @@ export const opencodeProvider: Provider = {
   name: 'opencode',
   supportsBudget: false,
   supportsResume: true,
+  authCheckArgs: ['auth', 'list'],
   buildCommand(o) {
     // The working directory is set via the spawn cwd; opencode has no `--dir` flag (the directory is
     // positional for the top-level command). Pass only flags this CLI understands.

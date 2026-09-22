@@ -1,9 +1,10 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULTS, type Config } from './config.js';
 import { ADR_TEMPLATE, DESIGN_README, LOGS_README, ROADMAP_TEMPLATE, TASK_TEMPLATE, docsContract } from './contract.js';
-import { commitsForTask, ensureGitignore, git } from './git.js';
+import { commitsForTask, commitPrefix, ensureGitignore, git } from './git.js';
 import type { Logger } from './logger.js';
+import { taskLogPath } from './logs.js';
 import { rel, stopIgnoreEntry, stopPresent, type Paths } from './paths.js';
 import { PROGRESS_HEADER } from './prompt.js';
 import { canonicalId, patchRoadmapFile } from './roadmap.js';
@@ -86,6 +87,24 @@ function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
 }
 
+/** Print a task's per-run log (docs/logs/TNN.md), or list the log files when no id is given. */
+export function logsCommand(paths: Paths, tasks: Task[], rawId: string | undefined, log: Logger): number {
+  if (!rawId) {
+    if (!existsSync(paths.logsDir)) { log.info(`no logs yet (${rel(paths.root, paths.logsDir)}/ does not exist)`); return 0; }
+    const files = readdirSync(paths.logsDir).filter((f) => /^T\d+\.md$/i.test(f)).sort();
+    log.plain(files.length ? files.map((f) => rel(paths.root, join(paths.logsDir, f))).join('\n') : '(no per-task logs yet)');
+    return 0;
+  }
+  const id = canonicalId(rawId);
+  const task = id ? tasks.find((t) => t.id === id) : undefined;
+  if (!task) throw new UsageError(`logs ${rawId}: no such task in ROADMAP.md`);
+  const file = taskLogPath(paths, task.id);
+  if (!existsSync(file)) throw new UsageError(`logs ${task.id}: no log yet (${rel(paths.root, file)}); it is written after the first session`);
+  log.plain(`--- ${rel(paths.root, file)} ---`);
+  process.stdout.write(readFileSync(file, 'utf8'));
+  return 0;
+}
+
 export function acceptCommand(paths: Paths, state: State, tasks: Task[], rawIds: string[], note: string | undefined, log: Logger): number {
   for (const raw of rawIds) {
     const id = canonicalId(raw);
@@ -120,7 +139,7 @@ export function clearHaltCommand(paths: Paths, state: State, log: Logger): numbe
  * task produced (newest first) so the work starts from a clean slate. With `--all`, clear every task's
  * state and the halt, so a replaced or rewritten roadmap starts clean.
  */
-export function resetCommand(paths: Paths, state: State, tasks: Task[], rawId: string | undefined, opts: { revert: boolean; all?: boolean; log: Logger }): number {
+export function resetCommand(paths: Paths, state: State, tasks: Task[], rawId: string | undefined, opts: { revert: boolean; all?: boolean; log: Logger; commitTemplate?: string }): number {
   const { revert, log } = opts;
 
   if (opts.all) {
@@ -143,8 +162,13 @@ export function resetCommand(paths: Paths, state: State, tasks: Task[], rawId: s
   if (!task) throw new UsageError(`reset ${rawId}: no such task in ROADMAP.md`);
 
   if (revert) {
-    const shas = commitsForTask(paths.root, task.id);
-    if (!shas.length) log.info(`${task.id}: no commits with subject "${task.id}: …" to revert`);
+    const template = opts.commitTemplate ?? '{id}: {title} [{status}]';
+    const prefix = commitPrefix(template, task.id);
+    if (prefix === undefined) {
+      throw new UsageError(`reset --revert: commitMessageTemplate "${template}" does not contain {id}, so this task's commits cannot be identified; revert them by hand, or drop --revert`);
+    }
+    const shas = commitsForTask(paths.root, task.id, prefix);
+    if (!shas.length) log.info(`${task.id}: no commits with subject "${prefix}…" to revert`);
     for (const sha of shas) {
       const r = git(paths.root, ['revert', '--no-edit', sha]);
       if (r.code !== 0) {
