@@ -6,7 +6,7 @@ symphony lives in `<your target project>/.symphony/` (gitignored) and reads its 
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -169,6 +169,8 @@ docs/
 | `accept T05 [--note "…"]` | human sign-off on a blocked/failed task; counts as done, bullet becomes `[x] ⟵ accepted` |
 | `nudge T05 [--note "…"]` | resume the task's last session and ask it to close out with a result block |
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also `git revert`s its `T05:` commits (newest first) |
+| `reset --all` | clear every task's state and the halt, and reset every roadmap marker to `[ ]`, so a replaced or rewritten roadmap starts clean |
+| `replan [--direction FILE] [--allow-id-reuse] [--reset-state] [--dry-run]` | stop-and-pivot: let the agent rewrite the plan (roadmap, task files, design docs, a pivot ADR) for a new direction, reconcile state, and commit it as a docs change |
 | `clear-halt` | lift a halt so `run` can start again |
 
 `status` shows `running?` for a task whose recorded process is gone (harness crashed); the next `run` retries it. A human ticking `[x]` in `ROADMAP.md` is honoured by the next command that loads the project.
@@ -197,6 +199,18 @@ Everything that can happen to a task, and what you do about it.
 | 16 | `reset T05 --revert` | clears state and reverts the task's commits newest-first; on conflict it stops and tells you to resolve | `[ ]` pending | 0 | fix conflicts if any, then `run` |
 
 The pipeline stops for a human only when a task itself reports `blocked`, or a fatal provider/config problem halts the run. Everything else — transient errors, large tasks, missing result blocks — is handled by retry, continuation and nudge.
+
+## Pivoting mid-run
+
+Sometimes you discover half-way through that the design is wrong. symphony does not re-plan a running task; it pauses at a task boundary, re-plans the docs, commits the pivot, and resumes with fresh context.
+
+1. **Pause cleanly.** `touch .stop` — the current task finishes and commits, then `run` exits `0` before starting the next one. (Ctrl-C mid-task also works but records that task `failed`; prefer the sentinel.)
+2. **Write the new direction.** Put it in `docs/REPLAN.md` (or pass `--direction FILE`): what changed, what still stands, what to drop. This is the one input the harness does not own, so keep it outside the docs contract.
+3. **Let the agent re-plan.** `symphony replan` hands the direction, the current roadmap, `PROGRESS.md`, the design docs and the live code state to one session, which rewrites `ROADMAP.md`, the task files and the design docs and records the pivot as a superseding ADR. It re-lints and commits the result as `docs: replan … [replan]`, so the pivot is a normal commit you can review or `git revert`.
+4. **Reconcile state.** `replan` prunes state rows for tasks that no longer exist, and refuses to reuse an id that already ran for different work unless you pass `--allow-id-reuse`. `--reset-state` clears all state instead; `reset --all` does the same on its own.
+5. **Resume.** Remove the sentinel (`rm .stop`) and `symphony run`.
+
+Why not re-plan inside a running session? The one-fresh-session-per-task model is the whole point: a session gets its task and nothing else, and a task that changes underneath it is exactly the context rot symphony exists to avoid. Pause, re-plan, commit, resume — the pivot stays auditable in `git log`.
 
 ## The docs contract
 
@@ -269,9 +283,11 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `init` | create the docs skeleton, `tasks/TEMPLATE.md`, `design/adr/0000-template.md`, config, `.gitignore` entry |
 | `lint` | check the project root and docs against the expected layout; no LLM; exit 2 on errors |
 | `prepare [--dry-run]` | lint, then let the configured agent convert/repair the docs in place, re-lint, commit |
+| `replan [--direction FILE] [--allow-id-reuse] [--reset-state] [--dry-run]` | let the configured agent rewrite the plan for a new direction and commit it; see [Pivoting mid-run](#pivoting-mid-run) |
 | `brief` | print a paste-ready prompt so any LLM turns an idea into the docs package in this exact format |
 | `accept T05[,T06…] [--note "…"]` | human sign-off on one or more blocked/failed tasks; counts as done, bullet becomes `[x] ⟵ accepted` |
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also undoes its `T05:` commits (newest first) |
+| `reset --all` | clear every task's state and the halt, and reset every roadmap marker to `[ ]` |
 | `nudge T05 [--note "…"]` | resume a task's last session and ask it to close out with a result block |
 | `clear-halt` | lift a halt so `run` can start again |
 

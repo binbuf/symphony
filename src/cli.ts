@@ -5,6 +5,7 @@ import { DEFAULTS, loadConfig, resolveSession, type CliOverrides } from './confi
 import { formatChecks, runDoctor } from './doctor.js';
 import { formatLint, lintDocs } from './lint.js';
 import { prepareCommand } from './prepare.js';
+import { replanCommand } from './replan.js';
 import { createLogger, type Logger } from './logger.js';
 import { resolvePaths, type Paths } from './paths.js';
 import { getProvider } from './providers/index.js';
@@ -25,9 +26,12 @@ Usage
   symphony doctor                        preflight: binaries, auth, git, roadmap, halt/STOP/lock
   symphony lint                          check the project root and docs/ against the expected layout (no LLM)
   symphony prepare [--dry-run]           lint, then let the configured agent convert/repair the docs and commit
+  symphony replan  [--direction FILE]    stop-and-pivot: let the agent rewrite the plan for a new direction and commit
+                   [--allow-id-reuse] [--reset-state] [--dry-run]
   symphony init                          scaffold the docs/ package (ROADMAP, PROGRESS, tasks/, design/, adr/) + config + .gitignore
   symphony accept  T05 [--note "..."]    human sign-off on a blocked/failed task (counts as done)
   symphony reset   T05 [--revert]        clear a task's state (and revert its commits with --revert) so it runs again
+  symphony reset   --all                 clear every task's state and the halt, so a replaced roadmap starts clean
   symphony nudge   T05 [--note "..."]    resume a task's last session and ask it to close out
   symphony clear-halt                    lift a halt so run can start again
   symphony brief                         print a paste-ready prompt that makes any LLM client emit the docs package in this format
@@ -97,6 +101,10 @@ export async function main(argv: string[]): Promise<number> {
       budget: { type: 'string' },
       'clear-halt': { type: 'boolean' },
       prepare: { type: 'boolean' },
+      direction: { type: 'string' },
+      'allow-id-reuse': { type: 'boolean' },
+      'reset-state': { type: 'boolean' },
+      all: { type: 'boolean' },
       note: { type: 'string' },
       revert: { type: 'boolean' },
       json: { type: 'boolean' },
@@ -156,7 +164,7 @@ export async function main(argv: string[]): Promise<number> {
     loaded = loadProject(paths, log); // .docs/ may have changed shape
     loaded.warnings.forEach((w) => log.warn(w));
   }
-  if (loaded.roadmapError && cmd !== 'doctor') throw new UsageError(loaded.roadmapError);
+  if (loaded.roadmapError && cmd !== 'doctor' && cmd !== 'replan') throw new UsageError(loaded.roadmapError);
 
   switch (cmd) {
     case 'status':
@@ -170,8 +178,8 @@ export async function main(argv: string[]): Promise<number> {
       return clearHaltCommand(paths, loaded.state, log);
     case 'reset': {
       const id = positionals[1];
-      if (!id) throw new UsageError('reset: give a task id, e.g. symphony reset T05 [--revert]');
-      return resetCommand(paths, loaded.state, loaded.tasks, id, { revert: v.revert === true, log });
+      if (!id && v.all !== true) throw new UsageError('reset: give a task id, e.g. symphony reset T05 [--revert], or --all to clear everything');
+      return resetCommand(paths, loaded.state, loaded.tasks, id, { revert: v.revert === true, all: v.all === true, log });
     }
     case 'doctor': {
       const { spec, warnings } = resolveSession(config, loaded.tasks[0], cli, process.env, (p) => getProvider(p).supportsBudget);
@@ -179,6 +187,17 @@ export async function main(argv: string[]): Promise<number> {
       const checks = runDoctor({ paths, config, state: loaded.state, spec, provider: getProvider(spec.providerName), taskCount: loaded.tasks.length, roadmapError: loaded.roadmapError });
       formatChecks(checks).forEach((l) => log.plain(l));
       return checks.some((c) => c.level === 'fail') ? 4 : 0;
+    }
+    case 'replan': {
+      const flags: RunFlags = { retry: false, continueOnFailure: false, dryRun: v['dry-run'] === true, clearHalt: v['clear-halt'] === true };
+      const ctx: RunContext = { paths, config, cli, flags, log, roadmap: loaded.roadmap, tasks: loaded.tasks, state: loaded.state, interrupted: false, abort: new AbortController() };
+      installSignalHandlers(ctx);
+      return replanCommand(ctx, {
+        direction: v.direction,
+        dryRun: v['dry-run'] === true,
+        allowIdReuse: v['allow-id-reuse'] === true,
+        resetState: v['reset-state'] === true,
+      });
     }
     case 'run':
     case 'nudge': {

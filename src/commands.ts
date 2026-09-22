@@ -117,10 +117,27 @@ export function clearHaltCommand(paths: Paths, state: State, log: Logger): numbe
 
 /**
  * Clear a task's recorded state so `run` picks it up again. With `--revert`, also undo the commits the
- * task produced (newest first) so the work starts from a clean slate.
+ * task produced (newest first) so the work starts from a clean slate. With `--all`, clear every task's
+ * state and the halt, so a replaced or rewritten roadmap starts clean.
  */
-export function resetCommand(paths: Paths, state: State, tasks: Task[], rawId: string, opts: { revert: boolean; log: Logger }): number {
+export function resetCommand(paths: Paths, state: State, tasks: Task[], rawId: string | undefined, opts: { revert: boolean; all?: boolean; log: Logger }): number {
   const { revert, log } = opts;
+
+  if (opts.all) {
+    if (revert) throw new UsageError('reset --all cannot be combined with --revert (which targets one task)');
+    const count = Object.keys(state.tasks).length;
+    state.tasks = {};
+    delete state.halted;
+    saveState(paths, state);
+    for (const t of tasks) {
+      try { patchRoadmapFile(paths.roadmap, t.id, 'pending'); } catch (e) { log.warn(`${t.id}: could not patch ROADMAP.md: ${(e as Error).message}`); }
+    }
+    updatePipelineStatus(paths, tasks, state, log);
+    log.info(`all task state cleared (${count} task${count === 1 ? '' : 's'}); every task in ${rel(paths.root, paths.roadmap)} will run from the start`);
+    return 0;
+  }
+
+  if (!rawId) throw new UsageError('reset: give a task id (e.g. symphony reset T05), or --all to clear everything');
   const id = canonicalId(rawId);
   const task = id ? tasks.find((t) => t.id === id) : undefined;
   if (!task) throw new UsageError(`reset ${rawId}: no such task in ROADMAP.md`);

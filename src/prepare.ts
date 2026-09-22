@@ -2,16 +2,17 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 import { classifyFailure } from './classify.js';
 import { scaffoldDocs } from './commands.js';
-import { resolveSession } from './config.js';
+import { resolveSession, type SessionSpec } from './config.js';
 import { docsContract } from './contract.js';
 import { commitAll, describeCommit, ensureGitignore } from './git.js';
 import { docsTree, formatLint, lintDocs, type LintReport } from './lint.js';
 import { openRunSinks } from './logger.js';
 import { rel, stopIgnoreEntry } from './paths.js';
 import { getProvider } from './providers/index.js';
-import { parseResultBlock } from './result.js';
+import type { Provider } from './providers/types.js';
+import { parseResultBlock, type ResultBlock } from './result.js';
 import { describeCmd, haltBanner, outcomeEvidence, preflight, type RunContext } from './runner.js';
-import { startSession } from './session.js';
+import { startSession, type SessionOutcome } from './session.js';
 import { acquireLock, releaseLock, saveState, startLockHeartbeat } from './state.js';
 import { renderPrompt } from './templates.js';
 import { clip, ensureDir, nowIso, stamp } from './util.js';
@@ -20,7 +21,7 @@ const LIVE_MAX = 400;
 const LOG_MAX = 4000;
 const ROADMAP_CAP = 16 * 1024;
 
-function lintCommand(ctx: RunContext): string {
+export function lintCommand(ctx: RunContext): string {
   const wrapper = join(ctx.paths.symphony, 'symphony');
   if (existsSync(wrapper)) return `${wrapper} lint`;
   return `node ${join(import.meta.dirname, 'cli.js')} lint --root ${ctx.paths.root}`;
@@ -60,6 +61,68 @@ export function buildPreparePrompt(ctx: RunContext, report: LintReport): string 
     lintCommand: lintCommand(ctx),
   };
   return renderPrompt('prepare.md', vars);
+}
+
+export interface DocsSessionResult {
+  outcome: SessionOutcome;
+  /** The result block the session reported, if any. */
+  block?: ResultBlock;
+  /** Non-zero when the caller must return immediately: 130 interrupted, 3 fatal halt. */
+  early?: number;
+}
+
+/**
+ * Run one docs-editing agent session (used by `prepare` and `replan`): open the run sinks, spawn the
+ * provider with the prompt, stream it, parse the result block and classify failures. The caller owns
+ * the lock, preflight and the commit.
+ */
+export async function runDocsSession(
+  ctx: RunContext,
+  spec: SessionSpec,
+  provider: Provider,
+  opts: { prompt: string; runName: string; taskId: string; label: string; timeoutMin: number },
+): Promise<DocsSessionResult> {
+  const { paths, config, log, state } = ctx;
+  const docsRel = rel(paths.root, paths.docs);
+  ensureDir(paths.runs);
+  const sinks = openRunSinks(paths.runs, `${opts.runName}-${stamp()}`);
+  writeFileSync(sinks.promptPath, opts.prompt);
+  const cmd = provider.buildCommand({
+    bin: spec.bin, prompt: opts.prompt, promptFile: sinks.promptPath, taskId: opts.taskId, attempt: 1, kind: 'task',
+    model: spec.model, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd, extraArgs: spec.extraArgs, cwd: paths.root,
+  });
+  log.info(`=== ${opts.label} with ${spec.providerName} · model ${spec.model ?? 'default'}`);
+  log.info(`${opts.taskId}: ${describeCmd(cmd)}`);
+  log.info(`${opts.taskId}: streaming to ${relative(paths.root, sinks.logPath)}`);
+
+  const session = startSession({
+    spec: cmd, provider, cwd: paths.root,
+    timeoutMs: opts.timeoutMin * 60_000, idleTimeoutMs: spec.idleTimeoutMin * 60_000,
+    sinks, liveMaxChars: LIVE_MAX, logMaxChars: LOG_MAX, color: process.stdout.isTTY === true,
+  });
+  ctx.active = session;
+  if (ctx.interrupted) session.kill('interrupt');
+  const out = await session.done;
+  ctx.active = undefined;
+  await sinks.close();
+
+  if (out.interrupted || ctx.interrupted) {
+    log.warn(`${opts.label} interrupted; ${docsRel}/ may be half-written (check git status)`);
+    return { outcome: out, early: 130 };
+  }
+  const block = parseResultBlock(out.result.text) ?? parseResultBlock(out.allText);
+  if (!out.result.ok) {
+    const c = classifyFailure(outcomeEvidence(out), config.halt.onCategories);
+    if (c.fatal) {
+      state.halted = { at: nowIso(), taskId: opts.taskId, category: c.category, reason: c.message };
+      saveState(paths, state);
+      haltBanner(ctx, state.halted);
+      return { outcome: out, early: 3 };
+    }
+    log.error(`${opts.label} session failed: ${c.category}: ${c.message}`);
+  } else if (block) log.info(`${opts.label}: agent reported ${block.status}${block.summary ? `: ${block.summary}` : ''}`);
+  else log.warn(`${opts.label}: agent ended without a SYMPHONY_RESULT block`);
+  return { outcome: out, block };
 }
 
 /** Lint .docs/, then let the configured provider repair it. Returns 0 when lint is clean afterwards. */
@@ -106,47 +169,15 @@ const created = scaffoldDocs(paths, { roadmap: false, config: false, design: con
   acquireLock(paths);
   const stopHeartbeat = startLockHeartbeat(paths);
   try {
-    ensureDir(paths.runs);
-    const sinks = openRunSinks(paths.runs, `prepare-${stamp()}`);
-    writeFileSync(sinks.promptPath, prompt);
-    const cmd = provider.buildCommand({
-      bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: 'prepare', attempt: 1, kind: 'task',
-      model: spec.model, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd, extraArgs: spec.extraArgs, cwd: paths.root,
-    });
-    log.info(`=== prepare: repairing ${docsRel}/ with ${spec.providerName} (${report.findings.filter((x) => x.level === 'error').length} errors, ${report.candidates.length} outside documents)`);
-    log.info(`prepare: ${describeCmd(cmd)}`);
-    log.info(`prepare: streaming to ${relative(paths.root, sinks.logPath)}`);
-
-    const session = startSession({
-      spec: cmd, provider, cwd: paths.root,
-      timeoutMs: config.prepareTimeoutMin * 60_000, idleTimeoutMs: spec.idleTimeoutMin * 60_000,
-      sinks, liveMaxChars: LIVE_MAX, logMaxChars: LOG_MAX, color: process.stdout.isTTY === true,
-    });
-    ctx.active = session;
-    if (ctx.interrupted) session.kill('interrupt');
-    const out = await session.done;
-    ctx.active = undefined;
-    await sinks.close();
-
-    if (out.interrupted || ctx.interrupted) { log.warn(`prepare interrupted; ${docsRel}/ may be half-converted (check git status)`); return 130; }
-    const block = parseResultBlock(out.result.text) ?? parseResultBlock(out.allText);
-    if (!out.result.ok) {
-      const c = classifyFailure(outcomeEvidence(out), config.halt.onCategories);
-      if (c.fatal) {
-        state.halted = { at: nowIso(), taskId: 'prepare', category: c.category, reason: c.message };
-        saveState(paths, state);
-        haltBanner(ctx, state.halted);
-        return 3;
-      }
-      log.error(`prepare session failed: ${c.category}: ${c.message}`);
-    } else if (block) log.info(`prepare: agent reported ${block.status}${block.summary ? `: ${block.summary}` : ''}`);
-    else log.warn('prepare: agent ended without a SYMPHONY_RESULT block');
+    const label = `prepare: repairing ${docsRel}/ (${report.findings.filter((x) => x.level === 'error').length} errors, ${report.candidates.length} outside documents)`;
+    const { outcome, early } = await runDocsSession(ctx, spec, provider, { prompt, runName: 'prepare', taskId: 'prepare', label, timeoutMin: config.prepareTimeoutMin });
+    if (early !== undefined) return early;
 
     const after = lintDocs(paths, { design: config.designDocs });
     log.plain('--- lint (after)');
     formatLint(after).forEach((l) => log.plain(l));
     const commit = commitAll(paths.root, `docs: normalise ${docsRel} for symphony [prepare]`, (m) => log.warn(m), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore });
-    log.info(`prepare: git ${describeCommit(commit)}${out.costUsd !== undefined ? ` · $${out.costUsd.toFixed(2)}` : ''}`);
+    log.info(`prepare: git ${describeCommit(commit)}${outcome.costUsd !== undefined ? ` · $${outcome.costUsd.toFixed(2)}` : ''}`);
     if (!after.ok) { log.error(`${docsRel}/ is still not in the expected format; fix the ✗ items by hand or run \`symphony prepare\` again`); return 2; }
     return 0;
   } finally {

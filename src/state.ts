@@ -6,6 +6,8 @@ import { UsageError, atomicWriteSync, ensureDir, isRecord, nowIso } from './util
 export type TaskStatus = 'pending' | 'running' | 'done' | 'blocked' | 'failed' | 'accepted';
 export const DONE_STATES: TaskStatus[] = ['done', 'accepted'];
 export const SKIP_STATES: TaskStatus[] = ['done', 'accepted', 'blocked'];
+/** Statuses a task holds after running and that `run` will not revisit without `--retry`/`accept`. */
+export const HELD_STATES: TaskStatus[] = ['done', 'accepted', 'blocked'];
 
 export interface LogRef {
   kind: 'task' | 'retry' | 'nudge';
@@ -46,6 +48,8 @@ export interface TaskState {
   logs: LogRef[];
   accepted?: { at: string; from: TaskStatus; note?: string };
   reconciled?: boolean;
+  /** A roadmap bullet that now titles a held task differently (possible id reuse); `title` keeps what it ran as. */
+  titleMismatch?: string;
 }
 
 export interface Halted { at: string; taskId?: string; category: string; reason: string }
@@ -105,7 +109,17 @@ export function reconcile(state: State, roadmap: Roadmap): string[] {
       notes.push(`${b.id}: no state row; set ${st.status} from ROADMAP.md`);
       continue;
     }
-    row.title = b.title;
+    // A held task keeps the title it actually ran under: that is the evidence a reused id means new
+    // work. Only a task that will run again may be re-titled in place.
+    if (row.title && row.title !== b.title && HELD_STATES.includes(row.status)) {
+      if (row.titleMismatch !== b.title) {
+        row.titleMismatch = b.title;
+        notes.push(`${b.id}: ROADMAP.md titles this "${b.title}" but it ran as "${row.title}" (${row.status}); keeping the recorded title. If this is different work, reset it or run \`symphony replan\`.`);
+      }
+    } else {
+      row.title = b.title;
+      delete row.titleMismatch;
+    }
     if (b.check === 'x' && (row.status === 'pending' || row.status === 'failed' || row.status === 'running')) {
       row.status = implied === 'accepted' ? 'accepted' : 'done';
       row.reconciled = true;

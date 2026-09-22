@@ -25,3 +25,24 @@ test('reconcile honours a human tick but never demotes a terminal state', () => 
   assert.equal(state.tasks.T01.attempts, 2);
   assert.equal(state.tasks.T02.status, 'done'); // roadmap says pending; state wins (caller re-patches the bullet)
 });
+
+test('reconcile keeps the title a held task ran under when the roadmap renames its id', () => {
+  const rm = parseRoadmap(['- [x] T01 — Renamed work'].join('\n'));
+  const state: State = { version: 1, tasks: { T01: { ...newTaskState('Original work'), status: 'done', attempts: 1 } } };
+  const notes = reconcile(state, rm);
+  assert.equal(state.tasks.T01.title, 'Original work');
+  assert.equal(state.tasks.T01.titleMismatch, 'Renamed work');
+  assert.match(notes.join('\n'), /T01: ROADMAP.md titles this "Renamed work"/);
+  // A second pass does not repeat the note, but keeps the evidence.
+  const again = reconcile(state, rm);
+  assert.deepEqual(again, []);
+  assert.equal(state.tasks.T01.title, 'Original work');
+});
+
+test('reconcile re-titles a task that will run again', () => {
+  const rm = parseRoadmap(['- [ ] T01 — Renamed work'].join('\n'));
+  const state: State = { version: 1, tasks: { T01: { ...newTaskState('Original work'), status: 'failed', attempts: 1 } } };
+  reconcile(state, rm);
+  assert.equal(state.tasks.T01.title, 'Renamed work');
+  assert.equal(state.tasks.T01.titleMismatch, undefined);
+});
