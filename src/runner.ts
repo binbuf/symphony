@@ -190,6 +190,9 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
   st.status = final.status;
   st.summary = final.summary;
   st.finished = nowIso();
+  // A task that reached a terminal state starts fresh on any later retry: clear the persisted
+  // continuation counter so `maxContinuations` is not silently carried across a failure.
+  delete st.continuation;
   if (final.status === 'done') delete st.lastError; else if (final.lastError) st.lastError = final.lastError;
   delete st.pid;
 
@@ -296,7 +299,8 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   let resumeId: string | undefined;
   let lastTransient: Classified | undefined;
   let retryCount = 0;
-  let continuation = 0;
+  // Seed from state so a task paused (STOP) mid-continuation resumes as the next slice, not a fresh task.
+  let continuation = st.continuation ?? 0;
   let iterations = 0;
   let final: Final | undefined;
   let halt: Halted | undefined;
@@ -362,8 +366,19 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         saveState(paths, state);
         if (continuation < maxContinuations) {
           continuation += 1;
+          st.continuation = continuation;
           refreshDerivedDocs(ctx);
           if (config.commitPerSession) commitIntermediate(ctx, task, st);
+          saveState(paths, state);
+          // `.stop` is honoured at the subtask boundary too: once this slice is committed, pause
+          // before starting the next continuation. The counter above is persisted so the next run
+          // resumes at the right slice instead of restarting the task from scratch.
+          if (stopPresent(paths)) {
+            st.summary = `${block.summary || 'more work remains'} | paused at continuation ${continuation}/${maxContinuations}: ${relative(paths.root, paths.stop)} present`;
+            saveState(paths, state);
+            log.warn(`${task.id}: ${relative(paths.root, paths.stop)} present: pausing before continuation ${continuation}/${maxContinuations}. Remove it and re-run to continue.`);
+            return { status: st.status, stopped: true };
+          }
           log.info(`${task.id}: session reported continue (${continuation}/${maxContinuations}); starting a fresh session for the next slice`);
           resumeId = undefined;
           lastTransient = undefined;
@@ -515,7 +530,11 @@ export async function runCommand(ctx: RunContext): Promise<number> {
 
   log.info(`${selected.length} task${selected.length === 1 ? '' : 's'} selected, ${todo.length} to run: ${todo.map((t) => t.id).join(' ') || '-'}`);
   if (carried.length) log.warn(`carrying forward blocked (human items in their Hand-off, not re-run): ${carried.map((t) => t.id).join(' ')} — \`symphony accept T..\` to sign off, \`symphony run --retry --only T..\` to redo`);
-  for (const t of leftRunning) log.warn(`${t.id} was left "running" (previous harness crashed or was killed); it will be retried`);
+  for (const t of leftRunning) {
+    const cont = state.tasks[t.id]?.continuation;
+    if (cont) log.warn(`${t.id} was paused at continuation ${cont} (${relative(paths.root, paths.stop)} was present); it will resume with the next slice`);
+    else log.warn(`${t.id} was left "running" (previous harness crashed or was killed); it will be retried`);
+  }
 
   if (flags.dryRun) {
     if (!todo.length) { log.info('nothing to run'); return 0; }

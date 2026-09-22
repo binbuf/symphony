@@ -57,7 +57,7 @@ export interface Config {
   maxTaskBytes: number;
   /** When false, the design/ and adr/ folders are neither required nor used: tasks run standalone. */
   designDocs: boolean;
-  /** How many extra fresh sessions a task may take when it reports `continue` (subtask iteration). */
+  /** How many extra fresh sessions a task may take when it reports `continue` (subtask iteration). Counted across a `.stop` pause. */
   maxContinuations: number;
   /** Max total sessions (task + retries + continuations) a single task may use in one run before it fails. 0 = unlimited. */
   maxIterationsPerTask: number;

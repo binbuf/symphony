@@ -30,6 +30,12 @@ export interface TaskState {
   status: TaskStatus;
   attempts: number;
   nudged?: boolean;
+  /**
+   * Continuation sessions already accounted for on this task. Persisted so that pausing at a
+   * continuation boundary (STOP sentinel) resumes as the next continuation, not a fresh task.
+   * Cleared when the task reaches a terminal state.
+   */
+  continuation?: number;
   started?: string;
   finished?: string;
   durationS: number;

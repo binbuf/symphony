@@ -55,7 +55,8 @@ Limits
                            Unset: the package.json test script is used when one exists (inferVerify)
 
 Controls
-  touch .stop              pause at the next task boundary (nothing is killed); configurable via paths.stop
+  touch .stop              pause at the next boundary: a task start or a continuation session end
+                           (nothing is killed); configurable via paths.stop
   touch .symphony/STOP     legacy alias for the above
   Ctrl-C                   stop the current session, record it as unfinished, exit 130
 

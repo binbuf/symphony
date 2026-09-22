@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -9,7 +9,7 @@ import { currentBranch } from '../src/git.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths } from '../src/paths.js';
 import { runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
-import { loadState, type State } from '../src/state.js';
+import { loadState, newTaskState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
 
 const silent: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner() {} };
@@ -113,6 +113,65 @@ test('maxIterationsPerTask stops a task that keeps continuing, with a clear summ
     assert.equal(out.status, 'failed');
     assert.equal(state.tasks.T01.attempts, 2);
     assert.match(state.tasks.T01.summary ?? '', /maxIterationsPerTask/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('STOP pauses at a continuation boundary and the next run resumes the next slice', async () => {
+  const { dir, paths, task } = project();
+  // The first (task) session lands slice one and drops the .stop sentinel before reporting continue.
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'fake_write', path: 'part1.txt', content: 'part 1' }),
+    JSON.stringify({ type: 'fake_write', path: '.stop', content: '' }),
+    claudeResult('continue', 'first half done'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 3 };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    // First invocation: the task session reports continue, the slice commits, then STOP pauses it.
+    const first = await runTask(ctx, task);
+    assert.equal(first.stopped, true);
+    assert.equal(state.tasks.T01.status, 'running');
+    assert.equal(state.tasks.T01.continuation, 1);
+    assert.match(state.tasks.T01.summary ?? '', /paused at continuation 1\/3/);
+    assert.ok(readFileSync(join(dir, 'part1.txt'), 'utf8').includes('part 1'));
+    assert.ok(!existsSync(join(dir, 'part2.txt'))); // the next slice did not run
+    const log = execFileSync('git', ['-C', dir, 'log', '--oneline'], { encoding: 'utf8' });
+    assert.match(log, /T01: Do the thing \[continue\]/); // the finished slice is committed
+
+    // After the sentinel is removed, re-running resumes as continuation 1 (the T01.continue fixture).
+    rmSync(paths.stop, { force: true });
+    const second = await runTask(ctx, task);
+    assert.equal(second.status, 'done');
+    assert.equal(state.tasks.T01.status, 'done');
+    assert.equal(state.tasks.T01.attempts, 2);
+    assert.equal(state.tasks.T01.continuation, undefined); // cleared on the terminal result
+    assert.ok(readFileSync(join(dir, 'part2.txt'), 'utf8').includes('part 2'));
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('run retries a task left "running" by a crash (stale pid) instead of losing it', async () => {
+  const { dir, paths, task } = project();
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    claudeResult('done', 'recovered'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  // Simulate a harness crash mid-session: the row is running with a pid that is no longer alive.
+  state.tasks.T01 = { ...newTaskState('Do the thing'), status: 'running', attempts: 1, started: new Date().toISOString(), pid: 2147483647, logs: [] };
+  const config = { ...DEFAULTS, provider: 'fake' as const };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    assert.equal(state.tasks.T01.status, 'done');
+    assert.equal(state.tasks.T01.pid, undefined); // the stale pid is gone
+    assert.equal(state.tasks.T01.attempts, 2);
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
