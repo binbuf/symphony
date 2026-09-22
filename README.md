@@ -280,7 +280,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 |---|---|
 | `run` | run every unfinished task in roadmap order, committing after each; resumes where it left off |
 | `run --prepare` | run `prepare` first, then start only if `docs/` lints clean |
-| `status [--json]` | progress table (or machine-readable JSON) |
+| `status [--json]` | progress table with each task's duration and start/end datetime stamps (a live `(running)` elapsed time while one is in flight), or machine-readable JSON |
 | `logs [T05]` | print a task's per-run log (`docs/logs/T05.md`); with no id, list the log files |
 | `doctor` | preflight: node, git repo, roadmap, provider binary + auth, verify command, halt / STOP / lock |
 | `init` | create the docs skeleton, `tasks/TEMPLATE.md`, `design/adr/0000-template.md`, config, `.gitignore` entry |
@@ -387,7 +387,7 @@ All hooks also get `SYMPHONY_ROOT`. Example:
 ## Logs and state
 
 ```
-docs/logs/T05.md                               per-task run log: status, provider/model, timing, cost and each session's summary
+docs/logs/T05.md                               per-task run log: start stamp at the top, finish stamp at the bottom, plus status, provider/model, timing, cost and each session's summary
 docs/INDEX.md                                  generated repo map, rewritten before each task and committed with it
 .symphony/runs/T05-20260917T231530.jsonl       raw provider NDJSON, byte-faithful
 .symphony/runs/T05-20260917T231530.log         rendered [think]/[text]/[tool] stream, longer lines than stdout
@@ -397,7 +397,7 @@ docs/INDEX.md                                  generated repo map, rewritten bef
 .symphony/state.json                           per-task state and the halt flag; delete it and progress is rebuilt from the roadmap markers
 ```
 
-Every task gets a `docs/logs/TNN.md` (path overridable with `paths.logs`). It is rewritten in full after each session and committed with the task, so `git log` plus the logs give a per-task and pipeline-wide history. It also records the verify command's result when one is configured. `symphony logs T05` prints one from the terminal. Retries append `-r2`, nudges `-nudge`, continuation sessions `-rN` too. `paths.state`/`.runs`/`.log` move these.
+Every task gets a `docs/logs/TNN.md` (path overridable with `paths.logs`). It opens with the task's start timestamp and closes with its finish timestamp, and is rewritten in full after each session and committed with the task, so `git log` plus the logs give a per-task and pipeline-wide history. It also records the verify command's result when one is configured. `symphony logs T05` prints one from the terminal. Retries append `-r2`, nudges `-nudge`, continuation sessions `-rN` too. `paths.state`/`.runs`/`.log` move these.
 
 ## Platform support
 

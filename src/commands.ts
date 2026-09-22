@@ -8,10 +8,10 @@ import { taskLogPath } from './logs.js';
 import { rel, stopIgnoreEntry, stopPresent, type Paths } from './paths.js';
 import { PROGRESS_HEADER } from './prompt.js';
 import { canonicalId, patchRoadmapFile } from './roadmap.js';
-import { DONE_STATES, saveState, type State } from './state.js';
+import { DONE_STATES, saveState, type State, type TaskState } from './state.js';
 import { updatePipelineStatus } from './status.js';
 import type { Task } from './tasks.js';
-import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, squash } from './util.js';
+import { UsageError, ensureDir, fmtCost, fmtDateTime, fmtDuration, nowIso, squash } from './util.js';
 
 function writeIfMissing(path: string, content: string, created: string[]): void {
   if (existsSync(path)) return;
@@ -66,9 +66,10 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
     const s = state.tasks[t.id];
     const status = s?.status ?? 'pending';
     const shown = status === 'running' && s?.pid && !pidAlive(s.pid) ? 'running?' : status;
-    return [t.id, squash(t.phase, 18), squash(t.title, 42), shown, String(s?.attempts ?? 0), fmtDuration(s?.durationS || undefined), fmtCost(s?.costUsd), s?.provider ?? '', squash(s?.summary ?? '', 60)];
+    const time = status === 'running' ? `${fmtDuration(runningSeconds(s))} (running)` : fmtDuration(s?.durationS || undefined);
+    return [t.id, squash(t.phase, 18), squash(t.title, 42), shown, String(s?.attempts ?? 0), time, fmtDateTime(s?.started), fmtDateTime(s?.finished), fmtCost(s?.costUsd), s?.provider ?? '', squash(s?.summary ?? '', 60)];
   });
-  const head = ['id', 'phase', 'title', 'status', 'att', 'time', 'cost', 'provider', 'summary'];
+  const head = ['id', 'phase', 'title', 'status', 'att', 'duration', 'start', 'end', 'cost', 'provider', 'summary'];
   const widths = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   const fmt = (r: string[]) => r.map((c, i) => (i === head.length - 1 ? c : c.padEnd(widths[i]))).join('  ');
   log.plain(fmt(head));
@@ -77,7 +78,10 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
 
   const done = tasks.filter((t) => DONE_STATES.includes(state.tasks[t.id]?.status ?? 'pending')).length;
   const cost = tasks.reduce((a, t) => a + (state.tasks[t.id]?.costUsd ?? 0), 0);
-  const time = tasks.reduce((a, t) => a + (state.tasks[t.id]?.durationS ?? 0), 0);
+  const time = tasks.reduce((a, t) => {
+    const s = state.tasks[t.id];
+    return a + (s?.status === 'running' ? runningSeconds(s) : s?.durationS ?? 0);
+  }, 0);
   const blocked = tasks.filter((t) => state.tasks[t.id]?.status === 'blocked').map((t) => t.id);
   log.plain(`\n${done}/${tasks.length} done · ${fmtDuration(time || undefined)} · ${fmtCost(cost || undefined)} · default provider ${config.provider}${blocked.length ? ` · awaiting a human: ${blocked.join(' ')}` : ''}${stopPresent(paths) ? ` · STOP present (${rel(paths.root, paths.stop)})` : ''}`);
   return 0;
@@ -85,6 +89,15 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
 
 function pidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+
+/** Time a still-running task has spent so far: its finished sessions plus the one in flight. */
+function runningSeconds(s: TaskState | undefined): number {
+  const base = s?.durationS ?? 0;
+  if (!s?.started) return base;
+  const started = Date.parse(s.started);
+  if (!Number.isFinite(started)) return base;
+  return base + Math.max(0, Math.round((Date.now() - started) / 1000));
 }
 
 /** Print a task's per-run log (docs/logs/TNN.md), or list the log files when no id is given. */

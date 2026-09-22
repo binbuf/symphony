@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import type { Paths } from './paths.js';
 import type { TaskState } from './state.js';
 import type { Task } from './tasks.js';
-import { atomicWriteSync, ensureDir, fmtCost, fmtDuration } from './util.js';
+import { atomicWriteSync, ensureDir, fmtCost, fmtDateTime, fmtDuration } from './util.js';
 
 /** One markdown file per task in the docs logs dir: `T01.md`. */
 export function taskLogPath(paths: Paths, id: string): string {
@@ -15,20 +15,21 @@ function bullet(label: string, value: string | undefined, fallback = '-'): strin
 
 /**
  * Write the high-level run log for one task: the harness's per-task record of every session's
- * reported status and summary, plus provider/model, timing, cost and commit. Regenerated in full
- * after every session so it always reflects the latest state and never grows duplicates.
+ * reported status and summary, plus provider/model, timing, cost and commit. The task's start
+ * stamp opens the file and its finish stamp closes it. Regenerated in full after every session so
+ * it always reflects the latest state and never grows duplicates.
  */
 export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { commitPreview?: string } = {}): void {
   const lines: string[] = [];
   lines.push(`# ${task.id} — ${task.title}`);
+  lines.push('');
+  lines.push(`**Started:** ${fmtDateTime(st.started)}`);
   lines.push('');
   lines.push('_Per-run log maintained by the symphony harness; regenerated after every session. Do not edit by hand._');
   lines.push('');
   lines.push(bullet('Phase', task.phase));
   lines.push(bullet('Status', st.status));
   lines.push(bullet('Provider', st.provider ? `${st.provider}${st.model ? ` · model: ${st.model}` : ''}` : undefined));
-  lines.push(bullet('Started', st.started));
-  lines.push(bullet('Finished', st.finished));
   lines.push(bullet('Duration', fmtDuration(st.durationS || undefined)));
   lines.push(bullet('Cost', st.costUsd === undefined ? undefined : fmtCost(st.costUsd)));
   lines.push(bullet('Attempts', String(st.attempts)));
@@ -72,6 +73,10 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
     });
     if (lines[lines.length - 1] === '') lines.pop();
   }
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+  lines.push(`**Finished:** ${fmtDateTime(st.finished)}`);
   ensureDir(paths.logsDir);
   atomicWriteSync(taskLogPath(paths, task.id), `${lines.join('\n')}\n`);
 }

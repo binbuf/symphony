@@ -1,10 +1,22 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { statusCommand } from '../src/commands.js';
+import { DEFAULTS } from '../src/config.js';
+import type { Logger } from '../src/logger.js';
+import { resolvePaths } from '../src/paths.js';
 import { buildPipelineStatus } from '../src/status.js';
 import { newTaskState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
 
 const task = (id: string, num: number, phase: string): Task => ({ id, num, title: `t${num}`, phase, order: num - 1, meta: {} });
+
+function captureLogger(): { log: Logger; lines: string[] } {
+  const lines: string[] = [];
+  return { log: { info() {}, warn() {}, error() {}, plain: (m) => lines.push(m), banner() {} }, lines };
+}
 
 test('buildPipelineStatus reports done, blocked, failed, remaining and the last finished task', () => {
   const tasks = [task('T01', 1, 'Phase 1'), task('T02', 2, 'Phase 1'), task('T03', 3, 'Phase 2'), task('T04', 4, 'Phase 2')];
@@ -32,4 +44,30 @@ test('buildPipelineStatus surfaces a halt and handles an all-pending pipeline', 
   const block = buildPipelineStatus(tasks, state, 'now');
   assert.match(block, /- Remaining: T01/);
   assert.match(block, /- Halted: auth on T01 — no key/);
+});
+
+test('statusCommand shows start and end datetime stamps in the table', () => {
+  const paths = resolvePaths(mkdtempSync(join(tmpdir(), 'symphony-status-')));
+  const tasks = [task('T01', 1, 'Phase 1'), task('T02', 2, 'Phase 1'), task('T03', 3, 'Phase 1')];
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: { ...newTaskState('t1'), status: 'done', attempts: 1, started: '2026-01-02T03:04:05Z', finished: '2026-01-02T03:34:05Z', durationS: 1800 },
+      T03: { ...newTaskState('t3'), status: 'running', attempts: 1, started: new Date().toISOString(), durationS: 1200, pid: process.pid },
+    },
+  };
+  const { log, lines } = captureLogger();
+  assert.equal(statusCommand(paths, DEFAULTS, state, tasks, log, false), 0);
+  const out = lines.join('\n');
+  const head = lines[0];
+  assert.match(head, /duration\s+start\s+end/);
+  assert.match(out, /30 min\s+2026-01-02 03:04:05Z\s+2026-01-02 03:34:05Z/);
+  // A running task labels its elapsed time and includes the session still in flight.
+  const running = lines.find((l) => l.startsWith('T03'))!;
+  assert.match(running, /20 min \(running\)/);
+  // The pending task has no timing recorded: both columns fall back to '-'.
+  const row = lines.find((l) => l.startsWith('T02'))!;
+  assert.match(row, /^T02\s+Phase 1\s+t2\s+pending\s+0\s+-\s+-\s+-\s+-/);
+  // The footer total matches the table: finished time plus the running session's elapsed time.
+  assert.match(out, /1\/3 done · 50 min/);
 });

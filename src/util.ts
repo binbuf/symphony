@@ -60,6 +60,14 @@ export function fmtCost(usd?: number): string {
   return usd === undefined || usd === null || !Number.isFinite(usd) ? '-' : `$${usd.toFixed(2)}`;
 }
 
+/** A stored ISO timestamp as a readable UTC datetime stamp: `2026-09-17 23:15:30Z`. */
+export function fmtDateTime(iso?: string): string {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return iso;
+  return d.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, 'Z');
+}
+
 export function slugify(s: string): string {
   return s
     .toLowerCase()
