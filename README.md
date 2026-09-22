@@ -167,7 +167,7 @@ docs/
 
 | command | what it does |
 |---|---|
-| `status [--json]` | progress table: id, phase, title, status, attempts, time, cost, provider, summary |
+| `status [--json]` | progress table: id, phase, title, status, attempts, duration, start/end, cost, provider, summary. A task split across sessions or retried (attempts ≥ 2) also lists one line per session run beneath its parent line, each with its own start/end, duration and summary |
 | `accept T05 [--note "…"]` | human sign-off on a blocked/failed task; counts as done, bullet becomes `[x] ⟵ accepted` |
 | `nudge T05 [--note "…"]` | resume the task's last session and ask it to close out with a result block |
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also `git revert`s its `T05:` commits (newest first) |
@@ -280,7 +280,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 |---|---|
 | `run` | run every unfinished task in roadmap order, committing after each; resumes where it left off |
 | `run --prepare` | run `prepare` first, then start only if `docs/` lints clean |
-| `status [--json]` | progress table with each task's duration and start/end datetime stamps (a live `(running)` elapsed time while one is in flight), or machine-readable JSON |
+| `status [--json]` | progress table with each task's duration and start/end datetime stamps (a live `(running)` elapsed time while one is in flight), or machine-readable JSON. Tasks split across sessions or retried (attempts ≥ 2) list each session run beneath the parent line with its own start/end, duration and summary |
 | `logs [T05]` | print a task's per-run log (`docs/logs/T05.md`); with no id, list the log files |
 | `doctor` | preflight: node, git repo, roadmap, provider binary + auth, verify command, halt / STOP / lock |
 | `init` | create the docs skeleton, `tasks/TEMPLATE.md`, `design/adr/0000-template.md`, config, `.gitignore` entry |

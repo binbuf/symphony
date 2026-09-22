@@ -71,3 +71,44 @@ test('statusCommand shows start and end datetime stamps in the table', () => {
   // The footer total matches the table: finished time plus the running session's elapsed time.
   assert.match(out, /1\/3 done · 50 min/);
 });
+
+test('statusCommand splits a task into a parent line plus one line per session run', () => {
+  const paths = resolvePaths(mkdtempSync(join(tmpdir(), 'symphony-status-split-')));
+  const tasks = [task('T01', 1, 'Phase 1')];
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: {
+        ...newTaskState('t1'),
+        status: 'done',
+        attempts: 3,
+        // The last attempt's start is what state keeps; the parent line must span the whole task.
+        started: '2026-01-02T02:00:00Z',
+        finished: '2026-01-02T03:30:00Z',
+        durationS: 5400,
+        summary: 'all slices landed',
+        logs: [
+          { kind: 'task', jsonl: 'a', log: 'a', prompt: 'a', status: 'continue', summary: 'slice one', started: '2026-01-02T01:00:00Z', durationS: 1200, costUsd: 0.5 },
+          { kind: 'task', jsonl: 'b', log: 'b', prompt: 'b', status: 'continue', summary: 'slice two', started: '2026-01-02T01:30:00Z', durationS: 1800, costUsd: 0.7 },
+          { kind: 'task', jsonl: 'c', log: 'c', prompt: 'c', status: 'done', summary: 'last slice', started: '2026-01-02T02:00:00Z', durationS: 2400, costUsd: 0.9 },
+        ],
+      },
+    },
+  };
+  const { log, lines } = captureLogger();
+  assert.equal(statusCommand(paths, DEFAULTS, state, tasks, log, false), 0);
+  // Parent line: total start (first session) through finish, accumulated duration and final summary.
+  const parent = lines.find((l) => l.startsWith('T01'))!;
+  assert.match(parent, /2026-01-02 01:00:00Z\s+2026-01-02 03:30:00Z/);
+  assert.match(parent, /1\.5 h/);
+  assert.match(parent, /all slices landed/);
+  // Each session run below it: its own start/end, duration and summary.
+  const children = lines.filter((l) => l.startsWith('  ↳'));
+  assert.equal(children.length, 3);
+  assert.match(children[0], /run 1 · task\s+continue/);
+  assert.match(children[0], /20 min\s+2026-01-02 01:00:00Z\s+2026-01-02 01:20:00Z/);
+  assert.match(children[0], /slice one/);
+  assert.match(children[2], /run 3 · task\s+done/);
+  assert.match(children[2], /40 min\s+2026-01-02 02:00:00Z\s+2026-01-02 02:40:00Z/);
+  assert.match(children[2], /last slice/);
+});

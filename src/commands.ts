@@ -8,7 +8,7 @@ import { taskLogPath } from './logs.js';
 import { rel, stopIgnoreEntry, stopPresent, type Paths } from './paths.js';
 import { PROGRESS_HEADER } from './prompt.js';
 import { canonicalId, patchRoadmapFile } from './roadmap.js';
-import { DONE_STATES, saveState, type State, type TaskState } from './state.js';
+import { DONE_STATES, saveState, type LogRef, type State, type TaskState } from './state.js';
 import { updatePipelineStatus } from './status.js';
 import type { Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDateTime, fmtDuration, nowIso, squash } from './util.js';
@@ -62,13 +62,27 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
   }
   if (state.halted) log.banner('HALTED', [`${state.halted.taskId ? `${state.halted.taskId} · ` : ''}${state.halted.category}: ${state.halted.reason}`, `at ${state.halted.at}`, 'symphony clear-halt to resume']);
 
-  const rows = tasks.map((t) => {
+  const rows: string[][] = [];
+  for (const t of tasks) {
     const s = state.tasks[t.id];
     const status = s?.status ?? 'pending';
-    const shown = status === 'running' && s?.pid && !pidAlive(s.pid) ? 'running?' : status;
-    const time = status === 'running' ? `${fmtDuration(runningSeconds(s))} (running)` : fmtDuration(s?.durationS || undefined);
-    return [t.id, squash(t.phase, 18), squash(t.title, 42), shown, String(s?.attempts ?? 0), time, fmtDateTime(s?.started), fmtDateTime(s?.finished), fmtCost(s?.costUsd), s?.provider ?? '', squash(s?.summary ?? '', 60)];
-  });
+    const running = status === 'running';
+    const shown = running && s?.pid && !pidAlive(s.pid) ? 'running?' : status;
+    const time = running ? `${fmtDuration(runningSeconds(s))} (running)` : fmtDuration(s?.durationS || undefined);
+    // The parent line spans the whole task: the first session's start through the finish, with the
+    // accumulated duration and the final summary.
+    const start = s?.logs?.[0]?.started ?? s?.started;
+    rows.push([t.id, squash(t.phase, 18), squash(t.title, 42), shown, String(s?.attempts ?? 0), time, fmtDateTime(start), fmtDateTime(s?.finished), fmtCost(s?.costUsd), s?.provider ?? '', squash(s?.summary ?? '', 60)]);
+    // A task split across sessions or retried (att >= 2) gets one child line per session, so each
+    // round reports its own start/end, duration and summary instead of only the task's running total.
+    if ((s?.attempts ?? 0) >= 2 && s?.logs?.length) {
+      s.logs.forEach((l, i) => {
+        const run = runTiming(l, running);
+        const label = `run ${i + 1} · ${l.kind}`;
+        rows.push(['  ↳', '', squash(label, 42), l.status ?? '', '', run.duration, run.start, run.end, fmtCost(l.costUsd), '', squash(l.summary ?? '', 60)]);
+      });
+    }
+  }
   const head = ['id', 'phase', 'title', 'status', 'att', 'duration', 'start', 'end', 'cost', 'provider', 'summary'];
   const widths = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   const fmt = (r: string[]) => r.map((c, i) => (i === head.length - 1 ? c : c.padEnd(widths[i]))).join('  ');
@@ -98,6 +112,14 @@ function runningSeconds(s: TaskState | undefined): number {
   const started = Date.parse(s.started);
   if (!Number.isFinite(started)) return base;
   return base + Math.max(0, Math.round((Date.now() - started) / 1000));
+}
+
+/** The start stamp, computed end stamp and duration of one recorded session run (in flight included). */
+function runTiming(l: LogRef, running: boolean): { start: string; end: string; duration: string } {
+  const started = l.started ? Date.parse(l.started) : NaN;
+  const seconds = l.durationS ?? (running && Number.isFinite(started) ? Math.max(0, Math.round((Date.now() - started) / 1000)) : undefined);
+  const end = Number.isFinite(started) && seconds !== undefined ? new Date(started + seconds * 1000).toISOString() : undefined;
+  return { start: fmtDateTime(l.started), end: fmtDateTime(end), duration: fmtDuration(seconds) };
 }
 
 /** Print a task's per-run log (docs/logs/TNN.md), or list the log files when no id is given. */
