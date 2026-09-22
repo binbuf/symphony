@@ -1,10 +1,14 @@
-import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { readProgressContext, renderInlinedDocs, selectTaskDesignDocs } from './context.js';
 import { rel, type Paths } from './paths.js';
+import { readIndexCapped } from './repomap.js';
 import { DONE_STATES, type State } from './state.js';
 import { parseFrontMatter, type Task } from './tasks.js';
 import { renderPrompt } from './templates.js';
 import { ensureDir, slugify } from './util.js';
+
+const DEFAULT_MAX_INDEX_BYTES = 16384;
 
 export interface PromptCtx {
   paths: Paths;
@@ -21,13 +25,20 @@ export interface PromptCtx {
   designDocs: boolean;
   /** Message of the failure that ended the previous attempt, if any. */
   lastError?: string;
+  /** Maintain and inline the generated progress digest (default true). */
+  progressDigest?: boolean;
+  /** Inline the design docs the task names, not just list them (default true). */
+  inlineDesignDocs?: boolean;
+  /** Byte cap for the inlined repo map (default 16384). */
+  maxIndexBytes?: number;
 }
 
 export const PROGRESS_HEADER = `# Progress notes
 
 Shared notebook for the symphony run. Each task session appends a "## Txx — title" section with what
 later tasks need to know: real paths, commands that work, contract deviations, gotchas. Facts, not
-narrative. The harness inlines the tail of this file into every prompt.
+narrative. The harness keeps a generated "Key facts" digest at the top (between the symphony:digest
+markers) and inlines that digest plus only the most recent sections into every prompt.
 `;
 
 export function ensureProgressFile(paths: Paths): boolean {
@@ -35,21 +46,6 @@ export function ensureProgressFile(paths: Paths): boolean {
   ensureDir(paths.docs);
   writeFileSync(paths.progress, PROGRESS_HEADER);
   return true;
-}
-
-/** Tail of the progress file capped at maxBytes, cut forward to a line boundary, with a marker. */
-export function readProgressCapped(path: string, maxBytes: number, displayName = 'PROGRESS.md'): string {
-  if (!existsSync(path)) return '(PROGRESS.md does not exist yet)';
-  const size = statSync(path).size;
-  const text = readFileSync(path, 'utf8');
-  if (size <= maxBytes) return text.trim() || '(empty)';
-  const buf = Buffer.from(text, 'utf8');
-  let start = buf.length - maxBytes;
-  const nl = buf.indexOf(0x0a, start);
-  if (nl !== -1 && nl < buf.length - 1) start = nl + 1;
-  const tail = buf.subarray(start).toString('utf8');
-  const kb = (n: number) => `${Math.round(n / 1024)} KB`;
-  return `[… progress file truncated: showing the last ${kb(buf.length - start)} of ${kb(buf.length)}; read ${displayName} for the rest …]\n\n${tail.trim()}`;
 }
 
 export function listDesignDocs(paths: Paths): { design: string[]; adr: string[] } {
@@ -86,6 +82,7 @@ function docPaths(paths: Paths) {
     design: rel(paths.root, paths.designDir),
     adr: rel(paths.root, paths.adrDir),
     logs: rel(paths.root, paths.logsDir),
+    index: rel(paths.root, paths.index),
   };
 }
 
@@ -114,6 +111,9 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
     ? `- ${d.design}/*.md are the architecture docs. Read the ones relevant to this task before editing code.\n- ${d.adr}/NNNN-title.md are architecture decision records. When you make a decision that constrains later tasks (a library, a schema, a protocol, a directory layout), add one using the next free number, ${nextAdrNumber(paths.adrDir)}, with sections Status / Context / Decision / Consequences, at most one page. Do not write ADRs for routine choices.\n`
     : '';
   const designPresent = ctx.designDocs ? `Design docs present: ${designList}\nADRs present: ${adrList}\n` : '';
+  const inlinedDocs = ctx.designDocs && ctx.inlineDesignDocs !== false ? selectTaskDesignDocs(paths, body) : [];
+  const designInlinedBlock = renderInlinedDocs(inlinedDocs);
+  const repoMapBody = readIndexCapped(paths.index, ctx.maxIndexBytes ?? DEFAULT_MAX_INDEX_BYTES, d.index);
 
   const steps: string[] = [
     `Read the task file (inlined below)${ctx.designDocs ? ' and every Context or design doc it names' : ''}, then implement exactly its Scope. Out-of-scope items belong to other tasks: note them in the Hand-off instead of doing them.`,
@@ -149,9 +149,12 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
     model: ctx.model ?? 'provider default',
     progress: d.progress,
     logs: d.logs,
+    index: d.index,
     designBullets,
     noTaskFileNote,
     designPresent,
+    designInlinedBlock,
+    repoMapBody,
     doneIds: ids(ctx, (s) => (DONE_STATES as string[]).includes(s)),
     blockedIds: ids(ctx, (s) => s === 'blocked' || s === 'failed'),
     howTo,
@@ -164,7 +167,10 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
 }
 
 function readProgress(ctx: PromptCtx, paths: Paths): string {
-  return readProgressCapped(paths.progress, ctx.maxProgressBytes, rel(paths.root, paths.progress));
+  return readProgressContext(paths.progress, rel(paths.root, paths.progress), {
+    digest: ctx.progressDigest !== false,
+    maxBytes: ctx.maxProgressBytes,
+  });
 }
 
 export function buildContinuePrompt(ctx: PromptCtx): string {

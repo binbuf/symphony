@@ -20,7 +20,7 @@ function fixture(): { paths: Paths; ctx: PromptCtx; noFile: PromptCtx } {
   mkdirSync(join(root, 'docs', 'design', 'adr'), { recursive: true });
   writeFileSync(join(root, 'docs', 'ROADMAP.md'), '# Roadmap\n\n## Phase 1\n- [ ] T01 — First task → [tasks/01-first.md](tasks/01-first.md)\n');
   writeFileSync(join(root, 'docs', 'PROGRESS.md'), '# Progress notes\n\n## T01 — First task\nDid the thing.\n');
-  writeFileSync(join(root, 'docs', 'tasks', '01-first.md'), '---\nprovider: claude\n---\n# T01 — First task\n\n## Goal\nDo it.\n');
+  writeFileSync(join(root, 'docs', 'tasks', '01-first.md'), '---\nprovider: claude\n---\n# T01 — First task\n\n## Goal\nDo it.\n\n## Context (read first)\n- `docs/design/overview.md` — the design this implements\n');
   writeFileSync(join(root, 'docs', 'design', 'overview.md'), '# Overview\n');
   writeFileSync(join(root, 'docs', 'design', 'adr', '0001-choice.md'), '# 0001 — Choice\n');
 
@@ -57,6 +57,11 @@ test('buildTaskPrompt renders from the template with no leftover placeholders', 
   assert.match(text, /--- PROGRESS \(docs\/PROGRESS\.md\) ---/);
   assert.match(text, /--- TASK FILE \(docs\/tasks\/01-first\.md\) ---/);
   assert.match(text, /## Goal\nDo it\./);
+  // The design doc the task names is inlined, and the generated index is included.
+  assert.match(text, /--- DESIGN DOCS NAMED BY THIS TASK ---/);
+  assert.match(text, /### docs\/design\/overview\.md/);
+  assert.match(text, /--- PROJECT INDEX \(docs\/INDEX\.md\) ---/);
+  assert.match(text, /Key facts \(maintained by symphony/);
 
   const noTask = buildTaskPrompt(noFile);
   assert.doesNotMatch(noTask, PLACEHOLDER);

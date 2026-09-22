@@ -101,6 +101,7 @@ export function docsContract(paths: Paths, opts: { design?: boolean } = {}): str
     roadmap: rel(paths.root, paths.roadmap),
     tasks: rel(paths.root, paths.tasksDir),
     progress: rel(paths.root, paths.progress),
+    index: rel(paths.root, paths.index),
     logs: rel(paths.root, paths.logsDir),
     designDir: rel(paths.root, paths.designDir),
     adr: rel(paths.root, paths.adrDir),

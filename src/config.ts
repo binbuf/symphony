@@ -44,6 +44,14 @@ export interface Config {
   nudgeTimeoutMin: number;
   prepareTimeoutMin: number;
   maxProgressBytes: number;
+  /** Maintain a "Key facts" digest at the top of PROGRESS.md and inline digest + recent sections instead of the raw tail. */
+  progressDigest: boolean;
+  /** Inline the design docs a task names in its Context / Design notes, not just list them. */
+  inlineDesignDocs: boolean;
+  /** Generate `docs/INDEX.md` (design-doc summaries + a source map) before each task and inline it. */
+  repoMap: boolean;
+  /** Byte cap for the inlined repo map. */
+  maxIndexBytes: number;
   /** When false, the design/ and adr/ folders are neither required nor used: tasks run standalone. */
   designDocs: boolean;
   /** How many extra fresh sessions a task may take when it reports `continue` (subtask iteration). */
@@ -97,6 +105,10 @@ export const DEFAULTS: Config = {
   nudgeTimeoutMin: 45,
   prepareTimeoutMin: 60,
   maxProgressBytes: 32768,
+  progressDigest: true,
+  inlineDesignDocs: true,
+  repoMap: true,
+  maxIndexBytes: 16384,
   designDocs: true,
   maxContinuations: 4,
   maxIterationsPerTask: 0,
@@ -157,7 +169,7 @@ function hookString(x: unknown, where: string, warnings: string[]): string | und
   return undefined;
 }
 
-const PATH_KEYS = ['docs', 'roadmap', 'progress', 'tasks', 'design', 'adr', 'logs', 'stop', 'state', 'runs', 'log'] as const;
+const PATH_KEYS = ['docs', 'roadmap', 'progress', 'tasks', 'design', 'adr', 'logs', 'index', 'stop', 'state', 'runs', 'log'] as const;
 
 function pathOverrides(x: unknown, warnings: string[]): PathOverrides {
   if (x === undefined || x === null) return {};
@@ -225,6 +237,10 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     nudgeTimeoutMin: numberOr(raw.nudgeTimeoutMin, DEFAULTS.nudgeTimeoutMin, 'nudgeTimeoutMin', warnings),
     prepareTimeoutMin: numberOr(raw.prepareTimeoutMin, DEFAULTS.prepareTimeoutMin, 'prepareTimeoutMin', warnings),
     maxProgressBytes: numberOr(raw.maxProgressBytes, DEFAULTS.maxProgressBytes, 'maxProgressBytes', warnings),
+    progressDigest: boolOr(raw.progressDigest, DEFAULTS.progressDigest, 'progressDigest', warnings),
+    inlineDesignDocs: boolOr(raw.inlineDesignDocs, DEFAULTS.inlineDesignDocs, 'inlineDesignDocs', warnings),
+    repoMap: boolOr(raw.repoMap, DEFAULTS.repoMap, 'repoMap', warnings),
+    maxIndexBytes: numberOr(raw.maxIndexBytes, DEFAULTS.maxIndexBytes, 'maxIndexBytes', warnings),
     designDocs: boolOr(raw.designDocs, DEFAULTS.designDocs, 'designDocs', warnings),
     maxContinuations: Math.max(0, numberOr(raw.maxContinuations, DEFAULTS.maxContinuations, 'maxContinuations', warnings)),
     maxIterationsPerTask: Math.max(0, numberOr(raw.maxIterationsPerTask, DEFAULTS.maxIterationsPerTask, 'maxIterationsPerTask', warnings)),

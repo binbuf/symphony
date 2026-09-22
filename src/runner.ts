@@ -2,6 +2,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { relative } from 'node:path';
 import { classifyFailure, type Classified, type FailureEvidence } from './classify.js';
 import { resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
+import { writeProgressDigest } from './context.js';
 import { formatChecks, runDoctor } from './doctor.js';
 import { commitAll, describeCommit } from './git.js';
 import { fireHook } from './hooks.js';
@@ -11,6 +12,7 @@ import { stopPresent, type Paths } from './paths.js';
 import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, type PromptCtx } from './prompt.js';
 import { getProvider } from './providers/index.js';
 import type { Provider, SpawnSpec } from './providers/types.js';
+import { writeIndex } from './repomap.js';
 import { parseResultBlock, type ResultBlock } from './result.js';
 import { canonicalId, patchRoadmapFile, type Roadmap } from './roadmap.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
@@ -66,6 +68,20 @@ function patchRoadmap(ctx: RunContext, id: string, status: TaskStatus): void {
     if (r === 'missing') ctx.log.warn(`${id}: bullet no longer found in ROADMAP.md; state.json remains authoritative`);
   } catch (e) {
     ctx.log.warn(`${id}: could not patch ROADMAP.md: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * Regenerate the derived docs the prompt reads: the PROGRESS.md "Key facts" digest and docs/INDEX.md.
+ * Never fatal: a failure only warns, because the prompt degrades to the raw progress file.
+ */
+function refreshDerivedDocs(ctx: RunContext): void {
+  const { paths, config, log } = ctx;
+  if (config.progressDigest) {
+    try { writeProgressDigest(paths.progress); } catch (e) { log.warn(`could not update the ${relative(paths.root, paths.progress)} digest: ${(e as Error).message}`); }
+  }
+  if (config.repoMap) {
+    try { writeIndex(paths); } catch (e) { log.warn(`could not write ${relative(paths.root, paths.index)}: ${(e as Error).message}`); }
   }
 }
 
@@ -174,6 +190,8 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
 
   // Marker first so the task's own commit carries the final [x]/[~] state.
   patchRoadmap(ctx, task.id, final.status);
+  // Keep the generated digest and repo map in the same commit as the task that changed them.
+  refreshDerivedDocs(ctx);
   const message = renderTemplate(config.commitMessageTemplate, { id: task.id, title: task.title, status: final.status });
   // Per-task run log and pipeline snapshot are written before the commit so they land in it too.
   try {
@@ -203,7 +221,7 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
 }
 
 function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError: string | undefined, continuation: number): PromptCtx {
-  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError };
+  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes };
 }
 
 /** Abortable, STOP-aware backoff. Returns true when a STOP file appeared. */
@@ -236,6 +254,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   const maxContinuations = Math.max(0, config.maxContinuations);
   const maxIterations = Math.max(0, config.maxIterationsPerTask);
   ensureProgressFile(paths);
+  refreshDerivedDocs(ctx);
 
   let resumeId: string | undefined;
   let lastTransient: Classified | undefined;
@@ -306,6 +325,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         saveState(paths, state);
         if (continuation < maxContinuations) {
           continuation += 1;
+          refreshDerivedDocs(ctx);
           if (config.commitPerSession) commitIntermediate(ctx, task, st);
           log.info(`${task.id}: session reported continue (${continuation}/${maxContinuations}); starting a fresh session for the next slice`);
           resumeId = undefined;

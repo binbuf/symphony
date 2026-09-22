@@ -11,7 +11,7 @@ Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Goo
 ## Why symphony
 
 - **Unattended by default.** No session ever waits on a human. The harness handles the things that normally make you babysit an agent: transient API failures, oversized tasks, missing result blocks, runaway loops, and dirty worktrees.
-- **Fresh context per task.** Every task starts in a brand-new session with only its task file, the tail of `PROGRESS.md`, and the design docs it needs. No context rot, no hidden state carried from the previous task.
+- **Fresh context per task.** Every task starts in a brand-new session with only its task file, the digest and recent tail of `PROGRESS.md`, the design docs it names and a generated project index. No context rot, no hidden state carried from the previous task.
 - **Everything lands in git.** Each task ends in a commit that carries the code, the roadmap marker, the task's hand-off, the design updates and the run log. `git log` is the pipeline's history; `git revert` is the undo.
 - **Resumable and inspectable.** Kill it, crash it, or pause it with a file — state and roadmap markers let the next run pick up exactly where it left off. Every session's exact prompt, rendered log and raw NDJSON are saved.
 - **Provider-agnostic.** The same plan and lifecycle work with any of the six agent CLIs, or the built-in `fake` provider for testing the harness itself without spending anything.
@@ -116,7 +116,7 @@ docs/
 `run` walks the selected tasks in roadmap order. For each one:
 
 1. **Marks the bullet** `[~] ⟵ running` and records the attempt in `.symphony/state.json`.
-2. **Builds the prompt** and writes it to `.symphony/runs/<task>-<stamp>.prompt.md`. It contains the task file, the tail of `PROGRESS.md`, the list of design docs and ADRs, the rules for the session, and the required result block.
+2. **Builds the prompt** and writes it to `.symphony/runs/<task>-<stamp>.prompt.md`. It contains the task file, a generated "Key facts" digest of `PROGRESS.md` plus its most recent sections, the design docs the task names (inlined, not just listed), the generated `docs/INDEX.md` (design-doc summaries + a source map), the rules for the session, and the required result block.
 3. **Spawns the provider CLI** in the project root with permissions bypassed, and streams what it does:
 
    ```
@@ -205,7 +205,11 @@ symphony owns a small, stack-agnostic planning format. `init` scaffolds it, `lin
 ```
 docs/
   ROADMAP.md            phases as "##" headings; one top-level bullet per task, in execution order
-  PROGRESS.md           the agent's shared notebook (learnings for later tasks); created if missing
+  PROGRESS.md           the agent's shared notebook (learnings for later tasks); created if missing.
+                        The harness keeps a generated "Key facts" digest at the top and inlines the
+                        digest plus the most recent sections into each prompt
+  INDEX.md              generated repo map: one-line design-doc summaries and a source-file map with
+                        top-level symbols; rewritten before each task and committed with it
   logs/TNN.md           the harness's per-task run log: status, provider/model, timing, cost and each
                         session's reported status + summary; regenerated after every task
   tasks/NN-slug.md      one detail file per task: Goal / Context / Scope / Out of scope / Design notes /
@@ -316,14 +320,18 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `provider` | `claude` | `claude` · `cursor` · `opencode` · `codex` · `gemini` · `antigravity` |
 | `providers.<name>.bin` `.model` `.extraArgs` `.budgetUsd` `.idleTimeoutMin` | see `symphony.config.example.json` | binary, model, extra CLI args, per-task budget (Claude), stall timeout override |
 | `paths.docs` | `docs` (legacy `.docs` honoured) | planning package directory |
-| `paths.roadmap` `.progress` `.tasks` `.design` `.adr` `.logs` | derived from `paths.docs` | individual overrides, absolute or root-relative |
+| `paths.roadmap` `.progress` `.tasks` `.design` `.adr` `.logs` `.index` | derived from `paths.docs` | individual overrides, absolute or root-relative |
 | `paths.stop` | `.stop` | graceful-pause sentinel (absolute or root-relative) |
 | `paths.state` `.runs` `.log` | under `.symphony/` | where harness state, session logs and the event log live |
 | `autoApprove` | `true` | bypass permission prompts (`--safe` sets false for one run) |
 | `nudge`, `nudgeTimeoutMin` | `true`, `45` | resume once to collect a missing result block |
 | `timeoutMin`, `idleTimeoutMin` | `240`, `20` | max wall clock per session; kill after this long with no output |
 | `prepareTimeoutMin` | `60` | wall clock for the `prepare` session |
-| `maxProgressBytes` | `32768` | tail of `PROGRESS.md` inlined into each prompt |
+| `maxProgressBytes` | `32768` | byte cap for the recent `PROGRESS.md` sections inlined into each prompt |
+| `progressDigest` | `true` | maintain a generated "Key facts" digest at the top of `PROGRESS.md` and inline it ahead of the recent sections |
+| `inlineDesignDocs` | `true` | inline the design docs a task names in its Context / Design notes, not just list them |
+| `repoMap` | `true` | generate `docs/INDEX.md` (design-doc summaries + a source map) before each task and inline it |
+| `maxIndexBytes` | `16384` | byte cap for the inlined repo map |
 | `designDocs` | `true` | when `false`, `design/` and `adr/` are neither required nor used: tasks run standalone |
 | `maxContinuations` | `4` | extra fresh sessions a task may take after reporting `continue` |
 | `maxIterationsPerTask`, `maxTasksPerRun` | `0`, `0` | provider-agnostic caps (0 = unlimited): sessions per task in a run, and tasks per run |
@@ -357,6 +365,7 @@ All hooks also get `SYMPHONY_ROOT`. Example:
 
 ```
 docs/logs/T05.md                               per-task run log: status, provider/model, timing, cost and each session's summary
+docs/INDEX.md                                  generated repo map, rewritten before each task and committed with it
 .symphony/runs/T05-20260917T231530.jsonl       raw provider NDJSON, byte-faithful
 .symphony/runs/T05-20260917T231530.log         rendered [think]/[text]/[tool] stream, longer lines than stdout
 .symphony/runs/T05-20260917T231530.prompt.md   the exact prompt sent
