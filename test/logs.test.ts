@@ -22,7 +22,7 @@ test('writeTaskLog opens with the start stamp and closes with the finish stamp',
     summary: 'all done',
     logs: [{ kind: 'task', jsonl: 'r.jsonl', log: 'r.log', prompt: 'r.prompt.md', status: 'done', started: '2026-01-02T03:04:05Z', summary: 'all done' }],
   };
-  writeTaskLog(paths, task, st);
+  writeTaskLog(paths, task, st, { timeZone: 'utc' });
   const lines = readFileSync(taskLogPath(paths, 'T01'), 'utf8').trimEnd().split('\n');
   assert.equal(lines[0], '# T01 — Do the thing');
   assert.equal(lines[2], '**Started:** 2026-01-02 03:04:05Z');

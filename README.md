@@ -525,6 +525,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `taskSets` | `[]` | extra, independent task sets: `[{ "name": "phase-2", "docs": "docs/phase-2" }]`, each with its own roadmap/tasks/progress/design and state under `.symphony/sets/<name>/`; run one with `--set NAME` (see [Multiple task sets](#multiple-task-sets)) |
 | `autoApprove` | `true` | bypass permission prompts (`--safe` sets false for one run) |
 | `tui` | `true` | open the full-screen run view (status table + live output) when stdout and stdin are a terminal; off when piped/CI. `--no-tui` disables, `--tui` forces |
+| `timeZone` | `local` | zone for the start/end stamps in the TUI status area and per-task logs: `local`, `utc`, or a fixed offset like `+05:30` / `-8` |
 | `nudge`, `nudgeTimeoutMin` | `true`, `45` | resume once to collect a missing result block |
 | `timeoutMin`, `idleTimeoutMin` | `240`, `20` | max wall clock per session; kill after this long with no output |
 | `prepareTimeoutMin` | `60` | wall clock for the `prepare` session |

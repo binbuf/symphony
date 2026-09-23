@@ -44,6 +44,7 @@
   "taskSets": [],
   "autoApprove": true,
   "tui": true,
+  "timeZone": "local",
   "nudge": true,
   "timeoutMin": 240,
   "idleTimeoutMin": 20,

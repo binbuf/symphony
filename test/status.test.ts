@@ -72,7 +72,7 @@ test('statusCommand shows start and end datetime stamps in the table', () => {
     },
   };
   const { log, lines } = captureLogger();
-  assert.equal(statusCommand(paths, DEFAULTS, state, tasks, log, false), 0);
+  assert.equal(statusCommand(paths, { ...DEFAULTS, timeZone: 'utc' }, state, tasks, log, false), 0);
   const out = lines.join('\n');
   const head = lines[0];
   assert.match(head, /duration\s+start\s+end/);
@@ -111,7 +111,7 @@ test('statusCommand splits a task into a parent line plus one line per session r
     },
   };
   const { log, lines } = captureLogger();
-  assert.equal(statusCommand(paths, DEFAULTS, state, tasks, log, false), 0);
+  assert.equal(statusCommand(paths, { ...DEFAULTS, timeZone: 'utc' }, state, tasks, log, false), 0);
   // Parent line: total start (first session) through finish, accumulated duration and final summary.
   const parent = lines.find((l) => l.startsWith('T01'))!;
   assert.match(parent, /2026-01-02 01:00:00Z\s+2026-01-02 03:30:00Z/);

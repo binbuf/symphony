@@ -4,7 +4,7 @@ import { patchRoadmapStatus } from './roadmap.js';
 import type { Paths } from './paths.js';
 import { DONE_STATES, type State, type TaskState, type TaskStatus } from './state.js';
 import type { Task } from './tasks.js';
-import { fmtCost, fmtDateTime, fmtDuration, nowIso, squash, squashTail } from './util.js';
+import { fmtCost, fmtDateTime, fmtDuration, nowIso, squash, squashTail, type TimeZone } from './util.js';
 
 const ORDER: TaskStatus[] = ['done', 'accepted', 'blocked', 'failed', 'pending', 'running'];
 
@@ -22,11 +22,11 @@ export function runningSeconds(s: TaskState | undefined): number {
 }
 
 /** The start stamp, computed end stamp and duration of one recorded session run (in flight included). */
-function runTiming(l: { started?: string; durationS?: number }, running: boolean): { start: string; end: string; duration: string } {
+function runTiming(l: { started?: string; durationS?: number }, running: boolean, tz: TimeZone): { start: string; end: string; duration: string } {
   const started = l.started ? Date.parse(l.started) : NaN;
   const seconds = l.durationS ?? (running && Number.isFinite(started) ? Math.max(0, Math.round((Date.now() - started) / 1000)) : undefined);
   const end = Number.isFinite(started) && seconds !== undefined ? new Date(started + seconds * 1000).toISOString() : undefined;
-  return { start: fmtDateTime(l.started), end: fmtDateTime(end), duration: fmtDuration(seconds) };
+  return { start: fmtDateTime(l.started, tz), end: fmtDateTime(end, tz), duration: fmtDuration(seconds) };
 }
 
 export interface StatusSummary {
@@ -57,11 +57,14 @@ export interface StatusTable {
 export interface StatusTableOptions {
   /** Skip every per-cell cap so the full text is available to a horizontally scrolling renderer. */
   expand?: boolean;
+  /** Zone for the start/end stamps; defaults to the machine's local zone. */
+  timeZone?: TimeZone;
 }
 
 export function buildStatusTable(tasks: Task[], state: State, opts: StatusTableOptions = {}): StatusTable {
   // Expanded mode disables the caps; a cap of Infinity still collapses whitespace but never truncates.
   const cap = (max: number) => (opts.expand ? Number.POSITIVE_INFINITY : max);
+  const tz = opts.timeZone ?? 'local';
   const rows: string[][] = [];
   const rowTask: string[] = [];
   const taskRow: Record<string, number> = {};
@@ -75,13 +78,13 @@ export function buildStatusTable(tasks: Task[], state: State, opts: StatusTableO
     // accumulated duration and the final summary.
     const start = s?.logs?.[0]?.started ?? s?.started;
     taskRow[t.id] = rows.length;
-    rows.push([t.id, squash(t.phase, cap(18)), squash(t.title, cap(42)), shown, String(s?.attempts ?? 0), time, fmtDateTime(start), fmtDateTime(s?.finished), fmtCost(s?.costUsd), s?.provider ?? '', squashTail(s?.model ? `${s.model}${s.variant ? `#${s.variant}` : ''}` : '', cap(28)), squash(s?.summary ?? '', cap(60))]);
+    rows.push([t.id, squash(t.phase, cap(18)), squash(t.title, cap(42)), shown, String(s?.attempts ?? 0), time, fmtDateTime(start, tz), fmtDateTime(s?.finished, tz), fmtCost(s?.costUsd), s?.provider ?? '', squashTail(s?.model ? `${s.model}${s.variant ? `#${s.variant}` : ''}` : '', cap(28)), squash(s?.summary ?? '', cap(60))]);
     rowTask.push(t.id);
     // A task split across sessions or retried (att >= 2) gets one child line per session, so each
     // round reports its own start/end, duration and summary instead of only the task's running total.
     if ((s?.attempts ?? 0) >= 2 && s?.logs?.length) {
       s.logs.forEach((l, i) => {
-        const run = runTiming(l, running);
+        const run = runTiming(l, running, tz);
         const label = `run ${i + 1} · ${l.kind}`;
         // The session's own provider and model, so an escalated run is visible in the table too.
         rows.push(['  ↳', '', squash(label, cap(42)), l.status ?? '', '', run.duration, run.start, run.end, fmtCost(l.costUsd), squash(l.provider ?? '', cap(16)), squashTail(l.model ? `${l.model}${l.variant ? `#${l.variant}` : ''}` : '', cap(28)), squash(l.summary ?? '', cap(60))]);

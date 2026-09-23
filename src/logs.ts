@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import type { Paths } from './paths.js';
 import type { TaskState } from './state.js';
 import type { Task } from './tasks.js';
-import { atomicWriteSync, ensureDir, fmtCost, fmtDateTime, fmtDuration } from './util.js';
+import { atomicWriteSync, ensureDir, fmtCost, fmtDateTime, fmtDuration, type TimeZone } from './util.js';
 
 /** One markdown file per task in the docs logs dir: `T01.md`. */
 export function taskLogPath(paths: Paths, id: string): string {
@@ -19,11 +19,12 @@ function bullet(label: string, value: string | undefined, fallback = '-'): strin
  * stamp opens the file and its finish stamp closes it. Regenerated in full after every session so
  * it always reflects the latest state and never grows duplicates.
  */
-export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { commitPreview?: string } = {}): void {
+export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { commitPreview?: string; timeZone?: TimeZone } = {}): void {
+  const tz = opts.timeZone ?? 'local';
   const lines: string[] = [];
   lines.push(`# ${task.id} — ${task.title}`);
   lines.push('');
-  lines.push(`**Started:** ${fmtDateTime(st.started)}`);
+  lines.push(`**Started:** ${fmtDateTime(st.started, tz)}`);
   lines.push('');
   lines.push('_Per-run log maintained by the symphony harness; regenerated after every session. Do not edit by hand._');
   lines.push('');
@@ -77,7 +78,7 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
   lines.push('');
   lines.push('---');
   lines.push('');
-  lines.push(`**Finished:** ${fmtDateTime(st.finished)}`);
+  lines.push(`**Finished:** ${fmtDateTime(st.finished, tz)}`);
   ensureDir(paths.logsDir);
   atomicWriteSync(taskLogPath(paths, task.id), `${lines.join('\n')}\n`);
 }

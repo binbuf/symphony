@@ -257,7 +257,7 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
     const message = renderTemplate(config.commitMessageTemplate, { id: task.id, title: task.title, status });
     // Per-task run log and pipeline snapshot are written before the commit so they land in it too.
     try {
-      writeTaskLog(paths, task, st, { commitPreview: message });
+      writeTaskLog(paths, task, st, { commitPreview: message, timeZone: config.timeZone });
     } catch (e) {
       log.warn(`${task.id}: could not write ${ctx.paths.logsDir} log: ${(e as Error).message}`);
     }

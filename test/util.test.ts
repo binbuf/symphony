@@ -4,11 +4,35 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { resolveExecutable } from '../src/util.js';
-import { fmtTime, squash, squashTail } from '../src/util.js';
+import { fmtDateTime, fmtTime, parseTimeZone, squash, squashTail } from '../src/util.js';
 
 test('fmtTime: a zero-padded local clock time, not a date', () => {
   assert.equal(fmtTime(new Date(2026, 0, 2, 3, 4, 5)), '03:04:05');
   assert.match(fmtTime(), /^\d{2}:\d{2}:\d{2}$/);
+});
+
+test('parseTimeZone recognises local, utc and fixed offsets', () => {
+  assert.equal(parseTimeZone('local'), 'local');
+  assert.equal(parseTimeZone('UTC'), 'utc');
+  assert.equal(parseTimeZone('+05:30'), 330);
+  assert.equal(parseTimeZone('-8'), -480);
+  assert.equal(parseTimeZone('+0530'), 330);
+  assert.equal(parseTimeZone('nonsense'), undefined);
+  assert.equal(parseTimeZone('+25:00'), undefined);
+  assert.equal(parseTimeZone(42), undefined);
+});
+
+test('fmtDateTime defaults to a local stamp, honours utc and fixed offsets', () => {
+  const iso = '2026-01-02T03:04:05Z';
+  assert.equal(fmtDateTime(iso, 'utc'), '2026-01-02 03:04:05Z');
+  // A fixed offset shifts the instant and labels itself; +05:30 turns 03:04 into 08:34.
+  assert.equal(fmtDateTime(iso, 330), '2026-01-02 08:34:05+05:30');
+  assert.equal(fmtDateTime(iso, -480), '2026-01-01 19:04:05-08:00');
+  // The default local stamp carries a numeric offset and matches the machine's own date fields.
+  const local = fmtDateTime(iso);
+  assert.match(local, /^2026-01-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/);
+  assert.equal(fmtDateTime(undefined, 'utc'), '-');
+  assert.equal(fmtDateTime('not-a-date', 'utc'), 'not-a-date');
 });
 
 test('squash keeps the head; squashTail keeps the tail', () => {

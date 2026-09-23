@@ -77,12 +77,59 @@ export function fmtCost(usd?: number): string {
   return usd === undefined || usd === null || !Number.isFinite(usd) ? '-' : `$${usd.toFixed(2)}`;
 }
 
-/** A stored ISO timestamp as a readable UTC datetime stamp: `2026-09-17 23:15:30Z`. */
-export function fmtDateTime(iso?: string): string {
+/**
+ * How stored timestamps are rendered: the machine's local zone (default), UTC, or a fixed offset
+ * from UTC in minutes (east positive, so `+05:30` is 330 and `-08:00` is -480).
+ */
+export type TimeZone = 'local' | 'utc' | number;
+
+/**
+ * Parse a configured `timeZone` value into a {@link TimeZone}: `"local"` (the default), `"utc"`,
+ * or a fixed offset such as `"+05:30"`, `"-8"` or `"+0530"`. Returns undefined for anything else.
+ */
+export function parseTimeZone(value: unknown): TimeZone | undefined {
+  if (typeof value !== 'string') return undefined;
+  const s = value.trim().toLowerCase();
+  if (s === 'local') return 'local';
+  if (s === 'utc' || s === 'z') return 'utc';
+  const m = /^([+-])(\d{1,2})(?::?(\d{2}))?$/.exec(s);
+  if (!m) return undefined;
+  const hours = Number(m[2]);
+  const minutes = Number(m[3] ?? '0');
+  if (hours > 23 || minutes > 59) return undefined;
+  return (m[1] === '-' ? -1 : 1) * (hours * 60 + minutes);
+}
+
+function p2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+/** `+05:30` / `-04:00`, the suffix a fixed-offset stamp carries. */
+function offsetLabel(minutes: number): string {
+  const a = Math.abs(minutes);
+  return `${minutes < 0 ? '-' : '+'}${p2(Math.floor(a / 60))}:${p2(a % 60)}`;
+}
+
+/**
+ * A stored ISO timestamp as a readable datetime stamp. Defaults to the machine's local zone
+ * (`2026-09-17 19:15:30-04:00`); pass `"utc"` for the old `2026-09-17 23:15:30Z`, or a fixed
+ * offset in minutes for another zone.
+ */
+export function fmtDateTime(iso?: string, tz: TimeZone = 'local'): string {
   if (!iso) return '-';
   const d = new Date(iso);
   if (!Number.isFinite(d.getTime())) return iso;
-  return d.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, 'Z');
+  if (tz === 'utc') return d.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, 'Z');
+  const minutes = tz === 'local' ? -d.getTimezoneOffset() : tz;
+  // Local uses the Date's own local getters (DST-aware); a fixed offset shifts the instant and reads UTC.
+  const shifted = tz === 'local' ? d : new Date(d.getTime() + minutes * 60000);
+  const date = tz === 'local'
+    ? `${shifted.getFullYear()}-${p2(shifted.getMonth() + 1)}-${p2(shifted.getDate())}`
+    : `${shifted.getUTCFullYear()}-${p2(shifted.getUTCMonth() + 1)}-${p2(shifted.getUTCDate())}`;
+  const time = tz === 'local'
+    ? `${p2(shifted.getHours())}:${p2(shifted.getMinutes())}:${p2(shifted.getSeconds())}`
+    : `${p2(shifted.getUTCHours())}:${p2(shifted.getUTCMinutes())}:${p2(shifted.getUTCSeconds())}`;
+  return `${date} ${time}${offsetLabel(minutes)}`;
 }
 
 export function slugify(s: string): string {

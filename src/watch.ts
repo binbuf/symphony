@@ -74,7 +74,7 @@ function statusOf(state: State, t: Task): string {
 /** A one-line pipeline snapshot for the log and the prompt header. */
 export function pipelineSnapshot(ctx: RunContext): string {
   const { tasks, state } = ctx;
-  const table = buildStatusTable(tasks, state);
+  const table = buildStatusTable(tasks, state, { timeZone: ctx.config.timeZone });
   const s = table.summary;
   const ids = (pick: (st: string) => boolean): string => tasks.filter((t) => pick(statusOf(state, t))).map((t) => t.id).join(',') || 'none';
   const bits = [

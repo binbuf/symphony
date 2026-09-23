@@ -60,6 +60,21 @@ test('keys beginning with "_" are comments: ignored silently at every level', ()
   assert.ok(warnings.some((w) => w.includes('bogus')), 'a real unknown key still warns');
 });
 
+test('timeZone is parsed to local, utc or a fixed offset; bad values warn and fall back', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-tz-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  assert.equal(loadConfig(paths, {}).config.timeZone, 'local');
+  writeFileSync(paths.config, JSON.stringify({ timeZone: 'utc' }));
+  assert.equal(loadConfig(paths, {}).config.timeZone, 'utc');
+  writeFileSync(paths.config, JSON.stringify({ timeZone: '+05:30' }));
+  assert.equal(loadConfig(paths, {}).config.timeZone, 330);
+  writeFileSync(paths.config, JSON.stringify({ timeZone: 'nonsense' }));
+  const bad = loadConfig(paths, {});
+  assert.equal(bad.config.timeZone, 'local');
+  assert.ok(bad.warnings.some((w) => w.includes('timeZone')));
+});
+
 test('resolveSession precedence: cli > env > front matter > config', () => {
   const cfg = { ...DEFAULTS, provider: 'opencode' as const };
   const byConfig = resolveSession(cfg, task(), {}, {}).spec;

@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { PathOverrides, Paths } from './paths.js';
 import type { ProviderName } from './providers/types.js';
 import type { Task } from './tasks.js';
-import { UsageError, fileExists, isRecord } from './util.js';
+import { UsageError, fileExists, isRecord, parseTimeZone, type TimeZone } from './util.js';
 
 export const PROVIDER_NAMES: ProviderName[] = ['claude', 'cursor', 'opencode', 'codex', 'gemini', 'antigravity', 'fake'];
 
@@ -136,6 +136,11 @@ export interface Config {
   autoApprove: boolean;
   /** Full-screen run view (status table + live output) when stdout/stdin is a terminal. `--no-tui` overrides. */
   tui: boolean;
+  /**
+   * Zone used for the start/end stamps in the TUI status area and the per-task log: `"local"` (the
+   * machine's zone, the default), `"utc"`, or a fixed offset like `"+05:30"` / `"-8"`.
+   */
+  timeZone: TimeZone;
   nudge: boolean;
   timeoutMin: number;
   idleTimeoutMin: number;
@@ -213,6 +218,7 @@ export const DEFAULTS: Config = {
   taskSets: [],
   autoApprove: true,
   tui: true,
+  timeZone: 'local',
   nudge: true,
   timeoutMin: 240,
   idleTimeoutMin: 20,
@@ -437,6 +443,15 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     taskSets: taskSetList(raw.taskSets, warnings),
     autoApprove: boolOr(raw.autoApprove, DEFAULTS.autoApprove, 'autoApprove', warnings),
     tui: boolOr(raw.tui, DEFAULTS.tui, 'tui', warnings),
+    timeZone: (() => {
+      if (raw.timeZone === undefined || raw.timeZone === null) return DEFAULTS.timeZone;
+      const tz = parseTimeZone(raw.timeZone);
+      if (tz === undefined) {
+        warnings.push(`timeZone: expected "local", "utc", or an offset like "+05:30", got ${JSON.stringify(raw.timeZone)}; using ${DEFAULTS.timeZone}`);
+        return DEFAULTS.timeZone;
+      }
+      return tz;
+    })(),
     nudge: boolOr(raw.nudge, DEFAULTS.nudge, 'nudge', warnings),
     timeoutMin: positiveOr(raw.timeoutMin, DEFAULTS.timeoutMin, 'timeoutMin', warnings),
     idleTimeoutMin: atLeastOr(raw.idleTimeoutMin, DEFAULTS.idleTimeoutMin, 0, 'idleTimeoutMin', warnings),

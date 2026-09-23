@@ -62,7 +62,7 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
   }
   if (state.halted) log.banner('HALTED', [`${state.halted.taskId ? `${state.halted.taskId} · ` : ''}${state.halted.category}: ${state.halted.reason}`, `at ${state.halted.at}`, haltResumeHint(state.halted)]);
 
-  const table = buildStatusTable(tasks, state);
+  const table = buildStatusTable(tasks, state, { timeZone: config.timeZone });
   const widths = statusColumnWidths(table);
   log.plain(formatStatusRow(table.head, widths));
   log.plain(widths.map((w) => '-'.repeat(w)).join('  '));

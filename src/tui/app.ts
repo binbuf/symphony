@@ -215,7 +215,7 @@ export class TuiApp {
   private table(): StatusTable {
     const now = Date.now();
     if (!this.tableCache || now - this.tableCache.at > TABLE_TTL_MS) {
-      this.tableCache = { at: now, table: buildStatusTable(this.ctx.tasks, this.ctx.state, { expand: this.expand }) };
+      this.tableCache = { at: now, table: buildStatusTable(this.ctx.tasks, this.ctx.state, { expand: this.expand, timeZone: this.ctx.config.timeZone }) };
     }
     return this.tableCache.table;
   }
