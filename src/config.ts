@@ -49,7 +49,7 @@ export interface EscalationConfig {
    * shipped default model (GLM-5.3). Set it to your own provider for a same-provider model bump.
    */
   provider?: ProviderName;
-  /** Model the escalation provider runs, e.g. "z-ai/glm-5.3" (OpenCode) or a Claude model id. */
+  /** Model the escalation provider runs, e.g. "openrouter/z-ai/glm-5.3" (OpenCode) or a Claude model id. */
   model: string;
   /** How many escalation sessions a single task may take before it is failed for good. */
   maxAttempts: number;
@@ -252,7 +252,7 @@ export const DEFAULTS: Config = {
   escalation: {
     enabled: false,
     provider: 'opencode',
-    model: 'z-ai/glm-5.3',
+    model: 'openrouter/z-ai/glm-5.3',
     maxAttempts: 1,
     onCategories: ['task', 'verify'],
   },
@@ -765,7 +765,7 @@ export function resolveEscalation(
   let variant = pc.variant;
   if (variant && !variantSupport(providerName, pc.bin, model, variant)) variant = undefined;
   if (providerName === 'opencode' && !model.includes('/')) {
-    warnings.push(`opencode models are "provider/model" (e.g. z-ai/glm-5.3); escalation got "${model}"`);
+    warnings.push(`opencode models are "provider/model" (e.g. openrouter/z-ai/glm-5.3); escalation got "${model}"`);
   }
   return {
     spec: {

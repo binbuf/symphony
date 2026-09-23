@@ -123,7 +123,7 @@ test('TuiApp.renderLines produces a fixed-size frame with both panels and the me
     version: 1,
     tasks: {
       T01: { ...newTaskState('t1'), status: 'done', attempts: 1, durationS: 120, costUsd: 0.5, summary: 'ok' },
-      T02: { ...newTaskState('t2'), status: 'running', attempts: 1, durationS: 30, started: new Date().toISOString(), provider: 'opencode', model: 'z-ai/glm-5.3' },
+      T02: { ...newTaskState('t2'), status: 'running', attempts: 1, durationS: 30, started: new Date().toISOString(), provider: 'opencode', model: 'openrouter/z-ai/glm-5.3' },
     },
   };
   const app = new TuiApp(makeCtx(tasks, state), new AnsiTerminal(() => {}));

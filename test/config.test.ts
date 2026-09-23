@@ -356,7 +356,7 @@ test('escalation defaults to GLM-5.3 via OpenCode, is off until enabled, and res
   // The shipped default is a real, usable pair even though escalation is off by default.
   assert.equal(DEFAULTS.escalation.enabled, false);
   assert.equal(DEFAULTS.escalation.provider, 'opencode');
-  assert.equal(DEFAULTS.escalation.model, 'z-ai/glm-5.3');
+  assert.equal(DEFAULTS.escalation.model, 'openrouter/z-ai/glm-5.3');
   const off = loadConfig(paths, {}).config;
   assert.equal(off.escalation.enabled, false);
   assert.equal(resolveEscalation(off, resolveSession(off, task(), {}, {}).spec), undefined);

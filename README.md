@@ -404,13 +404,13 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 
 By default, a task the configured model cannot finish is failed. Escalation gives it a second, stronger pair of hands: when a task reports `failed`, the harness's own `verify` command rejects a `done`, or the model burns through `maxContinuations` slices, the task is handed to a second provider/model for a fresh session. Infrastructure failures — auth, rate limits, timeouts — are never escalated; the retry and halt logic owns those.
 
-It is off by default, and the shipped default target is OpenCode running **GLM-5.3** (`z-ai/glm-5.3`). Turn it on with:
+It is off by default, and the shipped default target is OpenCode running **GLM-5.3** (`openrouter/z-ai/glm-5.3`). Turn it on with:
 
 ```json
 "escalation": {
   "enabled": true,
   "provider": "opencode",
-  "model": "z-ai/glm-5.3",
+  "model": "openrouter/z-ai/glm-5.3",
   "maxAttempts": 1,
   "onCategories": ["task", "verify"]
 }
@@ -420,7 +420,7 @@ It is off by default, and the shipped default target is OpenCode running **GLM-5
 |---|---|---|
 | `enabled` | `false` | turn escalation on |
 | `provider` | `opencode` | provider the escalated sessions run on; set it to your own provider for a same-provider model bump |
-| `model` | `z-ai/glm-5.3` | model the escalation provider runs (OpenCode wants `provider/model`) |
+| `model` | `openrouter/z-ai/glm-5.3` | model the escalation provider runs (OpenCode wants `provider/model`) |
 | `maxAttempts` | `1` | escalation sessions a single task may take before it is failed for good |
 | `onCategories` | `[task, verify]` | the give-up reasons that escalate: `task` covers a reported `failed` and the continuation limit, `verify` a rejected `done` |
 
@@ -547,7 +547,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `git.autoIgnoreUntracked`, `git.extraIgnore` | `true`, `[]` | before committing, keep untracked ephemeral/secret files out of the commit by adding their patterns to `.gitignore` |
 | `retry.maxAttempts`, `retry.backoffSec` | `3`, `[30,120,300]` | transient-error retries |
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
-| `escalation.enabled`, `.provider`, `.model`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
+| `escalation.enabled`, `.provider`, `.model`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `openrouter/z-ai/glm-5.3`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `openrouter/deepseek/deepseek-v4.1-flash`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
