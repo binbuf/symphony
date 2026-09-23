@@ -7,6 +7,9 @@ const ALT_ON = '\x1b[?1049h';
 const ALT_OFF = '\x1b[?1049l';
 const HIDE_CURSOR = '\x1b[?25l';
 const SHOW_CURSOR = '\x1b[?25h';
+/** Disable/enable the terminal's own line wrap: we pre-wrap, so an over-wide line must clip, not scroll the frame. */
+const WRAP_OFF = '\x1b[?7l';
+const WRAP_ON = '\x1b[?7h';
 const CLEAR = '\x1b[2J\x1b[H';
 const SYNC_ON = '\x1b[?2026h';
 const SYNC_OFF = '\x1b[?2026l';
@@ -36,7 +39,7 @@ export class AnsiTerminal {
   }
 
   enter(): void {
-    this.out(`${ALT_ON}${HIDE_CURSOR}${CLEAR}`);
+    this.out(`${ALT_ON}${WRAP_OFF}${HIDE_CURSOR}${CLEAR}`);
     if (process.stdin.isTTY) {
       process.stdin.setEncoding('utf8');
       process.stdin.setRawMode(true);
@@ -49,7 +52,7 @@ export class AnsiTerminal {
       try { process.stdin.setRawMode(false); } catch { /* already gone */ }
       process.stdin.pause();
     }
-    this.out(`${SHOW_CURSOR}${ALT_OFF}`);
+    this.out(`${SHOW_CURSOR}${WRAP_ON}${ALT_OFF}`);
     this.prev = [];
   }
 
@@ -72,7 +75,11 @@ export class AnsiTerminal {
     this.resizeListener = undefined;
   }
 
-  /** Rewrite only the rows that changed since the last frame. */
+  /**
+ * Rewrite only the rows that changed since the last frame. The bottom two rows (the metrics + key
+ * bar) are always repainted: a transient terminal glitch must never be able to leave the toolbar
+ * blank, since an unchanged row would otherwise never be rewritten.
+ */
   draw(lines: string[]): void {
     const { cols } = this.size();
     const full = cols !== this.prevCols || lines.length !== this.prev.length;
@@ -83,7 +90,8 @@ export class AnsiTerminal {
     }
     let buf = SYNC_ON;
     for (let i = 0; i < lines.length; i++) {
-      if (!full && lines[i] === this.prev[i]) continue;
+      const alwaysRepaint = i >= lines.length - 2;
+      if (!full && !alwaysRepaint && lines[i] === this.prev[i]) continue;
       buf += `\x1b[${i + 1};1H\x1b[2K${lines[i]}`;
     }
     buf += SYNC_OFF;

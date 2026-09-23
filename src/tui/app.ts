@@ -6,7 +6,7 @@ import { saveState } from '../state.js';
 import { buildStatusTable, formatStatusRow, statusColumnWidths, type StatusTable } from '../status.js';
 import type { Key } from './keys.js';
 import { AnsiTerminal } from './terminal.js';
-import { displayWidth, fit, padTo, sliceColumns, splice, wrapText } from './text.js';
+import { displayWidth, fit, padTo, sanitizeLine, sliceColumns, splice, wrapText } from './text.js';
 import { fmtTime } from '../util.js';
 import type { WatchState } from '../watch.js';
 
@@ -128,7 +128,7 @@ export class TuiApp {
     this.partial += text;
     const parts = this.partial.split('\n');
     this.partial = parts.pop() ?? '';
-    for (const line of parts) this.stream.push(line.replace(/\r$/, ''));
+    for (const line of parts) this.stream.push(sanitizeLine(line));
     if (this.stream.length > STREAM_MAX) this.stream.splice(0, this.stream.length - STREAM_MAX);
     this.scheduleRender();
   }
@@ -139,7 +139,7 @@ export class TuiApp {
   }
 
   toast(msg: string): void {
-    this.toastMsg = msg;
+    this.toastMsg = sanitizeLine(msg);
     this.toastUntil = Date.now() + TOAST_MS;
     this.scheduleRender();
   }
@@ -506,12 +506,12 @@ export class TuiApp {
       }
     }
 
-    out[rows - 2] = fit(this.metricsLine(table), cols);
-    if (this.toastActive()) {
-      out[rows - 1] = padTo(`${C.yellow}${sliceColumns(this.toastMsg!, 0, cols)}${C.reset}`, cols);
-    } else {
-      out[rows - 1] = fit(this.hintsLine(), cols);
-    }
+    // The key-hints row is permanent: a transient toast temporarily takes the metrics row instead,
+// so the toolbar never looks like it vanished while a run is active.
+    out[rows - 1] = fit(this.hintsLine(), cols);
+    out[rows - 2] = this.toastActive()
+      ? padTo(`${C.yellow}${sliceColumns(this.toastMsg!, 0, cols)}${C.reset}`, cols)
+      : fit(this.metricsLine(table), cols);
 
     const overlay = this.help ? this.helpBox() : this.dialog ? this.dialogBox(this.dialog) : undefined;
     if (overlay) this.drawBox(out, cols, rows, overlay);
@@ -519,7 +519,7 @@ export class TuiApp {
   }
 
   private clip(line: string, hOffset: number, cols: number): string {
-    return padTo(sliceColumns(line, hOffset, cols), cols);
+    return padTo(sliceColumns(sanitizeLine(line), hOffset, cols), cols);
   }
 
   private panelTitle(left: string, right: string, cols: number, focused: boolean): string {

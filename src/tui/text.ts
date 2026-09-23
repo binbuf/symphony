@@ -108,6 +108,18 @@ export function fit(s: string, width: number): string {
   return `${sliceColumns(s, 0, width - 1)}…`;
 }
 
+/**
+ * Make a line safe to print so its real terminal footprint matches `displayWidth`: tabs become a
+ * single space (a terminal expands them, which would overflow the frame), and C0 controls other than
+ * tab/newline/ESC are dropped. ESC is kept so ANSI colour sequences still parse and are stripped by
+ * the width helpers; newlines never reach a frame line.
+ */
+const CONTROL_RE = /[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]/g;
+
+export function sanitizeLine(s: string): string {
+  return s.replace(/\t/g, ' ').replace(CONTROL_RE, '');
+}
+
 /** Overlay `box` lines onto a full-width frame line, replacing columns [left, left+boxWidth). */
 export function splice(frameLine: string, boxLine: string, left: number, cols: number): string {
   const plain = stripAnsi(frameLine);

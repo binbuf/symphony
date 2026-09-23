@@ -156,7 +156,7 @@ When `run` starts with stdout **and** stdin attached to a terminal, it opens a f
 - **Status** (top panel) — the same table as `symphony status`, refreshed from live state: id, phase, title, status, attempts, duration, start/end, cost, provider, model, summary. A task split across sessions or retried lists its per-session rows beneath it.
 - **Pipeline watch** (strip above the status table, when enabled) — a separate read-only model's latest summary of recent developments and overall pipeline health, refreshed on a timer (see [Pipeline watch](#pipeline-watch)). It reads `Waiting for updates — first check in m:ss` until the first check lands.
 - **Live output** (bottom panel) — exactly what `run` streams today: harness `INFO`/`WARN`/`ERROR` lines and the provider's `[think]`/`[text]`/`[tool]`/`[result]` stream, tailing by default.
-- **Status bar** — pipeline progress and duration, the current task and its elapsed time, reported cost, provider/model, and any `PAUSED`/`HALTED`/`blocked` badge, with the key hints beneath.
+- **Status bar** — pipeline progress and duration, the current task and its elapsed time, reported cost, provider/model, and any `PAUSED`/`HALTED`/`blocked` badge, with the key hints beneath. A transient task-status toast (e.g. `T02 → running`) briefly takes the metrics row; the key-hints row always stays put.
 
 Each panel scrolls independently, vertically and horizontally. The view turns itself off when output is piped or in CI, with `--no-tui`, or with `"tui": false` in the config; `--tui` forces it.
 

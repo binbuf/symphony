@@ -14,7 +14,7 @@ import { TuiApp } from '../src/tui/app.js';
 import { runWithTui } from '../src/tui/index.js';
 import { KeyParser } from '../src/tui/keys.js';
 import { AnsiTerminal } from '../src/tui/terminal.js';
-import { displayWidth, fit, padTo, sliceColumns, splice, stripAnsi, wrapText } from '../src/tui/text.js';
+import { displayWidth, fit, padTo, sanitizeLine, sliceColumns, splice, stripAnsi, wrapText } from '../src/tui/text.js';
 
 const task = (id: string, num: number, phase = 'Phase 1'): Task => ({ id, num, title: `Task ${num}`, phase, order: num - 1, meta: {} });
 
@@ -39,6 +39,10 @@ test('text: display width, slicing, fitting and overlaying account for wide char
   assert.equal(padTo('ab', 5), 'ab   ');
   assert.equal(splice('abcdefgh', 'XY', 3, 8), 'abcXYfgh');
   assert.equal(stripAnsi('\x1b[1mhi\x1b[0m'), 'hi');
+  // Control chars are neutralized: tabs become a space, other C0 controls drop, ESC survives for ANSI.
+  assert.equal(sanitizeLine('a\tb'), 'a b');
+  assert.equal(sanitizeLine('a\rb\x07c\x1b[31mred'), 'abc\x1b[31mred');
+  assert.equal(displayWidth(sanitizeLine('a\tb')), 3);
 });
 
 test('text: wrapText wraps on spaces, hard-slices long words, and ellipsizes the overflow', () => {
@@ -131,6 +135,30 @@ test('TuiApp renders the pipeline-watch panel above the status table', () => {
   assert.match(ready, /2 updates/);
 });
 
+test('TuiApp sanitizes the live stream so every frame line is exactly cols wide', () => {
+  const app = new TuiApp(makeCtx([task('T01', 1)], { version: 1, tasks: {} }), new AnsiTerminal(() => {}));
+  app.pushOutput('hello\tworld\r\nsecond\x07 line\n');
+  const lines = app.renderLines(60, 12);
+  assert.equal(lines.length, 12);
+  for (const l of lines) assert.equal(displayWidth(l), 60);
+  const text = stripAnsi(lines.join('\n'));
+  assert.match(text, /hello world/);
+  assert.doesNotMatch(text, /[\t\x07\r]/);
+});
+
+test('TuiApp keeps the key-hints row and shows a toast on the metrics row instead', () => {
+  const tasks = [task('T01', 1)];
+  const state: State = { version: 1, tasks: { T01: { ...newTaskState('t1'), status: 'running', attempts: 1, durationS: 5, started: new Date().toISOString() } } };
+  const app = new TuiApp(makeCtx(tasks, state), new AnsiTerminal(() => {}));
+  app.toast('T01 → done');
+  const lines = app.renderLines(80, 20);
+  const hints = stripAnsi(lines[lines.length - 1]);
+  const metrics = stripAnsi(lines[lines.length - 2]);
+  assert.match(hints, /q quit/, 'the key-hints row survives a toast');
+  assert.match(metrics, /T01 → done/, 'the toast takes the metrics row');
+  assert.doesNotMatch(metrics, /pipeline/, 'metrics is hidden only while the toast is active');
+});
+
 test('TuiApp tails the live output and honours the panel split', () => {
   const app = new TuiApp(makeCtx([task('T01', 1)], { version: 1, tasks: {} }), new AnsiTerminal(() => {}));
   for (let i = 0; i < 40; i++) app.pushOutput(`line-${i}\n`);
@@ -173,4 +201,24 @@ test('runWithTui enters the alternate screen, captures the run stream, and resto
     if (setRawMode === undefined) delete (process.stdin as { setRawMode?: unknown }).setRawMode;
     else (process.stdin as { setRawMode?: unknown }).setRawMode = setRawMode;
   }
+});
+
+test('AnsiTerminal turns autowrap off while drawing and always repaints the bottom bar', () => {
+  const out: string[] = [];
+  const term = new AnsiTerminal((s) => out.push(s));
+  term.enter();
+  assert.ok(out.join('').includes('\x1b[?7l'), 'autowrap disabled on entry');
+
+  const frame = ['a', 'b', 'c', 'd', 'e'];
+  term.draw(frame);          // first frame primes prev
+  out.length = 0;
+  term.draw(frame);          // second, identical frame
+  const second = out.join('');
+  assert.ok(!second.includes('\x1b[3;1H'), 'an unchanged row above the bar is skipped');
+  assert.ok(second.includes('\x1b[4;1H'), 'the last-but-one row is always repainted');
+  assert.ok(second.includes('\x1b[5;1H'), 'the bottom row is always repainted');
+
+  out.length = 0;
+  term.leave();
+  assert.ok(out.join('').includes('\x1b[?7h'), 'autowrap restored on leave');
 });
