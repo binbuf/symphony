@@ -21,6 +21,9 @@ export interface LogRef {
   started?: string;
   durationS?: number;
   costUsd?: number;
+  /** Provider/model that ran this session; differs from the task-level pair when a task escalates. */
+  provider?: string;
+  model?: string;
 }
 
 export interface LastError { category: string; message: string; transient: boolean; fatal: boolean; at: string }

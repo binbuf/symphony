@@ -90,7 +90,7 @@ test('statusCommand splits a task into a parent line plus one line per session r
         logs: [
           { kind: 'task', jsonl: 'a', log: 'a', prompt: 'a', status: 'continue', summary: 'slice one', started: '2026-01-02T01:00:00Z', durationS: 1200, costUsd: 0.5 },
           { kind: 'task', jsonl: 'b', log: 'b', prompt: 'b', status: 'continue', summary: 'slice two', started: '2026-01-02T01:30:00Z', durationS: 1800, costUsd: 0.7 },
-          { kind: 'task', jsonl: 'c', log: 'c', prompt: 'c', status: 'done', summary: 'last slice', started: '2026-01-02T02:00:00Z', durationS: 2400, costUsd: 0.9 },
+          { kind: 'task', jsonl: 'c', log: 'c', prompt: 'c', status: 'done', summary: 'last slice', started: '2026-01-02T02:00:00Z', durationS: 2400, costUsd: 0.9, provider: 'opencode', model: 'z-ai/glm-5.3' },
         ],
       },
     },
@@ -111,4 +111,6 @@ test('statusCommand splits a task into a parent line plus one line per session r
   assert.match(children[2], /run 3 · task\s+done/);
   assert.match(children[2], /40 min\s+2026-01-02 02:00:00Z\s+2026-01-02 02:40:00Z/);
   assert.match(children[2], /last slice/);
+  // The session's own provider/model is shown, so an escalated run is visible in the table.
+  assert.match(children[2], /opencode · z-ai\/glm-5\.3/);
 });

@@ -7,7 +7,7 @@ export interface BuildCommandOpts {
   promptFile: string;
   taskId: string;
   attempt: number;
-  kind: 'task' | 'resume' | 'nudge' | 'continue';
+  kind: 'task' | 'resume' | 'nudge' | 'continue' | 'escalate';
   resumeId?: string;
   model?: string;
   autoApprove: boolean;

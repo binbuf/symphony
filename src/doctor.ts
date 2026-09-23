@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { resolveVerify, type Config, type SessionSpec } from './config.js';
 import { dirtyFiles, gitAvailable, gitToplevel } from './git.js';
+import { jevProblem } from './jev.js';
 import { rel, stopPresent, type Paths } from './paths.js';
 import type { Provider } from './providers/types.js';
 import { liveLock, type State } from './state.js';
@@ -97,6 +98,14 @@ export function runDoctor(i: DoctorInput): Check[] {
   const verify = resolveVerify(i.config, undefined, i.paths.root);
   if (verify) add('verify', 'ok', `${verify.command} [${verify.source}]`);
   else add('verify', 'warn', 'no verifyCommand and no package.json test script: a task that reports "done" is not independently checked');
+
+  if (i.config.jev.enabled) {
+    const j = i.config.jev;
+    const workflows = [j.resultFallback ? 'resultFallback' : undefined, j.failureTriage ? 'failureTriage' : undefined, j.escalationDecision ? 'escalationDecision' : undefined].filter(Boolean);
+    const problem = jevProblem(j, process.env);
+    const detail = `Jev [${workflows.join(', ') || 'no workflows'}] via ${j.provider} · ${j.model} (key from ${j.apiKeyEnv})`;
+    add('jev', problem ? 'warn' : 'ok', problem ? `Jev is on but ${problem}; the harness falls back to its deterministic paths. ${detail}` : detail);
+  }
 
   if (stopPresent(i.paths)) add('stop', 'warn', `${rel(i.paths.root, i.paths.stop)} present; run pauses until it is removed`);
   if (i.state.halted && !i.ignoreHalt) add('halt', 'fail', `halted at ${i.state.halted.at}${i.state.halted.taskId ? ` on ${i.state.halted.taskId}` : ''} (${i.state.halted.category}): ${i.state.halted.reason} — run: symphony clear-halt`);

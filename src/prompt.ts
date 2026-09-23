@@ -76,7 +76,7 @@ function capTaskBody(text: string, maxBytes: number | undefined, displayName: st
   return `${buf.subarray(0, maxBytes).toString('utf8')}\n\n[… task file truncated: showing the first ${kb(maxBytes)} of ${kb(buf.length)}; read ${displayName} for the full text …]`;
 }
 
-function taskFileBody(task: Task, maxBytes?: number): string | undefined {
+export function taskFileBody(task: Task, maxBytes?: number): string | undefined {
   if (!task.taskFile) return undefined;
   const body = parseFrontMatter(readFileSync(task.taskFile, 'utf8')).body.trim();
   return capTaskBody(body, maxBytes, task.taskFileRel ?? task.taskFile);

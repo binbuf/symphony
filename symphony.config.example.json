@@ -1,38 +1,38 @@
 {
-  "provider": "claude",
+  "provider": "opencode",
   "providers": {
     "claude": {
       "bin": "claude",
-      "model": "claude-fable-5-1",
+      "model": "claude-opus-5",
       "extraArgs": []
     },
     "cursor": {
       "bin": "agent",
-      "model": "",
+      "model": "claude-opus-5",
       "extraArgs": [],
       "idleTimeoutMin": 45
     },
     "opencode": {
       "bin": "opencode",
-      "model": "anthropic/claude-sonnet-4-5",
+      "model": "openrouter/deepseek/deepseek-v4.1-flash",
       "extraArgs": [],
       "idleTimeoutMin": 45
     },
     "codex": {
       "bin": "codex",
-      "model": "",
+      "model": "gpt-6-sol",
       "extraArgs": [],
       "idleTimeoutMin": 45
     },
     "gemini": {
       "bin": "gemini",
-      "model": "",
+      "model": "gemini-3-pro-preview",
       "extraArgs": [],
       "idleTimeoutMin": 45
     },
     "antigravity": {
       "bin": "antigravity",
-      "model": "",
+      "model": "gemini-3.1-pro-high",
       "extraArgs": [],
       "idleTimeoutMin": 45
     }
@@ -63,6 +63,31 @@
   "git": {
     "autoIgnoreUntracked": true,
     "extraIgnore": []
+  },
+  "escalation": {
+    "enabled": false,
+    "provider": "claude",
+    "model": "claude-fable-5-1",
+    "maxAttempts": 1,
+    "onCategories": [
+      "task",
+      "verify"
+    ]
+  },
+  "jev": {
+    "enabled": false,
+    "resultFallback": true,
+    "failureTriage": true,
+    "escalationDecision": true,
+    "provider": "openrouter",
+    "model": "jev-latest",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "timeoutMs": 4000,
+    "minConfidence": 0.7,
+    "acceptStatuses": [
+      "done",
+      "continue"
+    ]
   },
   "retry": {
     "maxAttempts": 3,

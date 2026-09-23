@@ -59,13 +59,18 @@ function firstLine(s: string, max = 300): string {
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
+/** The evidence text classifyFailure matches its rules against; reused by the Jev tie-breaker. */
+export function evidenceText(ev: FailureEvidence): string {
+  return [ev.resultSubtype ?? '', ev.resultOk ? '' : ev.resultText ?? '', ...ev.errorTexts, ev.stderrTail].filter(Boolean).join('\n');
+}
+
+/** Build a Classified for a category, deriving fatal/transient from the harness's own rules. */
+export function makeClassified(category: ErrorCategory, message: string, fatalCategories: string[]): Classified {
+  return { category, fatal: fatalCategories.includes(category), transient: TRANSIENT.includes(category), message: firstLine(message) };
+}
+
 export function classifyFailure(ev: FailureEvidence, fatalCategories: string[]): Classified {
-  const make = (category: ErrorCategory, message: string): Classified => ({
-    category,
-    fatal: fatalCategories.includes(category),
-    transient: TRANSIENT.includes(category),
-    message: firstLine(message),
-  });
+  const make = (category: ErrorCategory, message: string): Classified => makeClassified(category, message, fatalCategories);
 
   if (ev.spawnError) {
     return make('config', /ENOENT/.test(ev.spawnError) ? `provider binary not found (${ev.spawnError})` : `could not start provider: ${ev.spawnError}`);
@@ -76,7 +81,7 @@ export function classifyFailure(ev: FailureEvidence, fatalCategories: string[]):
 
   // Structured signals first (Claude api_retry categories): the *last* one is what the session died on.
   const cats = ev.apiErrorCategories.filter((c) => c in STRUCTURED);
-  const evidence = [ev.resultSubtype ?? '', ev.resultOk ? '' : ev.resultText ?? '', ...ev.errorTexts, ev.stderrTail].filter(Boolean).join('\n');
+  const evidence = evidenceText(ev);
 
   if (ev.resultSubtype === 'error_max_budget_usd') return make('budget', 'per-task budget exhausted (--max-budget-usd)');
   if (ev.resultSubtype === 'error_max_turns') return make('max_turns', 'max turns reached');

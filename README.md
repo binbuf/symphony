@@ -6,7 +6,7 @@ symphony lives in `<your target project>/.symphony/` (gitignored) and reads its 
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -325,11 +325,91 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `antigravity` | `antigravity` | `-p --output-format json --workspace <root>` + prompt-file bootstrap | `--dangerously-skip-permissions` | no bypass flag |
 | `fake` | node | replays an NDJSON fixture; for tests | | |
 
-- **Models:** pass `--model`, or set `providers.<name>.model` (OpenCode wants `provider/model`, e.g. `anthropic/claude-sonnet-4-5`).
+- **Models:** pass `--model`, or set `providers.<name>.model`. Each CLI has its own ids: Claude and Cursor take `claude-opus-5`, Codex `gpt-6-sol`, Gemini `gemini-3-pro-preview`, Antigravity `gemini-3.1-pro-high`; OpenCode wants `provider/model` (e.g. `openrouter/deepseek/deepseek-v4.1-flash`). Ids churn quickly — run the CLI's own `--help` / `models` / `/model` to list the current ones.
+- **Antigravity's binary** is `agy` in Google's docs; if `antigravity` is not on your PATH, set `providers.antigravity.bin` to `agy`.
 - **Session resume** for retries and nudges uses `--resume` (Claude, Cursor), `--session` (OpenCode) and `exec resume <id>` (Codex); Gemini and Antigravity do not advertise resume, so retries start fresh.
 - **Cost** is surfaced for Claude (per session) and OpenCode (cumulative); `--budget` is Claude-only. Codex reports token usage instead.
 - **Correcting an adapter:** each provider's argv can be adjusted for your install with `providers.<name>.bin` and `providers.<name>.extraArgs`; unknown stream shapes are parsed best-effort.
 - **Prompt size:** prompts are always written to a file first; providers get them over stdin, as an attached file, or via a short bootstrap that names the file, so OS command-line limits are never a problem.
+
+## Escalation
+
+By default, a task the configured model cannot finish is failed. Escalation gives it a second, stronger pair of hands: when a task reports `failed`, the harness's own `verify` command rejects a `done`, or the model burns through `maxContinuations` slices, the task is handed to a second provider/model for a fresh session. Infrastructure failures — auth, rate limits, timeouts — are never escalated; the retry and halt logic owns those.
+
+It is off by default, and the shipped default target is OpenCode running **GLM-5.3** (`z-ai/glm-5.3`). Turn it on with:
+
+```json
+"escalation": {
+  "enabled": true,
+  "provider": "opencode",
+  "model": "z-ai/glm-5.3",
+  "maxAttempts": 1,
+  "onCategories": ["task", "verify"]
+}
+```
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | turn escalation on |
+| `provider` | `opencode` | provider the escalated sessions run on; set it to your own provider for a same-provider model bump |
+| `model` | `z-ai/glm-5.3` | model the escalation provider runs (OpenCode wants `provider/model`) |
+| `maxAttempts` | `1` | escalation sessions a single task may take before it is failed for good |
+| `onCategories` | `[task, verify]` | the give-up reasons that escalate: `task` covers a reported `failed` and the continuation limit, `verify` a rejected `done` |
+
+Escalation is bounded: `maxAttempts` caps it, and `maxIterationsPerTask` still caps the task as a whole, so a task can never ping-pong between models forever. Every session records the provider and model that ran it in `docs/logs/TNN.md`, so an escalated task is visible in the committed log. The escalation provider is also checked during preflight, so a missing binary is reported before the run starts rather than mid-task.
+
+## Jev
+
+**Jev** — TypeSafe's System One decision model — makes fast, typed calls that replace brittle hand-written decisions in the harness. It is reached through [OpenRouter](https://openrouter.ai/settings/keys), so your OpenRouter key is all you need. Jev is off by default and never on the fatal path: every workflow falls back to the harness's own deterministic behavior on a missing key, a timeout, or a low-confidence answer.
+
+It runs up to three independent **workflows**, each behind its own flag:
+
+```json
+"jev": {
+  "enabled": true,
+  "resultFallback": true,
+  "failureTriage": true,
+  "escalationDecision": true,
+  "provider": "openrouter",
+  "model": "jev-latest",
+  "apiKeyEnv": "OPENROUTER_API_KEY",
+  "timeoutMs": 4000,
+  "minConfidence": 0.7,
+  "acceptStatuses": ["done", "continue"]
+}
+```
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | master switch for every workflow below |
+| `resultFallback` | `true` | settle a session that omitted its `SYMPHONY_RESULT` block |
+| `failureTriage` | `true` | place a failure the regex classifier could not |
+| `escalationDecision` | `true` | decide whether a failed task is worth escalating |
+| `provider` | `openrouter` | where the System One call goes; `baseUrl` overrides it |
+| `baseUrl` | – | override the provider's base URL (e.g. a self-hosted gateway) |
+| `model` | `jev-latest` | System One model id; `jev-latest` tracks the newest Jev release |
+| `apiKeyEnv` | `OPENROUTER_API_KEY` | environment variable holding the bearer token |
+| `timeoutMs` | `4000` | hard cap on one call; on timeout the deterministic path runs |
+| `minConfidence` | `0.7` | below this the answer is discarded and the deterministic path runs |
+| `acceptStatuses` | `[done, continue]` | dispositions `resultFallback` may settle |
+
+### `resultFallback`
+
+A session that ended cleanly without a `SYMPHONY_RESULT` block is normally recovered by **nudging**: resuming it and asking it to report, at the cost of a whole extra session. With this on, Jev reads the task title and the tail of the output and answers a `choice` — `done`, `continue`, `blocked`, or `failed`. A confident answer in `acceptStatuses` settles the session and skips the nudge; otherwise the nudge runs exactly as before.
+
+`acceptStatuses` defaults to `done` and `continue` on purpose: those are the safe, high-value cases, while ending a task as `blocked` or `failed` stays with the agent. A Jev-classified `done` still has to pass the harness's own `verify`, so it cannot smuggle a finished-looking session past the independent check.
+
+### `failureTriage`
+
+`classifyFailure` is a set of hand-written regex rules over the provider's error text. When none match, the failure lands in `unknown`, which the harness treats as terminal and does not retry. With this on, that `unknown` is put to a `choice` — `auth`, `billing`, `usage_limit`, `rate_limit`, `overloaded`, `server`, `network`, `model`, `config`, or `task` — and the answer is mapped back through the harness's own fatal/transient rules, so a `server` or `rate_limit` becomes a retry that might have succeeded anyway. The regex stays primary: Jev is consulted only when the rules admit they do not know. Unlike the others, this workflow can halt a run (a Jev-classified `auth` is fatal), so tune `minConfidence` against your own error logs before leaving it unattended.
+
+### `escalationDecision`
+
+When [escalation](#escalation) is enabled and a task fails on an `onCategories` trigger, Jev reads the **task** (title and body) plus the failure and answers a `choice`: would a more capable model plausibly complete this from the same context, or is the task stuck on missing context or a human decision a stronger model cannot supply either? If Jev confidently says a stronger model would not help, the harness skips the escalation session and fails the task as it otherwise would.
+
+This is a gate, not a router: `onCategories` is still the trigger, infrastructure failures still never escalate, and any Jev problem escalates as configured. Jev can only *decline* an escalation — it never adds one.
+
+`symphony doctor` reports which workflows are armed and whether the key is present.
 
 ## Config
 
@@ -365,6 +445,8 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `git.autoIgnoreUntracked`, `git.extraIgnore` | `true`, `[]` | before committing, keep untracked ephemeral/secret files out of the commit by adding their patterns to `.gitignore` |
 | `retry.maxAttempts`, `retry.backoffSec` | `3`, `[30,120,300]` | transient-error retries |
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
+| `escalation.enabled`, `.provider`, `.model`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
+| `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
 
 ## Hooks
