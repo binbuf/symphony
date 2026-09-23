@@ -142,21 +142,21 @@ async function classifyOutcome(ctx: RunContext, task: Task, st: TaskState, ev: F
   if (base.category !== 'unknown' || !config.jev.enabled || !config.jev.failureTriage) return base;
   const problem = jevProblem(config.jev, process.env);
   if (problem) {
-    log.warn(`${task.id}: failure is unclassified but Jev is unavailable (${problem})`);
+    log.warn(`${task.id}: [jev] failure is unclassified but Jev is unavailable (${problem})`);
     return base;
   }
   const decision = await classifyError(config.jev, { evidence: evidenceText(ev), exitCode: ev.exitCode, resultSubtype: ev.resultSubtype }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal });
   if (!decision) {
-    log.warn(`${task.id}: failure is unclassified; Jev returned no usable category`);
+    log.warn(`${task.id}: [jev] failure is unclassified; Jev returned no usable category`);
     return base;
   }
   const pct = Math.round(decision.confidence * 100);
   if (decision.confidence < config.jev.minConfidence) {
-    log.warn(`${task.id}: failure is unclassified; Jev's ${decision.category} was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)`);
+    log.warn(`${task.id}: [jev] failure is unclassified; Jev's ${decision.category} was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)`);
     return base;
   }
   const classified = makeClassified(decision.category, `${base.message} · Jev: ${decision.category} (${pct}%)`, config.halt.onCategories);
-  log.warn(`${task.id}: failure was unclassified; Jev reads it as ${classified.category} (${pct}%) — ${classified.fatal ? 'fatal' : classified.transient ? 'retryable' : 'terminal'}`);
+  log.warn(`${task.id}: [jev] failure was unclassified; Jev reads it as ${classified.category} (${pct}%) — ${classified.fatal ? 'fatal' : classified.transient ? 'retryable' : 'terminal'}`);
   if (decision.costUsd !== undefined) {
     st.costUsd = (st.costUsd ?? 0) + decision.costUsd;
     ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd;
@@ -381,7 +381,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     if (config.jev.enabled && config.jev.escalationDecision) {
       const problem = jevProblem(config.jev, process.env);
       if (problem) {
-        log.warn(`${task.id}: Jev escalation check unavailable (${problem}); escalating on ${category} as configured`);
+        log.warn(`${task.id}: [jev] escalation check unavailable (${problem}); escalating on ${category} as configured`);
       } else {
         const decision = await classifyEscalation(
           config.jev,
@@ -392,14 +392,14 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         if (decision?.costUsd !== undefined) { st.costUsd = (st.costUsd ?? 0) + decision.costUsd; ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd; }
         if (decision && decision.confidence >= config.jev.minConfidence) {
           if (!decision.escalate) {
-            log.warn(`${task.id}: ${category} — ${reason}. Jev says a stronger model would not help (${pct}%); not escalating.`);
+            log.warn(`${task.id}: [jev] ${category} — ${reason}. Jev says a stronger model would not help (${pct}%); not escalating.`);
             return false;
           }
-          log.info(`${task.id}: Jev agrees escalation is worth it (${pct}%)`);
+          log.info(`${task.id}: [jev] Jev agrees escalation is worth it (${pct}%)`);
         } else if (decision) {
-          log.warn(`${task.id}: Jev's escalation call was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%); escalating as configured`);
+          log.warn(`${task.id}: [jev] Jev's escalation call was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%); escalating as configured`);
         } else {
-          log.warn(`${task.id}: Jev returned no usable escalation decision; escalating as configured`);
+          log.warn(`${task.id}: [jev] Jev returned no usable escalation decision; escalating as configured`);
         }
       }
     }
@@ -458,20 +458,20 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       // (no key, timeout, low confidence, an unaccepted disposition) falls through to the nudge.
       const problem = jevProblem(config.jev, process.env);
       if (problem) {
-        log.warn(`${task.id}: session ended without a SYMPHONY_RESULT block; Jev fallback unavailable (${problem})`);
+        log.warn(`${task.id}: [jev] session ended without a SYMPHONY_RESULT block; Jev fallback unavailable (${problem})`);
       } else {
         const decision = await classifySessionResult(config.jev, { taskTitle: task.title, output: outcome.allText }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal });
         const pct = decision ? Math.round(decision.confidence * 100) : 0;
         if (decision && decision.confidence >= config.jev.minConfidence && config.jev.acceptStatuses.includes(decision.status)) {
           block = { status: decision.status, summary: `Jev classified the session as ${decision.status} (confidence ${pct}%)` };
           if (decision.costUsd !== undefined) { st.costUsd = (st.costUsd ?? 0) + decision.costUsd; ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd; }
-          log.info(`${task.id}: no SYMPHONY_RESULT block; Jev classified the session as ${decision.status} (confidence ${pct}%, model ${decision.model ?? config.jev.model})`);
+          log.info(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev classified the session as ${decision.status} (confidence ${pct}%, model ${decision.model ?? config.jev.model})`);
         } else if (decision && !config.jev.acceptStatuses.includes(decision.status)) {
-          log.warn(`${task.id}: no SYMPHONY_RESULT block; Jev said ${decision.status} (${pct}%) but only ${config.jev.acceptStatuses.join('/')} are accepted`);
+          log.warn(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev said ${decision.status} (${pct}%) but only ${config.jev.acceptStatuses.join('/')} are accepted`);
         } else if (decision) {
-          log.warn(`${task.id}: no SYMPHONY_RESULT block; Jev's ${decision.status} was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)`);
+          log.warn(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev's ${decision.status} was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)`);
         } else {
-          log.warn(`${task.id}: no SYMPHONY_RESULT block; Jev returned no usable decision`);
+          log.warn(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev returned no usable decision`);
         }
       }
     }
