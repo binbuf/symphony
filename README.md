@@ -6,7 +6,7 @@ symphony lives in `<your target project>/.symphony/` (gitignored) and reads its 
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -214,6 +214,36 @@ Sometimes you discover half-way through that the design is wrong. symphony does 
 
 Why not re-plan inside a running session? The one-fresh-session-per-task model is the whole point: a session gets its task and nothing else, and a task that changes underneath it is exactly the context rot symphony exists to avoid. Pause, re-plan, commit, resume — the pivot stays auditable in `git log`.
 
+## Multiple task sets
+
+By default symphony reads one plan: the base docs package (`docs/ROADMAP.md`, `docs/tasks/`, `docs/PROGRESS.md`, `docs/design/`). A project can also declare **additional, independent task sets** in `.symphony/symphony.config.json`. Each set has its own roadmap, tasks, progress, design docs and logs, and its own harness state under `.symphony/sets/<name>/`, so task ids never collide with another set. The base package stays the default; a set runs only when you select it.
+
+This is how symphony lives at a project's side across time: keep the base plan, and add a new set when the project takes on a new phase of work — a migration, an audit, a second product surface — instead of installing symphony for one run and removing it. Each set's `PROGRESS.md` and design docs carry the context of that set's earlier sessions into the next task.
+
+```json
+{
+  "taskSets": [
+    { "name": "phase-2", "docs": "docs/phase-2" },
+    { "name": "audit",   "docs": "docs/audit", "design": "docs/design" }
+  ]
+}
+```
+
+Each entry has a `name` and any of the same keys as `paths` (`docs`, `roadmap`, `progress`, `tasks`, `design`, `adr`, `logs`, `index`). A set must name `docs` or `roadmap`, so it can never silently reuse the base package. Planning locations stand on their own — a set's `docs` does not inherit the base `paths` overrides — but you can point a set at a shared location on purpose, like the `audit` set sharing `docs/design` above.
+
+Select a set with `--set NAME`, which every command accepts:
+
+```bash
+./.symphony/symphony init --set phase-2     # scaffold that set's docs package
+./.symphony/symphony doctor --set phase-2   # preflight that set
+./.symphony/symphony run    --set phase-2   # run that set's roadmap
+./.symphony/symphony status --set phase-2   # progress for that set
+```
+
+Without `--set`, commands use the base package exactly as before. The `paths.state`/`runs`/`log` overrides give each set isolated harness state by default (`.symphony/sets/<name>/state.json`, `/runs/`, `/symphony.log`); set them explicitly in the entry to relocate. The graceful-pause sentinel (`.stop`) is project-wide — one sentinel pauses whichever set is running.
+
+`status` and `status --json` name the active set, so it is always clear which plan a table describes. An unknown `--set` name fails fast with the list of declared sets.
+
 ## The docs contract
 
 symphony owns a small, stack-agnostic planning format. `init` scaffolds it, `lint` checks it, `prepare` repairs it, `brief` generates it, and every session is told to maintain it.
@@ -274,7 +304,7 @@ Set `"designDocs": false` to run a plain series of tasks: the harness does not c
 
 ## CLI reference
 
-Every command accepts `--root DIR` (default: the project containing `.symphony/`). `symphony --version` prints the version. Exit codes are listed [below](#exit-codes).
+Every command accepts `--root DIR` (default: the project containing `.symphony/`) and `--set NAME` (run a declared task set instead of the base docs package; see [Multiple task sets](#multiple-task-sets)). `symphony --version` prints the version. Exit codes are listed [below](#exit-codes).
 
 | command | what it does |
 |---|---|
@@ -301,6 +331,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `--prepare` | run `prepare` first; abort the run if the docs still do not lint clean |
 | `--provider P`, `--model M` | override provider/model for this run (see precedence above) |
 | `--from T03`, `--to T10`, `--only T05,T06` | restrict which tasks are selected |
+| `--set NAME` | run a declared task set's plan instead of the base docs package |
 | `--retry` | re-run selected tasks even if they are done, accepted or blocked |
 | `--continue-on-failure` | keep going past failed/blocked tasks instead of stopping |
 | `--dry-run` | print the prompt and exact provider command for each selected task; run nothing |
@@ -422,6 +453,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `paths.roadmap` `.progress` `.tasks` `.design` `.adr` `.logs` `.index` | derived from `paths.docs` | individual overrides, absolute or root-relative |
 | `paths.stop` | `.stop` | graceful-pause sentinel (absolute or root-relative) |
 | `paths.state` `.runs` `.log` | under `.symphony/` | where harness state, session logs and the event log live |
+| `taskSets` | `[]` | extra, independent task sets: `[{ "name": "phase-2", "docs": "docs/phase-2" }]`, each with its own roadmap/tasks/progress/design and state under `.symphony/sets/<name>/`; run one with `--set NAME` (see [Multiple task sets](#multiple-task-sets)) |
 | `autoApprove` | `true` | bypass permission prompts (`--safe` sets false for one run) |
 | `nudge`, `nudgeTimeoutMin` | `true`, `45` | resume once to collect a missing result block |
 | `timeoutMin`, `idleTimeoutMin` | `240`, `20` | max wall clock per session; kill after this long with no output |

@@ -119,3 +119,24 @@ export function stopPresent(paths: Paths): boolean {
 export function stopIgnoreEntry(paths: Paths): string | undefined {
   return paths.stop.startsWith(paths.root) ? rel(paths.root, paths.stop) : undefined;
 }
+
+/** Directory under `.symphony/` holding a task set's isolated state, run logs and session files. */
+export function taskSetStateDir(name: string): string {
+  return `.symphony/sets/${name}`;
+}
+
+/**
+ * Resolve a named task set's path overrides. The set's planning locations stand on their own — base
+ * `paths` planning overrides do not leak in, so `docs: "docs/phase-2"` really means that package.
+ * Harness state is isolated under `.symphony/sets/<name>/` unless the set names its own, so task ids
+ * never collide across sets. The graceful-pause sentinel stays the project's one unless overridden.
+ */
+export function taskSetOverrides(base: PathOverrides, name: string, set: PathOverrides): PathOverrides {
+  const dir = taskSetStateDir(name);
+  const out: PathOverrides = { ...set };
+  if (out.stop === undefined && base.stop !== undefined) out.stop = base.stop;
+  if (out.state === undefined) out.state = `${dir}/state.json`;
+  if (out.runs === undefined) out.runs = `${dir}/runs`;
+  if (out.log === undefined) out.log = `${dir}/symphony.log`;
+  return out;
+}

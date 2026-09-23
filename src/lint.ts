@@ -45,7 +45,7 @@ function listMd(dir: string, depth: number, out: string[], root: string): void {
 }
 
 /** Planning documents living outside the configured docs dir: root-level *.md with telling names and known planning dirs. */
-export function scanCandidates(paths: Paths): string[] {
+export function scanCandidates(paths: Paths, skipDirs: string[] = []): string[] {
   const out: string[] = [];
   if (!existsSync(paths.root)) return out;
   const docsRel = rel(paths.root, paths.docs);
@@ -53,7 +53,7 @@ export function scanCandidates(paths: Paths): string[] {
     const p = join(paths.root, name);
     let st; try { st = statSync(p); } catch { continue; }
     if (st.isFile() && CANDIDATE_FILE.test(name)) out.push(name);
-    else if (st.isDirectory() && !SKIP_DIRS.has(name) && name !== docsRel && CANDIDATE_DIRS.has(name.toLowerCase())) listMd(p, 2, out, paths.root);
+    else if (st.isDirectory() && !SKIP_DIRS.has(name) && name !== docsRel && !skipDirs.includes(p) && CANDIDATE_DIRS.has(name.toLowerCase())) listMd(p, 2, out, paths.root);
   }
   return out;
 }
@@ -73,11 +73,11 @@ export function docsTree(paths: Paths): string[] {
   return out;
 }
 
-export function lintDocs(paths: Paths, opts: { design?: boolean } = {}): LintReport {
+export function lintDocs(paths: Paths, opts: { design?: boolean; skipDirs?: string[] } = {}): LintReport {
   const design = opts.design !== false;
   const f: Finding[] = [];
   const add = (level: LintLevel, code: string, message: string, path?: string) => f.push({ level, code, message, path });
-  const candidates = scanCandidates(paths);
+  const candidates = scanCandidates(paths, opts.skipDirs);
   const d = {
     docs: rel(paths.root, paths.docs),
     roadmap: rel(paths.root, paths.roadmap),

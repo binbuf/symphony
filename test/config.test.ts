@@ -3,8 +3,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { DEFAULTS, loadConfig, resolveEscalation, resolveSession, resolveVerify } from '../src/config.js';
-import { resolvePaths } from '../src/paths.js';
+import { DEFAULTS, findTaskSet, loadConfig, resolveEscalation, resolveSession, resolveVerify } from '../src/config.js';
+import { resolvePaths, taskSetOverrides } from '../src/paths.js';
 import type { Task } from '../src/tasks.js';
 
 const task = (meta: Record<string, string> = {}): Task => ({ id: 'T01', num: 1, title: 't', phase: 'p', order: 0, meta });
@@ -191,6 +191,60 @@ test('verify resolution: front matter > config > inferred package.json test scri
   // npm's placeholder script is not a real verification command.
   writeFileSync(join(dir, 'package.json'), JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }));
   assert.equal(resolveVerify(cfg, task(), dir), undefined);
+});
+
+test('taskSets parse into named path bundles; invalid entries warn and are dropped', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-sets-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({
+    taskSets: [
+      { name: 'phase-2', docs: 'docs/phase-2' },
+      { name: 'audit', roadmap: 'audit/PLAN.md', design: 'docs/design' },
+      { name: 'no-location' },
+      { name: 'bad name', docs: 'x' },
+      { name: 'phase-2', docs: 'dup' },
+      'not-an-object',
+      { name: 'weird', docs: 'x', bogus: 1 },
+    ],
+  }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.deepEqual(config.taskSets.map((s) => s.name), ['phase-2', 'audit', 'weird']);
+  assert.equal(config.taskSets[0].paths.docs, 'docs/phase-2');
+  assert.equal(config.taskSets[1].paths.roadmap, 'audit/PLAN.md');
+  assert.equal(config.taskSets[1].paths.design, 'docs/design');
+  assert.ok(warnings.some((w) => /needs "docs" or "roadmap"/.test(w)));
+  assert.ok(warnings.some((w) => /must match/.test(w)));
+  assert.ok(warnings.some((w) => /duplicate task set/.test(w)));
+  assert.ok(warnings.some((w) => /expected an object/.test(w)));
+  assert.ok(warnings.some((w) => /taskSets\[6\]\.bogus/.test(w)));
+  assert.equal(findTaskSet(config, 'audit')?.paths.roadmap, 'audit/PLAN.md');
+  assert.equal(findTaskSet(config, 'nope'), undefined);
+
+  // A non-array taskSets is ignored with a warning rather than throwing.
+  writeFileSync(paths.config, JSON.stringify({ taskSets: { phase2: { docs: 'x' } } }));
+  const bad = loadConfig(paths, {});
+  assert.deepEqual(bad.config.taskSets, []);
+  assert.ok(bad.warnings.some((w) => /taskSets: expected an array/.test(w)));
+});
+
+test('a task set isolates state/runs/log and keeps the base global stop, unless it overrides them', () => {
+  const base = { stop: '.halt', state: 'custom/state.json' };
+  const isolated = taskSetOverrides(base, 'phase-2', { docs: 'docs/phase-2' });
+  assert.deepEqual(isolated, {
+    docs: 'docs/phase-2',
+    stop: '.halt',
+    state: '.symphony/sets/phase-2/state.json',
+    runs: '.symphony/sets/phase-2/runs',
+    log: '.symphony/sets/phase-2/symphony.log',
+  });
+  // Base planning overrides do not leak into a set: only its own keys and harness paths are present.
+  assert.equal('progress' in isolated, false);
+
+  const explicit = taskSetOverrides(base, 'audit', { roadmap: 'audit/PLAN.md', state: 'audit/state.json', stop: '.audit-stop' });
+  assert.equal(explicit.state, 'audit/state.json');
+  assert.equal(explicit.stop, '.audit-stop');
+  assert.equal(explicit.runs, '.symphony/sets/audit/runs');
 });
 
 test('cost cap, task byte cap and non-positive timeouts/caps validate and fall back', () => {
