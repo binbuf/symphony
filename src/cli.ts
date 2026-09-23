@@ -4,13 +4,13 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { acceptCommand, briefCommand, clearHaltCommand, initCommand, logsCommand, resetCommand, statusCommand } from './commands.js';
-import { DEFAULTS, loadConfig, resolveSession, type CliOverrides } from './config.js';
+import { DEFAULTS, findTaskSet, loadConfig, resolveSession, type CliOverrides, type Config } from './config.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { formatLint, lintDocs } from './lint.js';
 import { prepareCommand } from './prepare.js';
 import { replanCommand } from './replan.js';
 import { createLogger, type Logger } from './logger.js';
-import { resolvePaths, type Paths } from './paths.js';
+import { resolvePaths, taskSetOverrides, type PathOverrides, type Paths } from './paths.js';
 import { getProvider } from './providers/index.js';
 import { parseRoadmap, patchRoadmapFile, type Roadmap } from './roadmap.js';
 import { nudgeCommand, runCommand, type RunContext, type RunFlags } from './runner.js';
@@ -23,7 +23,7 @@ const HELP = `symphony — run an LLM coding agent through your roadmap, one fre
 Usage
   symphony run     [--prepare] [--provider P] [--model M] [--from T03] [--to T10] [--only T05,T06] [--retry]
                    [--continue-on-failure] [--dry-run] [--safe] [--no-nudge] [--timeout-min N] [--max-tasks N]
-                   [--max-iterations N] [--budget USD] [--max-cost USD] [--clear-halt]
+                   [--max-iterations N] [--budget USD] [--max-cost USD] [--clear-halt] [--set NAME]
   symphony status  [--json]              progress table (or JSON)
   symphony logs    [T05]                 print a task's per-run log (docs/logs/T05.md); with no id, list them
   symphony doctor                        preflight: binaries, auth, git, roadmap, verify, halt/STOP/lock
@@ -45,6 +45,9 @@ Provider/model precedence: --provider/--model > SYMPHONY_PROVIDER/SYMPHONY_MODEL
 > .symphony/symphony.config.json > defaults. All providers run with permissions bypassed unless --safe.
 Every location (docs, tasks, progress, design, adr, logs, stop, state, runs, log) is overridable via the
 "paths" section of .symphony/symphony.config.json.
+Task sets: declare extra, independent task sets in the "taskSets" array of .symphony/symphony.config.json.
+--set NAME runs that set's own roadmap/tasks/progress/design instead of the base docs/ package; its state
+lives under .symphony/sets/NAME/. Every command accepts --set NAME.
 
 Limits
   --max-tasks N            process at most N tasks this run (config maxTasksPerRun)
@@ -97,6 +100,28 @@ export const VERSION: string = (() => {
 
 const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'init', 'accept', 'reset', 'nudge', 'clear-halt', 'brief', 'help']);
 
+/**
+ * The effective path overrides for this invocation: the base `paths`, or — with `--set NAME` — a
+ * named task set's isolated bundle. An unknown name is a usage error listing what is declared.
+ */
+function effectiveOverrides(config: Config, setName: string | undefined, configPath: string): PathOverrides {
+  if (setName === undefined) return config.paths;
+  const set = findTaskSet(config, setName);
+  if (!set) {
+    const known = config.taskSets.map((s) => s.name);
+    throw new UsageError(`--set ${setName}: no such task set. ${known.length ? `Known sets: ${known.join(', ')}` : `none are defined; add one to the "taskSets" array of ${configPath}`}.`);
+  }
+  return taskSetOverrides(config.paths, set.name, set.paths);
+}
+
+/** Absolute docs dir of every task set plus the base package: tools that scan the tree skip them all. */
+function allDocsDirs(root: string, config: Config): string[] {
+  return [
+    resolvePaths(root, config.paths).docs,
+    ...config.taskSets.map((s) => resolvePaths(root, taskSetOverrides(config.paths, s.name, s.paths)).docs),
+  ];
+}
+
 export async function main(argv: string[]): Promise<number> {
   const { values: v, positionals } = parseArgs({
     args: argv,
@@ -106,6 +131,7 @@ export async function main(argv: string[]): Promise<number> {
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'V' },
       root: { type: 'string' },
+      set: { type: 'string' },
       provider: { type: 'string' },
       model: { type: 'string' },
       from: { type: 'string' },
@@ -156,23 +182,25 @@ export async function main(argv: string[]): Promise<number> {
 
   if (cmd === 'init' || cmd === 'brief') {
     const base = resolvePaths(v.root);
-    let cfg = DEFAULTS;
-    try { cfg = loadConfig(base, cli).config; } catch { /* scaffolding can proceed with defaults */ }
-    const paths = resolvePaths(v.root, cfg.paths);
+    let cfg: Config = DEFAULTS;
+    // With --set the config must exist to name the set, so a load error surfaces instead of being swallowed.
+    if (v.set !== undefined) cfg = loadConfig(base, cli).config;
+    else { try { cfg = loadConfig(base, cli).config; } catch { /* scaffolding can proceed with defaults */ } }
+    const paths = resolvePaths(v.root, effectiveOverrides(cfg, v.set, base.config));
     const log = createLogger(undefined);
     return cmd === 'init' ? initCommand(paths, log, { design: cfg.designDocs }) : briefCommand(paths, log, { design: cfg.designDocs });
   }
 
   // Config may relocate the docs/tasks/progress/design/stop folders, so read it from the fixed
-  // .symphony/ location first, then resolve the effective paths.
+  // .symphony/ location first, then resolve the effective paths (the base package or a named set).
   const base = resolvePaths(v.root);
   const { config, warnings: cfgWarnings, fileExists: cfgExists } = loadConfig(base, cli);
-  const paths = resolvePaths(v.root, config.paths);
+  const paths = resolvePaths(v.root, effectiveOverrides(config, v.set, base.config));
   const log = createLogger(paths.log);
   cfgWarnings.forEach((w) => log.warn(w));
   if (!cfgExists && cmd !== 'doctor') log.info(`no ${paths.config}; using defaults`);
   if (cmd === 'lint') {
-    const report = lintDocs(paths, { design: config.designDocs });
+    const report = lintDocs(paths, { design: config.designDocs, skipDirs: allDocsDirs(paths.root, config) });
     formatLint(report).forEach((l) => log.plain(l));
     return report.ok ? 0 : 2;
   }
@@ -194,7 +222,7 @@ export async function main(argv: string[]): Promise<number> {
 
   switch (cmd) {
     case 'status':
-      return statusCommand(paths, config, loaded.state, loaded.tasks, log, v.json === true);
+      return statusCommand(paths, config, loaded.state, loaded.tasks, log, v.json === true, v.set);
     case 'logs':
       return logsCommand(paths, loaded.tasks, positionals[1], log);
     case 'accept': {

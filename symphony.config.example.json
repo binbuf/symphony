@@ -39,6 +39,7 @@
     }
   },
   "paths": {},
+  "taskSets": [],
   "autoApprove": true,
   "nudge": true,
   "timeoutMin": 240,

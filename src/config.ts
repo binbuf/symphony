@@ -88,11 +88,24 @@ export interface JevConfig {
   acceptStatuses: string[];
 }
 
+/**
+ * A named, independent task set. It has its own roadmap, tasks, progress, design and logs, plus
+ * harness state isolated under `.symphony/sets/<name>/`, so task ids never collide with another set.
+ * The base docs package stays the default; a set runs only when selected with `--set <name>`.
+ */
+export interface TaskSetConfig {
+  name: string;
+  /** Planning locations for this set, resolved independently of the base `paths`. */
+  paths: PathOverrides;
+}
+
 export interface Config {
   provider: ProviderName;
   providers: Record<ProviderName, ProviderConfig>;
   /** Overrides for every user-facing location (docs, tasks, progress, design, adr, logs, stop, state, runs, log). */
   paths: PathOverrides;
+  /** Additional, independent task sets selected with `--set <name>`. The base docs package is the default. */
+  taskSets: TaskSetConfig[];
   autoApprove: boolean;
   nudge: boolean;
   timeoutMin: number;
@@ -165,6 +178,7 @@ export const DEFAULTS: Config = {
     fake: { bin: process.execPath, extraArgs: [] },
   },
   paths: {},
+  taskSets: [],
   autoApprove: true,
   nudge: true,
   timeoutMin: 240,
@@ -280,18 +294,54 @@ function hookString(x: unknown, where: string, warnings: string[]): string | und
 
 const PATH_KEYS = ['docs', 'roadmap', 'progress', 'tasks', 'design', 'adr', 'logs', 'index', 'stop', 'state', 'runs', 'log'] as const;
 
-function pathOverrides(x: unknown, warnings: string[]): PathOverrides {
+function pathOverrides(x: unknown, warnings: string[], where = 'paths', ignore: readonly string[] = []): PathOverrides {
   if (x === undefined || x === null) return {};
-  if (!isRecord(x)) { warnings.push('paths: expected an object; using defaults'); return {}; }
+  if (!isRecord(x)) { warnings.push(`${where}: expected an object; using defaults`); return {}; }
   const out: PathOverrides = {};
   for (const k of PATH_KEYS) {
     const v = x[k];
     if (v === undefined || v === null) continue;
     if (typeof v === 'string' && v.trim()) out[k] = v.trim();
-    else warnings.push(`paths.${k}: expected a non-empty string; using default`);
+    else warnings.push(`${where}.${k}: expected a non-empty string; using default`);
   }
-  for (const k of Object.keys(x)) if (!(PATH_KEYS as readonly string[]).includes(k) && !k.startsWith('_')) warnings.push(`paths.${k}: unknown key ignored`);
+  for (const k of Object.keys(x)) if (!(PATH_KEYS as readonly string[]).includes(k) && !k.startsWith('_') && !ignore.includes(k)) warnings.push(`${where}.${k}: unknown key ignored`);
   return out;
+}
+
+/** A task-set name becomes a directory under `.symphony/sets/`, so keep it path-safe. */
+const TASK_SET_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * Parse the `taskSets` array. Each entry names a set and gives its own `paths`-style overrides.
+ * A set that names neither `docs` nor `roadmap` would silently reuse the base package, so it is
+ * rejected with a warning rather than run twice.
+ */
+function taskSetList(x: unknown, warnings: string[]): TaskSetConfig[] {
+  if (x === undefined || x === null) return [];
+  if (!Array.isArray(x)) { warnings.push('taskSets: expected an array; ignoring'); return []; }
+  const out: TaskSetConfig[] = [];
+  const seen = new Set<string>();
+  x.forEach((raw, i) => {
+    const where = `taskSets[${i}]`;
+    if (!isRecord(raw)) { warnings.push(`${where}: expected an object; ignored`); return; }
+    const name = typeof raw.name === 'string' ? raw.name.trim() : '';
+    if (!name) { warnings.push(`${where}: missing a non-empty "name"; ignored`); return; }
+    if (!TASK_SET_NAME_RE.test(name)) { warnings.push(`${where}: name ${JSON.stringify(name)} must match ${TASK_SET_NAME_RE}; ignored`); return; }
+    if (seen.has(name)) { warnings.push(`${where}: duplicate task set "${name}"; ignored`); return; }
+    seen.add(name);
+    const paths = pathOverrides(raw, warnings, where, ['name']);
+    if (paths.docs === undefined && paths.roadmap === undefined) {
+      warnings.push(`${where} ("${name}"): a set needs "docs" or "roadmap" so it does not reuse the base package; ignored`);
+      return;
+    }
+    out.push({ name, paths });
+  });
+  return out;
+}
+
+/** The declared task set with this name, if any. */
+export function findTaskSet(config: Config, name: string): TaskSetConfig | undefined {
+  return config.taskSets.find((s) => s.name === name);
 }
 
 /** Merge defaults ← config file ← CLI flags. Missing file = defaults. */
@@ -342,6 +392,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     provider: raw.provider === undefined ? DEFAULTS.provider : asProviderName(raw.provider, 'symphony.config.json provider'),
     providers,
     paths: pathOverrides(raw.paths, warnings),
+    taskSets: taskSetList(raw.taskSets, warnings),
     autoApprove: boolOr(raw.autoApprove, DEFAULTS.autoApprove, 'autoApprove', warnings),
     nudge: boolOr(raw.nudge, DEFAULTS.nudge, 'nudge', warnings),
     timeoutMin: positiveOr(raw.timeoutMin, DEFAULTS.timeoutMin, 'timeoutMin', warnings),

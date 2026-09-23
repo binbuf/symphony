@@ -55,9 +55,9 @@ export function initCommand(paths: Paths, log: Logger, opts: { design?: boolean 
   return 0;
 }
 
-export function statusCommand(paths: Paths, config: Config, state: State, tasks: Task[], log: Logger, json: boolean): number {
+export function statusCommand(paths: Paths, config: Config, state: State, tasks: Task[], log: Logger, json: boolean, activeSet?: string): number {
   if (json) {
-    log.plain(JSON.stringify({ root: paths.root, provider: config.provider, halted: state.halted ?? null, tasks: tasks.map((t) => ({ ...t, state: state.tasks[t.id] ?? null })) }, null, 2));
+    log.plain(JSON.stringify({ root: paths.root, set: activeSet ?? null, provider: config.provider, halted: state.halted ?? null, tasks: tasks.map((t) => ({ ...t, state: state.tasks[t.id] ?? null })) }, null, 2));
     return 0;
   }
   if (state.halted) log.banner('HALTED', [`${state.halted.taskId ? `${state.halted.taskId} · ` : ''}${state.halted.category}: ${state.halted.reason}`, `at ${state.halted.at}`, 'symphony clear-halt to resume']);
@@ -99,7 +99,7 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
     return a + (s?.status === 'running' ? runningSeconds(s) : s?.durationS ?? 0);
   }, 0);
   const blocked = tasks.filter((t) => state.tasks[t.id]?.status === 'blocked').map((t) => t.id);
-  log.plain(`\n${done}/${tasks.length} done · ${fmtDuration(time || undefined)} · ${fmtCost(cost || undefined)} · default provider ${config.provider}${blocked.length ? ` · awaiting a human: ${blocked.join(' ')}` : ''}${stopPresent(paths) ? ` · STOP present (${rel(paths.root, paths.stop)})` : ''}`);
+  log.plain(`\n${done}/${tasks.length} done · ${fmtDuration(time || undefined)} · ${fmtCost(cost || undefined)} · default provider ${config.provider}${activeSet ? ` · task set ${activeSet}` : ''}${blocked.length ? ` · awaiting a human: ${blocked.join(' ')}` : ''}${stopPresent(paths) ? ` · STOP present (${rel(paths.root, paths.stop)})` : ''}`);
   return 0;
 }
 
