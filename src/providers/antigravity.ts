@@ -12,10 +12,13 @@ export const antigravityProvider: Provider = {
   name: 'antigravity',
   supportsBudget: false,
   supportsResume: false,
+  supportsVariant: true,
   buildCommand(o) {
     const args = ['-p', '--output-format', 'json', '--workspace', o.cwd];
     if (o.autoApprove) args.push('--dangerously-skip-permissions');
     if (o.model) args.push('--model', o.model);
+    // Antigravity's session reasoning effort: low | medium | high.
+    if (o.variant) args.push('--effort', o.variant);
     args.push(...o.extraArgs, fileBootstrap(o.promptFile));
     return { bin: o.bin, args };
   },

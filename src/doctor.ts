@@ -76,7 +76,7 @@ export function runDoctor(i: DoctorInput): Check[] {
     const v = probe(spec.bin, ['--version']);
     if (v.enoent) add('provider', 'fail', `${spec.bin} not found on PATH (provider ${provider.name}${where}); set providers.${provider.name}.bin`);
     else if (v.timedOut) add('provider', 'warn', `${spec.bin} --version did not answer within 15 s`);
-    else add('provider', v.ok ? 'ok' : 'warn', `${provider.name} via ${spec.bin}${v.out ? ` (${v.out})` : ''} · model ${spec.model ?? 'provider default'} [${spec.sources.model}]${where}`);
+    else add('provider', v.ok ? 'ok' : 'warn', `${provider.name} via ${spec.bin}${v.out ? ` (${v.out})` : ''} · model ${spec.model ?? 'provider default'} [${spec.sources.model}]${spec.variant ? ` · variant ${spec.variant} [${spec.sources.variant}]` : ''}${where}`);
     if (!v.enoent && !i.skipAuth) {
       if (provider.authCheckArgs) {
         const a = probe(spec.bin, provider.authCheckArgs);

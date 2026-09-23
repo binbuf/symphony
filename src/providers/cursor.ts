@@ -71,6 +71,7 @@ export const cursorProvider: Provider = {
   name: 'cursor',
   supportsBudget: false,
   supportsResume: true,
+  supportsVariant: false,
   authCheckArgs: ['status', '--format', 'json'],
   buildCommand(o) {
     // `-p` is a boolean (--print); the prompt is the trailing positional.

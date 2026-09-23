@@ -24,6 +24,8 @@ export interface LogRef {
   /** Provider/model that ran this session; differs from the task-level pair when a task escalates. */
   provider?: string;
   model?: string;
+  /** Reasoning-effort / variant that ran this session, when the provider has one. */
+  variant?: string;
 }
 
 export interface LastError { category: string; message: string; transient: boolean; fatal: boolean; at: string }
@@ -46,6 +48,7 @@ export interface TaskState {
   sessionId?: string;
   provider?: string;
   model?: string;
+  variant?: string;
   pid?: number;
   summary?: string;
   lastError?: LastError;

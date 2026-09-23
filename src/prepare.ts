@@ -8,7 +8,7 @@ import { commitAll, currentBranch, describeCommit, ensureGitignore } from './git
 import { docsTree, formatLint, lintDocs, type LintReport } from './lint.js';
 import { openRunSinks } from './logger.js';
 import { rel, stopIgnoreEntry } from './paths.js';
-import { getProvider } from './providers/index.js';
+import { getProvider, variantSupported } from './providers/index.js';
 import type { Provider } from './providers/types.js';
 import { parseResultBlock, type ResultBlock } from './result.js';
 import { describeCmd, haltBanner, outcomeEvidence, preflight, type RunContext } from './runner.js';
@@ -89,9 +89,9 @@ export async function runDocsSession(
   writeFileSync(sinks.promptPath, opts.prompt);
   const cmd = provider.buildCommand({
     bin: spec.bin, prompt: opts.prompt, promptFile: sinks.promptPath, taskId: opts.taskId, attempt: 1, kind: 'task',
-    model: spec.model, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd, extraArgs: spec.extraArgs, cwd: paths.root,
+    model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd, extraArgs: spec.extraArgs, cwd: paths.root,
   });
-  log.info(`=== ${opts.label} with ${spec.providerName} · model ${spec.model ?? 'default'}`);
+  log.info(`=== ${opts.label} with ${spec.providerName} · model ${spec.model ?? 'default'}${spec.variant ? ` · variant ${spec.variant}` : ''}`);
   log.info(`${opts.taskId}: ${describeCmd(cmd)}`);
   log.info(`${opts.taskId}: streaming to ${relative(paths.root, sinks.logPath)}`);
 
@@ -155,13 +155,13 @@ const created = scaffoldDocs(paths, { roadmap: false, config: false, design: con
   }
   if (state.halted) { haltBanner(ctx, state.halted); return 3; }
 
-  const { spec, warnings } = resolveSession(config, undefined, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+  const { spec, warnings } = resolveSession(config, undefined, ctx.cli, process.env, (p) => getProvider(p).supportsBudget, variantSupported);
   warnings.forEach((w) => log.warn(w));
   const provider = getProvider(spec.providerName);
   const prompt = buildPreparePrompt(ctx, report);
 
   if (opts.dryRun) {
-    log.plain(`\nprovider: ${spec.providerName} [${spec.sources.provider}] · model: ${spec.model ?? 'provider default'} [${spec.sources.model}] · timeout ${config.prepareTimeoutMin} min`);
+    log.plain(`\nprovider: ${spec.providerName} [${spec.sources.provider}] · model: ${spec.model ?? 'provider default'} [${spec.sources.model}]${spec.variant ? ` · variant: ${spec.variant} [${spec.sources.variant}]` : ''} · timeout ${config.prepareTimeoutMin} min`);
     log.plain(`--- prepare prompt (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);
     return 0;
   }

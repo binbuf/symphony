@@ -6,6 +6,23 @@ this as a starting point and confirm against the CLI's own listing, noted per pr
 Set an id with `--model`, or `providers.<name>.model` in `symphony.config.json`. These are the ids
 the harness passes straight through; it does not validate them.
 
+## Reasoning effort
+
+Reasoning effort is set separately from the model id and defaults to `high` for every provider that
+has the knob. It is only sent when the model supports it: OpenCode's per-model variants are read
+from its own catalog (`opencode models --verbose`), so a model without variants runs at its default.
+Override per run with `--variant`, per task with `variant:` front matter, or per provider with
+`providers.<name>.variant`. An empty value (`--variant ""`) falls back to the provider default.
+
+| provider | flag | accepted values |
+|---|---|---|
+| claude | `--effort` | `low`, `medium`, `high`, `xhigh`, `max` |
+| opencode | `--variant` | whatever the model advertises (commonly `low`, `medium`, `high`, `max`) |
+| codex | `-c model_reasoning_effort=` | `minimal`, `low`, `medium`, `high` (`xhigh` on some models) |
+| antigravity | `--effort` | `low`, `medium`, `high` |
+
+Cursor, Gemini and `fake` have no effort knob, so the variant is ignored for them.
+
 ## claude — Claude Code (`claude`)
 
 | model | id | notes |

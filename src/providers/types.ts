@@ -10,6 +10,8 @@ export interface BuildCommandOpts {
   kind: 'task' | 'resume' | 'nudge' | 'continue' | 'escalate';
   resumeId?: string;
   model?: string;
+  /** Reasoning-effort / variant knob, already validated for this provider (e.g. "high"). */
+  variant?: string;
   autoApprove: boolean;
   budgetUsd?: number;
   extraArgs: string[];
@@ -60,6 +62,14 @@ export interface Provider {
   readonly name: ProviderName;
   readonly supportsBudget: boolean;
   readonly supportsResume: boolean;
+  /** Whether the CLI has a reasoning-effort / variant knob the harness can set. */
+  readonly supportsVariant: boolean;
+  /**
+   * The variant ids a model advertises, when the provider exposes a per-model catalog (OpenCode
+   * does). `undefined` means the catalog could not be read, so support is unknown; a provider with
+   * no catalog leaves this undefined and accepts the variant for every model.
+   */
+  readonly modelVariants?: (bin: string, model: string | undefined) => Set<string> | undefined;
   /** Args appended to `bin` for a preflight auth check; exit 0 = authenticated. */
   readonly authCheckArgs?: string[];
   buildCommand(o: BuildCommandOpts): SpawnSpec;

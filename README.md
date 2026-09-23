@@ -59,7 +59,7 @@ symphony defaults to **Claude Code** (`claude`). Install and log in to the agent
 }
 ```
 
-Or override per run: `./.symphony/symphony run --provider codex --model gpt-5`. The resolution order is `--provider/--model` > `SYMPHONY_PROVIDER`/`SYMPHONY_MODEL` > task front matter > config > defaults. Every key is optional; see [Providers](#providers) and [Config](#config). `doctor` verifies the chosen binary and its login before anything runs.
+Or override per run: `./.symphony/symphony run --provider codex --model gpt-5`. The resolution order is `--provider/--model/--variant` > `SYMPHONY_PROVIDER`/`SYMPHONY_MODEL`/`SYMPHONY_VARIANT` > task front matter > config > defaults. Every key is optional; see [Providers](#providers) and [Config](#config). `doctor` verifies the chosen binary and its login before anything runs.
 
 ### 3. init → doctor → run
 
@@ -167,7 +167,7 @@ docs/
 
 | command | what it does |
 |---|---|
-| `status [--json]` | progress table: id, phase, title, status, attempts, duration, start/end, cost, provider, model, summary. A task split across sessions or retried (attempts ≥ 2) also lists one line per session run beneath its parent line, each with its own start/end, duration, provider/model and summary — so an escalated run's model is visible at a glance |
+| `status [--json]` | progress table: id, phase, title, status, attempts, duration, start/end, cost, provider, model (`model#variant`), summary. A task split across sessions or retried (attempts ≥ 2) also lists one line per session run beneath its parent line, each with its own start/end, duration, provider/model and summary — so an escalated run's model is visible at a glance |
 | `accept T05 [--note "…"]` | human sign-off on a blocked/failed task; counts as done, bullet becomes `[x] ⟵ accepted` |
 | `nudge T05 [--note "…"]` | resume the task's last session and ask it to close out with a result block |
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also `git revert`s its `T05:` commits (newest first) |
@@ -277,12 +277,13 @@ The harness owns the checkbox and the trailing tag; edit everything else freely.
 - [x] T04 — Auth spike ⟵ accepted           signed off by a human with `accept`
 ```
 
-Ids are `T01`, `T02`, … (`01 —` and `3.` also parse). Task files are matched by the link, else by the `NN` filename prefix. A bullet with no task file still runs; the agent is told to create the file first. A task file may start with front matter to override the provider, model, timeout or verify command for that task only:
+Ids are `T01`, `T02`, … (`01 —` and `3.` also parse). Task files are matched by the link, else by the `NN` filename prefix. A bullet with no task file still runs; the agent is told to create the file first. A task file may start with front matter to override the provider, model, reasoning variant, timeout or verify command for that task only:
 
 ```markdown
 ---
 provider: gemini
 model: gemini-2.5-pro
+variant: high
 timeoutMin: 90
 verify: npm test -- --runInBand
 ---
@@ -329,7 +330,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | flag | meaning |
 |---|---|
 | `--prepare` | run `prepare` first; abort the run if the docs still do not lint clean |
-| `--provider P`, `--model M` | override provider/model for this run (see precedence above) |
+| `--provider P`, `--model M`, `--variant V` | override provider/model/reasoning effort for this run (see precedence above; `--variant ""` clears it) |
 | `--from T03`, `--to T10`, `--only T05,T06` | restrict which tasks are selected |
 | `--set NAME` | run a declared task set's plan instead of the base docs package |
 | `--retry` | re-run selected tasks even if they are done, accepted or blocked |
@@ -357,6 +358,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `fake` | node | replays an NDJSON fixture; for tests | | |
 
 - **Models:** pass `--model`, or set `providers.<name>.model`. Current ids per provider are listed in [Models.md](Models.md); OpenCode addresses models as `provider/model` (browse <https://openrouter.ai/models>). Ids churn, so confirm against each CLI's own listing.
+- **Reasoning effort ("variant"):** defaults to `high` and is sent only to providers that expose an effort knob and models that support it — `--effort` for Claude, `--variant` for OpenCode, `model_reasoning_effort` for Codex, `--effort` for Antigravity. Override with `--variant`, task front matter `variant:`, or `providers.<name>.variant`. OpenCode's per-model support is read from its own catalog (`opencode models --verbose`), so a model without variants simply runs at its default instead of erroring.
 - **Session resume** for retries and nudges uses `--resume` (Claude, Cursor), `--session` (OpenCode) and `exec resume <id>` (Codex); Gemini and Antigravity do not advertise resume, so retries start fresh.
 - **Cost** is surfaced for Claude (per session) and OpenCode (cumulative); `--budget` is Claude-only. Codex reports token usage instead.
 - **Correcting an adapter:** each provider's argv can be adjusted for your install with `providers.<name>.bin` and `providers.<name>.extraArgs`; unknown stream shapes are parsed best-effort.
@@ -448,7 +450,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | key | default | meaning |
 |---|---|---|
 | `provider` | `claude` | `claude` · `cursor` · `opencode` · `codex` · `gemini` · `antigravity` |
-| `providers.<name>.bin` `.model` `.extraArgs` `.budgetUsd` `.idleTimeoutMin` | see `symphony.config.example.json` | binary, model, extra CLI args, per-task budget (Claude), stall timeout override |
+| `providers.<name>.bin` `.model` `.variant` `.extraArgs` `.budgetUsd` `.idleTimeoutMin` | see `symphony.config.example.json` | binary, model, reasoning-effort default (`high`), extra CLI args, per-task budget (Claude), stall timeout override |
 | `paths.docs` | `docs` (legacy `.docs` honoured) | planning package directory |
 | `paths.roadmap` `.progress` `.tasks` `.design` `.adr` `.logs` `.index` | derived from `paths.docs` | individual overrides, absolute or root-relative |
 | `paths.stop` | `.stop` | graceful-pause sentinel (absolute or root-relative) |
@@ -486,7 +488,7 @@ Four optional shell hooks let the harness notify or trigger anything without bui
 
 | hook | when | environment |
 |---|---|---|
-| `hooks.afterTask` | after every task finishes | `SYMPHONY_TASK`, `SYMPHONY_TITLE`, `SYMPHONY_STATUS`, `SYMPHONY_SUMMARY`, `SYMPHONY_COMMIT`, `SYMPHONY_PROVIDER`, `SYMPHONY_MODEL`, `SYMPHONY_COST` |
+| `hooks.afterTask` | after every task finishes | `SYMPHONY_TASK`, `SYMPHONY_TITLE`, `SYMPHONY_STATUS`, `SYMPHONY_SUMMARY`, `SYMPHONY_COMMIT`, `SYMPHONY_PROVIDER`, `SYMPHONY_MODEL`, `SYMPHONY_VARIANT`, `SYMPHONY_COST` |
 | `hooks.onBlocked` | a task reports `blocked` | `SYMPHONY_TASK`, `SYMPHONY_TITLE`, `SYMPHONY_SUMMARY` |
 | `hooks.onHalt` | the run halts on a fatal error | `SYMPHONY_TASK`, `SYMPHONY_HALT_CATEGORY`, `SYMPHONY_HALT_REASON` |
 | `hooks.onRunEnd` | `run` finishes | `SYMPHONY_EXIT`, `SYMPHONY_STATUS` (`ok` · `stopped` · `halted` · `error`), `SYMPHONY_COST` |

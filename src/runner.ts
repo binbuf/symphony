@@ -11,7 +11,7 @@ import { createLogger, openRunSinks, type Logger } from './logger.js';
 import { writeTaskLog } from './logs.js';
 import { stopPresent, type Paths } from './paths.js';
 import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
-import { getProvider } from './providers/index.js';
+import { getProvider, variantSupported } from './providers/index.js';
 import type { Provider, SpawnSpec } from './providers/types.js';
 import { generateIndex, writeIndex } from './repomap.js';
 import { parseResultBlock, type ResultBlock } from './result.js';
@@ -176,12 +176,12 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
   const sinks = openRunSinks(paths.runs, `${task.id}-${stamp()}${suffix}`);
   writeFileSync(sinks.promptPath, prompt);
   const rel = (p: string) => relative(paths.root, p);
-  const entry: LogRef = { kind: r.logKind, jsonl: rel(sinks.jsonlPath), log: rel(sinks.logPath), prompt: rel(sinks.promptPath), started: nowIso(), provider: spec.providerName, model: spec.model };
+  const entry: LogRef = { kind: r.logKind, jsonl: rel(sinks.jsonlPath), log: rel(sinks.logPath), prompt: rel(sinks.promptPath), started: nowIso(), provider: spec.providerName, model: spec.model, variant: spec.variant };
   st.logs.push(entry);
 
   const cmd = provider.buildCommand({
     bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: task.id, attempt: r.attempt, kind: r.kind,
-    resumeId: r.resumeId, model: spec.model, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd,
+    resumeId: r.resumeId, model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd,
     extraArgs: spec.extraArgs, cwd: paths.root,
   });
   log.info(`${task.id}: ${describeCmd(cmd)}`);
@@ -289,13 +289,14 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
     SYMPHONY_COMMIT: st.commitSha ?? '',
     SYMPHONY_PROVIDER: st.provider ?? '',
     SYMPHONY_MODEL: st.model ?? '',
+    SYMPHONY_VARIANT: st.variant ?? '',
     SYMPHONY_COST: st.costUsd !== undefined ? st.costUsd.toFixed(2) : '',
   }, (m) => log.warn(`${task.id}: ${m}`));
   log.info(`=== ${task.id} -> ${final.status.toUpperCase()} · ${fmtDuration(st.durationS)} · ${fmtCost(st.costUsd)} · ${final.summary} · git: ${st.commit}`);
 }
 
 function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError: string | undefined, continuation: number, indexBody?: string): PromptCtx {
-  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody };
+  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, variant: spec.variant, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody };
 }
 
 /** Abortable, STOP-aware backoff. Returns true when a STOP file appeared. */
@@ -323,13 +324,13 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   const { paths, config, log, state } = ctx;
   const st = (state.tasks[task.id] ??= newTaskState(task.title));
   st.title = task.title;
-  const resolved = resolveSession(config, task, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+  const resolved = resolveSession(config, task, ctx.cli, process.env, (p) => getProvider(p).supportsBudget, variantSupported);
   const warnings = resolved.warnings;
   // `spec`/`provider` are mutable: escalation swaps them mid-task for the rest of the attempts.
   let spec = resolved.spec;
   warnings.forEach((w) => log.warn(`${task.id}: ${w}`));
   let provider = getProvider(spec.providerName);
-  const escalation = resolveEscalation(config, spec, (p) => getProvider(p).supportsBudget);
+  const escalation = resolveEscalation(config, spec, (p) => getProvider(p).supportsBudget, variantSupported);
   escalation?.warnings.forEach((w) => log.warn(`${task.id}: ${w}`));
   const maxEscalations = escalation ? Math.max(0, config.escalation.maxAttempts) : 0;
   const escalationCategories = new Set(config.escalation.onCategories);
@@ -394,7 +395,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     lastTransient = undefined;
     continuation = 0;
     delete st.continuation;
-    log.warn(`${task.id}: ${category} — ${reason}. Escalating to ${spec.providerName}${spec.model ? ` · ${spec.model}` : ''} (escalation ${escalations}/${maxEscalations}).`);
+    log.warn(`${task.id}: ${category} — ${reason}. Escalating to ${spec.providerName}${spec.model ? ` · ${spec.model}` : ''}${spec.variant ? ` · variant ${spec.variant}` : ''} (escalation ${escalations}/${maxEscalations}).`);
     return true;
   };
 
@@ -417,10 +418,11 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     st.started = nowIso();
     st.provider = spec.providerName;
     st.model = spec.model;
+    st.variant = spec.variant;
     delete st.finished;
     saveState(paths, state);
     patchRoadmap(ctx, task.id, 'running');
-    log.info(`=== ${task.id} ${task.title} (session ${st.attempts}${retryCount > 0 ? `, retry ${retryCount}/${maxAttempts}` : ''}${continuation > 0 ? `, continuation ${continuation}/${maxContinuations}` : ''}) provider=${spec.providerName} model=${spec.model ?? 'default'} timeout=${spec.timeoutMin}min`);
+    log.info(`=== ${task.id} ${task.title} (session ${st.attempts}${retryCount > 0 ? `, retry ${retryCount}/${maxAttempts}` : ''}${continuation > 0 ? `, continuation ${continuation}/${maxContinuations}` : ''}) provider=${spec.providerName} model=${spec.model ?? 'default'} variant=${spec.variant ?? 'default'} timeout=${spec.timeoutMin}min`);
 
     const pc = promptCtx(ctx, task, st, spec, lastTransient ? lastTransient.message : st.lastError?.message, continuation);
     const prompt = lastTransient && resumeId
@@ -631,14 +633,14 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   const leftRunning = todo.filter((t) => state.tasks[t.id]?.status === 'running');
 
   const first = todo[0];
-  const { spec, warnings } = resolveSession(config, first, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+  const { spec, warnings } = resolveSession(config, first, ctx.cli, process.env, (p) => getProvider(p).supportsBudget, variantSupported);
   warnings.forEach((w) => log.warn(w));
   const provider = getProvider(spec.providerName);
   // Tasks may override the provider in front matter: preflight every provider this run will use.
   const extraProviders: ExtraProvider[] = [];
   const seenProviders = new Set([spec.providerName]);
   for (const t of todo) {
-    const rs = resolveSession(config, t, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+    const rs = resolveSession(config, t, ctx.cli, process.env, (p) => getProvider(p).supportsBudget, variantSupported);
     if (seenProviders.has(rs.spec.providerName)) continue;
     seenProviders.add(rs.spec.providerName);
     rs.warnings.forEach((w) => log.warn(`${t.id}: ${w}`));
@@ -646,7 +648,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   }
   // The escalation target only launches when a task fails, but its provider still has to pass
   // preflight now: discovering a missing binary mid-run is exactly what preflight exists to avoid.
-  const escPreflight = resolveEscalation(config, spec, (p) => getProvider(p).supportsBudget);
+  const escPreflight = resolveEscalation(config, spec, (p) => getProvider(p).supportsBudget, variantSupported);
   escPreflight?.warnings.forEach((w) => log.warn(w));
   if (escPreflight && !seenProviders.has(escPreflight.spec.providerName)) {
     extraProviders.push({ spec: escPreflight.spec, provider: getProvider(escPreflight.spec.providerName), label: 'escalation' });
@@ -671,15 +673,15 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     // Build a fresh repo map in memory so the preview matches what a real run would send.
     const previewIndex = config.repoMap ? generateIndex(paths) : undefined;
     for (const t of todo) {
-      const rs = resolveSession(config, t, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+      const rs = resolveSession(config, t, ctx.cli, process.env, (p) => getProvider(p).supportsBudget, variantSupported);
       const tProvider = getProvider(rs.spec.providerName);
       const st = state.tasks[t.id] ?? newTaskState(t.title);
       const prompt = buildTaskPrompt(promptCtx(ctx, t, { ...st, attempts: st.attempts + 1 }, rs.spec, st.lastError?.message, 0, previewIndex));
-      const cmd = tProvider.buildCommand({ bin: rs.spec.bin, prompt, promptFile: `${paths.runs}/${t.id}-<stamp>.prompt.md`, taskId: t.id, attempt: st.attempts + 1, kind: 'task', model: rs.spec.model, autoApprove: rs.spec.autoApprove, budgetUsd: rs.spec.budgetUsd, extraArgs: rs.spec.extraArgs, cwd: paths.root });
+      const cmd = tProvider.buildCommand({ bin: rs.spec.bin, prompt, promptFile: `${paths.runs}/${t.id}-<stamp>.prompt.md`, taskId: t.id, attempt: st.attempts + 1, kind: 'task', model: rs.spec.model, variant: rs.spec.variant, autoApprove: rs.spec.autoApprove, budgetUsd: rs.spec.budgetUsd, extraArgs: rs.spec.extraArgs, cwd: paths.root });
       log.plain(`\n=== ${t.id} — ${t.title}`);
-      log.plain(`provider: ${rs.spec.providerName} [${rs.spec.sources.provider}] · model: ${rs.spec.model ?? 'provider default'} [${rs.spec.sources.model}] · timeout ${rs.spec.timeoutMin} min · idle ${rs.spec.idleTimeoutMin} min · auto-approve ${rs.spec.autoApprove}`);
-      const esc = resolveEscalation(config, rs.spec, (p) => getProvider(p).supportsBudget);
-      if (esc) log.plain(`escalation: ${esc.spec.providerName} · ${esc.spec.model} if the task fails (${config.escalation.onCategories.join(', ')}; max ${config.escalation.maxAttempts} session${config.escalation.maxAttempts === 1 ? '' : 's'})`);
+      log.plain(`provider: ${rs.spec.providerName} [${rs.spec.sources.provider}] · model: ${rs.spec.model ?? 'provider default'} [${rs.spec.sources.model}]${rs.spec.variant ? ` · variant: ${rs.spec.variant} [${rs.spec.sources.variant}]` : ''} · timeout ${rs.spec.timeoutMin} min · idle ${rs.spec.idleTimeoutMin} min · auto-approve ${rs.spec.autoApprove}`);
+      const esc = resolveEscalation(config, rs.spec, (p) => getProvider(p).supportsBudget, variantSupported);
+      if (esc) log.plain(`escalation: ${esc.spec.providerName} · ${esc.spec.model}${esc.spec.variant ? ` · variant ${esc.spec.variant}` : ''} if the task fails (${config.escalation.onCategories.join(', ')}; max ${config.escalation.maxAttempts} session${config.escalation.maxAttempts === 1 ? '' : 's'})`);
       log.plain(`command: ${describeCmd(cmd)}`);
       log.plain(`--- prompt for ${t.id} (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);
     }
@@ -792,7 +794,7 @@ export async function nudgeCommand(ctx: RunContext, rawId: string, note?: string
   if (DONE_STATES.includes(st.status)) { log.info(`${task.id} is already ${st.status}; nothing to nudge`); return 0; }
   if (state.halted) { haltBanner(ctx, state.halted); return 3; }
 
-  const { spec } = resolveSession(config, task, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+  const { spec } = resolveSession(config, task, ctx.cli, process.env, (p) => getProvider(p).supportsBudget, variantSupported);
   const provider = getProvider(spec.providerName);
   if (!provider.supportsResume) throw new UsageError(`provider ${provider.name} cannot resume sessions`);
   if (!preflight(ctx, spec, provider)) return 4;

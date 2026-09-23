@@ -20,6 +20,8 @@ export interface PromptCtx {
   continuation: number;
   providerName: string;
   model?: string;
+  /** Effective reasoning-effort / variant, or undefined when the model has none. */
+  variant?: string;
   maxProgressBytes: number;
   /** When false, design/ and adr/ are not part of the contract. */
   designDocs: boolean;
@@ -160,6 +162,7 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
     continuation: ctx.continuation,
     provider: ctx.providerName,
     model: ctx.model ?? 'provider default',
+    variant: ctx.variant ?? 'provider default',
     progress: d.progress,
     logs: d.logs,
     index: d.index,

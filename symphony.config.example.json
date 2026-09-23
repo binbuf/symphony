@@ -16,6 +16,7 @@
     "opencode": {
       "bin": "opencode",
       "model": "openrouter/deepseek/deepseek-v4.1-flash",
+      "variant": "high",
       "extraArgs": [],
       "idleTimeoutMin": 45
     },

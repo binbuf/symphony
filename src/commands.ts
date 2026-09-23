@@ -72,7 +72,7 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
     // The parent line spans the whole task: the first session's start through the finish, with the
     // accumulated duration and the final summary.
     const start = s?.logs?.[0]?.started ?? s?.started;
-    rows.push([t.id, squash(t.phase, 18), squash(t.title, 42), shown, String(s?.attempts ?? 0), time, fmtDateTime(start), fmtDateTime(s?.finished), fmtCost(s?.costUsd), s?.provider ?? '', squash(s?.model ?? '', 28), squash(s?.summary ?? '', 60)]);
+    rows.push([t.id, squash(t.phase, 18), squash(t.title, 42), shown, String(s?.attempts ?? 0), time, fmtDateTime(start), fmtDateTime(s?.finished), fmtCost(s?.costUsd), s?.provider ?? '', squash(s?.model ? `${s.model}${s.variant ? `#${s.variant}` : ''}` : '', 28), squash(s?.summary ?? '', 60)]);
     // A task split across sessions or retried (att >= 2) gets one child line per session, so each
     // round reports its own start/end, duration and summary instead of only the task's running total.
     if ((s?.attempts ?? 0) >= 2 && s?.logs?.length) {
@@ -80,7 +80,7 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
         const run = runTiming(l, running);
         const label = `run ${i + 1} · ${l.kind}`;
         // The session's own provider and model, so an escalated run is visible in the table too.
-        rows.push(['  ↳', '', squash(label, 42), l.status ?? '', '', run.duration, run.start, run.end, fmtCost(l.costUsd), squash(l.provider ?? '', 16), squash(l.model ?? '', 28), squash(l.summary ?? '', 60)]);
+        rows.push(['  ↳', '', squash(label, 42), l.status ?? '', '', run.duration, run.start, run.end, fmtCost(l.costUsd), squash(l.provider ?? '', 16), squash(l.model ? `${l.model}${l.variant ? `#${l.variant}` : ''}` : '', 28), squash(l.summary ?? '', 60)]);
       });
     }
   }

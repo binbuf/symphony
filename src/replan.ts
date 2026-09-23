@@ -9,7 +9,7 @@ import type { Logger } from './logger.js';
 import { rel, stopIgnoreEntry, type Paths } from './paths.js';
 import { lintCommand, runDocsSession } from './prepare.js';
 import { nextAdrNumber } from './prompt.js';
-import { getProvider } from './providers/index.js';
+import { getProvider, variantSupported } from './providers/index.js';
 import { idFromNum, parseRoadmap, patchRoadmapFile } from './roadmap.js';
 import { haltBanner, preflight, type RunContext } from './runner.js';
 import { acquireLock, HELD_STATES, releaseLock, saveState, startLockHeartbeat, type State, type TaskStatus } from './state.js';
@@ -184,13 +184,13 @@ export async function replanCommand(ctx: RunContext, opts: ReplanOptions): Promi
 
   if (state.halted) { haltBanner(ctx, state.halted); return 3; }
 
-  const { spec, warnings } = resolveSession(config, undefined, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+  const { spec, warnings } = resolveSession(config, undefined, ctx.cli, process.env, (p) => getProvider(p).supportsBudget, variantSupported);
   warnings.forEach((w) => log.warn(w));
   const provider = getProvider(spec.providerName);
   const prompt = buildReplanPrompt(ctx, report, direction);
 
   if (opts.dryRun) {
-    log.plain(`\nprovider: ${spec.providerName} [${spec.sources.provider}] · model: ${spec.model ?? 'provider default'} [${spec.sources.model}] · timeout ${config.prepareTimeoutMin} min`);
+    log.plain(`\nprovider: ${spec.providerName} [${spec.sources.provider}] · model: ${spec.model ?? 'provider default'} [${spec.sources.model}]${spec.variant ? ` · variant: ${spec.variant} [${spec.sources.variant}]` : ''} · timeout ${config.prepareTimeoutMin} min`);
     log.plain(`--- replan prompt (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);
     return 0;
   }

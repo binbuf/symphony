@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { antigravityProvider } from '../src/providers/antigravity.js';
 import { ClaudeParser, claudeProvider } from '../src/providers/claude.js';
 import { CodexParser, codexProvider } from '../src/providers/codex.js';
 import { ATTACHED_BOOTSTRAP, fileBootstrap } from '../src/providers/common.js';
 import { CursorParser, cursorProvider } from '../src/providers/cursor.js';
-import { OpenCodeParser, opencodeProvider } from '../src/providers/opencode.js';
+import { OpenCodeParser, opencodeProvider, parseModelVariants } from '../src/providers/opencode.js';
 import type { BuildCommandOpts } from '../src/providers/types.js';
 
 const j = (o: unknown) => JSON.stringify(o);
@@ -142,4 +143,37 @@ test('codex buildCommand: full bypass by default, sandbox in safe mode, resume s
 test('prompt channels: bootstrap names the prompt file, never the payload', () => {
   assert.ok(fileBootstrap('/tmp/x.prompt.md').includes('/tmp/x.prompt.md'));
   assert.ok(ATTACHED_BOOTSTRAP.length > 0);
+});
+
+test('variant args: every provider with an effort knob gets its own flag, and only when set', () => {
+  assert.ok(claudeProvider.buildCommand(opts({ model: 'm', variant: 'high' })).args.join(' ').includes('--effort high'));
+  assert.ok(opencodeProvider.buildCommand(opts({ model: 'anthropic/x', variant: 'high' })).args.join(' ').includes('--variant high'));
+  assert.ok(codexProvider.buildCommand(opts({ model: 'o3', variant: 'high' })).args.join(' ').includes('-c model_reasoning_effort=high'));
+  assert.ok(antigravityProvider.buildCommand(opts({ model: 'g', variant: 'high' })).args.join(' ').includes('--effort high'));
+  assert.ok(!claudeProvider.buildCommand(opts({ model: 'm' })).args.includes('--effort'));
+  assert.ok(!opencodeProvider.buildCommand(opts({ model: 'anthropic/x' })).args.includes('--variant'));
+});
+
+test('opencode model variant catalog: refs map to their advertised variants', () => {
+  const out = [
+    'deepinfra/deepseek-ai/X',
+    JSON.stringify({ providerID: 'deepinfra', id: 'deepseek-ai/X', variants: { low: {}, high: {} } }, null, 2),
+    '',
+    'other/plain',
+    JSON.stringify({ providerID: 'other', id: 'plain' }, null, 2),
+    '',
+  ].join('\n');
+  const map = parseModelVariants(out);
+  assert.deepEqual([...map.get('deepinfra/deepseek-ai/X')!].sort(), ['high', 'low']);
+  assert.deepEqual([...map.get('other/plain')!], []);
+});
+
+test('provider capability flags: variant support matches the CLI', () => {
+  assert.equal(claudeProvider.supportsVariant, true);
+  assert.equal(opencodeProvider.supportsVariant, true);
+  assert.equal(codexProvider.supportsVariant, true);
+  assert.equal(antigravityProvider.supportsVariant, true);
+  assert.equal(cursorProvider.supportsVariant, false);
+  assert.equal(typeof opencodeProvider.modelVariants, 'function');
+  assert.equal(claudeProvider.modelVariants, undefined);
 });

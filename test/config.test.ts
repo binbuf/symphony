@@ -88,6 +88,56 @@ test('budget is dropped with a warning for providers without a budget flag', () 
   assert.equal(ok.spec.budgetUsd, 3);
 });
 
+test('variant: defaults to high, follows precedence, and is gated by model support', () => {
+  const yes = () => true;
+  // Shipped default for providers with an effort knob.
+  const byConfig = resolveSession(DEFAULTS, task(), {}, {}, yes, yes).spec;
+  assert.equal(byConfig.providerName, 'claude');
+  assert.equal(byConfig.variant, 'high');
+  assert.equal(byConfig.sources.variant, 'config');
+
+  // Precedence: cli > env > front matter > config.
+  const byCli = resolveSession(DEFAULTS, task({ variant: 'low' }), { variant: 'max' }, { SYMPHONY_VARIANT: 'medium' }, yes, yes).spec;
+  assert.equal(byCli.variant, 'max');
+  assert.equal(byCli.sources.variant, '--variant');
+  const byEnv = resolveSession(DEFAULTS, task({ variant: 'low' }), {}, { SYMPHONY_VARIANT: 'medium' }, yes, yes).spec;
+  assert.equal(byEnv.variant, 'medium');
+  const byMeta = resolveSession(DEFAULTS, task({ variant: 'low' }), {}, {}, yes, yes).spec;
+  assert.equal(byMeta.variant, 'low');
+  assert.equal(byMeta.sources.variant, 'task front matter');
+
+  // A provider with a variant knob but a model that does not advertise it: the default is dropped
+  // silently, an explicit request warns.
+  const opencode = { ...DEFAULTS, provider: 'opencode' as const };
+  const dropped = resolveSession(opencode, task(), {}, {}, yes, () => false);
+  assert.equal(dropped.spec.variant, undefined);
+  assert.equal(dropped.warnings.length, 0);
+  const explicit = resolveSession(opencode, task(), { variant: 'max' }, {}, yes, () => false);
+  assert.equal(explicit.spec.variant, undefined);
+  assert.ok(explicit.warnings.some((w) => /does not support variant/.test(w)));
+
+  // Providers without a knob never get one, even from config.
+  assert.equal(resolveSession(DEFAULTS, task({ provider: 'cursor' }), {}, {}, yes, yes).spec.variant, undefined);
+
+  // A per-provider override in the config file wins over the shipped default.
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-variant-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({ providers: { claude: { variant: 'xhigh' } } }));
+  const { config } = loadConfig(paths, {});
+  assert.equal(config.providers.claude.variant, 'xhigh');
+  assert.equal(config.providers.opencode.variant, 'high');
+});
+
+test('escalation inherits the provider default variant and is gated the same way', () => {
+  const cfg = { ...DEFAULTS, escalation: { ...DEFAULTS.escalation, enabled: true } };
+  const primary = resolveSession(cfg, task(), {}, {}, () => true, () => true).spec;
+  const esc = resolveEscalation(cfg, primary, () => true, () => true);
+  assert.equal(esc?.spec.variant, 'high');
+  assert.equal(esc?.spec.sources.variant, 'config');
+  assert.equal(resolveEscalation(cfg, primary, () => true, () => false)?.spec.variant, undefined);
+});
+
 test('paths section is parsed and drives every location; unknown keys warn', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-'));
   const paths = resolvePaths(dir);

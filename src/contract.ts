@@ -37,6 +37,7 @@ export const TASK_TEMPLATE = `---
 # Optional per-task overrides read by the harness (delete if unused):
 # provider: claude | cursor | opencode | codex | gemini | antigravity
 # model: <model id>
+# variant: high | low | ...   (reasoning effort; only sent when the provider/model supports it)
 # timeoutMin: 240
 # verify: <shell command the harness runs after this task reports done; non-zero fails the task>
 ---

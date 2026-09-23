@@ -10,6 +10,8 @@ export const PROVIDER_NAMES: ProviderName[] = ['claude', 'cursor', 'opencode', '
 export interface ProviderConfig {
   bin: string;
   model?: string;
+  /** Default reasoning-effort / variant for this provider (e.g. "high"). Ignored by providers without a knob. */
+  variant?: string;
   extraArgs: string[];
   budgetUsd?: number;
   idleTimeoutMin?: number;
@@ -157,6 +159,7 @@ export interface Config {
 export interface CliOverrides {
   provider?: string;
   model?: string;
+  variant?: string;
   timeoutMin?: number;
   budgetUsd?: number;
   maxCostUsd?: number;
@@ -169,12 +172,12 @@ export interface CliOverrides {
 export const DEFAULTS: Config = {
   provider: 'claude',
   providers: {
-    claude: { bin: 'claude', model: 'claude-opus-5', extraArgs: [] },
+    claude: { bin: 'claude', model: 'claude-opus-5', variant: 'high', extraArgs: [] },
     cursor: { bin: 'agent', model: 'claude-opus-5', extraArgs: [], idleTimeoutMin: 45 },
-    opencode: { bin: 'opencode', model: 'anthropic/claude-sonnet-4-5', extraArgs: [], idleTimeoutMin: 45 },
-    codex: { bin: 'codex', model: 'gpt-6-sol', extraArgs: [], idleTimeoutMin: 45 },
+    opencode: { bin: 'opencode', model: 'anthropic/claude-sonnet-4-5', variant: 'high', extraArgs: [], idleTimeoutMin: 45 },
+    codex: { bin: 'codex', model: 'gpt-6-sol', variant: 'high', extraArgs: [], idleTimeoutMin: 45 },
     gemini: { bin: 'gemini', model: 'gemini-3.1-pro-preview', extraArgs: [], idleTimeoutMin: 45 },
-    antigravity: { bin: 'agy', model: 'gemini-3.1-pro-high', extraArgs: [], idleTimeoutMin: 45 },
+    antigravity: { bin: 'agy', model: 'gemini-3.1-pro-high', variant: 'high', extraArgs: [], idleTimeoutMin: 45 },
     fake: { bin: process.execPath, extraArgs: [] },
   },
   paths: {},
@@ -374,6 +377,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
       providers[pn] = {
         bin: typeof val.bin === 'string' && val.bin ? val.bin : base.bin,
         model: typeof val.model === 'string' && val.model ? val.model : base.model,
+        variant: typeof val.variant === 'string' && val.variant ? val.variant : base.variant,
         extraArgs: stringArray(val.extraArgs, base.extraArgs, `providers.${name}.extraArgs`, warnings),
         budgetUsd: val.budgetUsd === undefined || val.budgetUsd === null ? base.budgetUsd : numberOr(val.budgetUsd, 0, `providers.${name}.budgetUsd`, warnings),
         idleTimeoutMin: val.idleTimeoutMin === undefined || val.idleTimeoutMin === null ? base.idleTimeoutMin : atLeastOr(val.idleTimeoutMin, DEFAULTS.idleTimeoutMin, 0, `providers.${name}.idleTimeoutMin`, warnings),
@@ -519,16 +523,20 @@ export interface SessionSpec {
   providerName: ProviderName;
   bin: string;
   model?: string;
+  /** Effective reasoning-effort / variant for this session, after support checks (e.g. "high"). */
+  variant?: string;
   extraArgs: string[];
   budgetUsd?: number;
   timeoutMin: number;
   idleTimeoutMin: number;
   autoApprove: boolean;
-  sources: { provider: string; model: string };
+  sources: { provider: string; model: string; variant: string };
 }
 
 /**
  * Per-task resolution. Precedence: CLI flag > env > task front matter > config file > defaults.
+ * `variantSupport` decides whether the resolved variant may be sent to this provider/model; it
+ * defaults to "no" so a caller that omits it never emits a variant the provider cannot take.
  */
 export function resolveSession(
   config: Config,
@@ -536,6 +544,7 @@ export function resolveSession(
   cli: CliOverrides,
   env: NodeJS.ProcessEnv = process.env,
   supportsBudget: (p: ProviderName) => boolean = () => true,
+  variantSupport: (p: ProviderName, bin: string, model: string | undefined, variant: string) => boolean = () => false,
 ): { spec: SessionSpec; warnings: string[] } {
   const warnings: string[] = [];
   const meta = task?.meta ?? {};
@@ -554,6 +563,23 @@ export function resolveSession(
   else if (env.SYMPHONY_MODEL) { model = env.SYMPHONY_MODEL; modelSource = 'env SYMPHONY_MODEL'; }
   else if (meta.model) { model = meta.model; modelSource = 'task front matter'; }
   else { model = pc.model || undefined; modelSource = pc.model ? 'config' : 'provider default'; }
+
+  // Reasoning effort. Default comes from the provider config (shipped as "high" where supported);
+  // it is dropped when the provider has no knob or the model does not advertise it.
+  let variant: string | undefined;
+  let variantSource: string;
+  if (cli.variant !== undefined) { variant = cli.variant.trim() || undefined; variantSource = '--variant'; }
+  else if (env.SYMPHONY_VARIANT) { variant = env.SYMPHONY_VARIANT.trim() || undefined; variantSource = 'env SYMPHONY_VARIANT'; }
+  else if (meta.variant) { variant = meta.variant.trim() || undefined; variantSource = 'task front matter'; }
+  else if (pc.variant) { variant = pc.variant; variantSource = 'config'; }
+  else { variant = undefined; variantSource = 'provider default'; }
+  if (!variant) variantSource = 'provider default';
+  if (variant && !variantSupport(providerName, pc.bin, model, variant)) {
+    const explicit = variantSource === '--variant' || variantSource === 'env SYMPHONY_VARIANT' || variantSource === 'task front matter';
+    if (explicit) warnings.push(`${providerName}${model ? ` model ${model}` : ''} does not support variant "${variant}" [${variantSource}]; ignoring`);
+    variant = undefined;
+    variantSource = 'provider default';
+  }
 
   let budgetUsd = cli.budgetUsd ?? pc.budgetUsd;
   if (budgetUsd !== undefined && !supportsBudget(providerName)) {
@@ -576,12 +602,13 @@ export function resolveSession(
       providerName,
       bin: pc.bin,
       model,
+      variant,
       extraArgs: pc.extraArgs,
       budgetUsd,
       timeoutMin,
       idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
       autoApprove: config.autoApprove,
-      sources: { provider: providerSource, model: modelSource },
+      sources: { provider: providerSource, model: modelSource, variant: variantSource },
     },
     warnings,
   };
@@ -635,6 +662,7 @@ export function resolveEscalation(
   config: Config,
   primary: SessionSpec,
   supportsBudget: (p: ProviderName) => boolean = () => true,
+  variantSupport: (p: ProviderName, bin: string, model: string | undefined, variant: string) => boolean = () => false,
 ): { spec: SessionSpec; warnings: string[] } | undefined {
   if (!config.escalation.enabled) return undefined;
   const warnings: string[] = [];
@@ -650,6 +678,8 @@ export function resolveEscalation(
     warnings.push(`escalation budget ${budgetUsd} USD ignored: provider ${providerName} has no budget flag`);
     budgetUsd = undefined;
   }
+  let variant = pc.variant;
+  if (variant && !variantSupport(providerName, pc.bin, model, variant)) variant = undefined;
   if (providerName === 'opencode' && !model.includes('/')) {
     warnings.push(`opencode models are "provider/model" (e.g. z-ai/glm-5.3); escalation got "${model}"`);
   }
@@ -658,12 +688,13 @@ export function resolveEscalation(
       providerName,
       bin: pc.bin,
       model,
+      variant,
       extraArgs: pc.extraArgs,
       budgetUsd,
       timeoutMin: config.timeoutMin,
       idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
       autoApprove: config.autoApprove,
-      sources: { provider: 'escalation', model: 'escalation' },
+      sources: { provider: 'escalation', model: 'escalation', variant: variant ? 'config' : 'provider default' },
     },
     warnings,
   };

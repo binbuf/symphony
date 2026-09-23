@@ -118,6 +118,7 @@ export const codexProvider: Provider = {
   name: 'codex',
   supportsBudget: false,
   supportsResume: true,
+  supportsVariant: true,
   authCheckArgs: ['login', 'status'],
   buildCommand(o) {
     // `codex exec [resume <id>] [flags] <prompt>`; `-` reads the prompt from stdin.
@@ -126,6 +127,8 @@ export const codexProvider: Provider = {
     args.push('--json', '--color', 'never', '--skip-git-repo-check');
     if (!o.resumeId) args.push('--cd', o.cwd);
     if (o.model) args.push('--model', o.model);
+    // Codex has no effort flag: the setting is a config key, overridden per invocation.
+    if (o.variant) args.push('-c', `model_reasoning_effort=${o.variant}`);
     if (o.autoApprove) args.push('--dangerously-bypass-approvals-and-sandbox');
     else args.push('--sandbox', 'workspace-write', '--ask-for-approval', 'never');
     args.push(...o.extraArgs);

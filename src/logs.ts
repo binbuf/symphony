@@ -29,7 +29,7 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
   lines.push('');
   lines.push(bullet('Phase', task.phase));
   lines.push(bullet('Status', st.status));
-  lines.push(bullet('Provider', st.provider ? `${st.provider}${st.model ? ` · model: ${st.model}` : ''}` : undefined));
+  lines.push(bullet('Provider', st.provider ? `${st.provider}${st.model ? ` · model: ${st.model}` : ''}${st.variant ? ` · variant: ${st.variant}` : ''}` : undefined));
   lines.push(bullet('Duration', fmtDuration(st.durationS || undefined)));
   lines.push(bullet('Cost', st.costUsd === undefined ? undefined : fmtCost(st.costUsd)));
   lines.push(bullet('Attempts', String(st.attempts)));
@@ -68,7 +68,7 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
       lines.push(`### ${i + 1} · ${l.kind}${parts.length ? ` · ${parts.join(' · ')}` : ''}`);
       lines.push('');
       lines.push(`- summary: ${l.summary?.trim() || '_(none)_'}`);
-      if (l.provider) lines.push(`- model: ${l.provider}${l.model ? ` · ${l.model}` : ''}`);
+      if (l.provider) lines.push(`- model: ${l.provider}${l.model ? ` · ${l.model}` : ''}${l.variant ? ` · variant ${l.variant}` : ''}`);
       lines.push(`- raw: ${l.jsonl} · log: ${l.log} · prompt: ${l.prompt}`);
       lines.push('');
     });
