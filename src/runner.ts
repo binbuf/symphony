@@ -96,6 +96,18 @@ function mkError(c: Classified): LastError {
   return { category: c.category, message: c.message, transient: c.transient, fatal: c.fatal, at: nowIso() };
 }
 
+/**
+ * A configured-but-unusable Jev is a misconfiguration, not a soft fallback: when `jev.enabled` is
+ * true but its API key is missing, the run halts (exit 3) so the problem cannot go unnoticed.
+ * `undefined` means Jev is off or ready to run.
+ */
+function jevMisconfigHalt(config: Config): Halted | undefined {
+  if (!config.jev.enabled) return undefined;
+  const problem = jevProblem(config.jev, process.env);
+  if (!problem) return undefined;
+  return { at: nowIso(), category: 'config', reason: `Jev is enabled but ${problem}. Set ${config.jev.apiKeyEnv}, or turn off jev.enabled.` };
+}
+
 export function outcomeEvidence(out: SessionOutcome): FailureEvidence {
   return {
     apiErrorCategories: out.hints.apiErrorCategories,
@@ -694,6 +706,12 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     return 0;
   }
 
+  // Jev enabled with no usable key is a fatal misconfiguration: halt instead of running with the
+  // decision workflows silently disabled. Checked after the dry-run/no-op exits so a preview or an
+  // empty run does not leave a sticky halt behind.
+  const jevHalt = jevMisconfigHalt(config);
+  if (jevHalt) return setHalt(ctx, jevHalt);
+
   if (config.maxTasksPerRun > 0 && todo.length > config.maxTasksPerRun) {
     log.info(`maxTasksPerRun=${config.maxTasksPerRun}: running the first ${config.maxTasksPerRun} of ${todo.length} selected task(s); the rest stay for a later run`);
     todo = todo.slice(0, config.maxTasksPerRun);
@@ -798,6 +816,8 @@ export async function nudgeCommand(ctx: RunContext, rawId: string, note?: string
   const provider = getProvider(spec.providerName);
   if (!provider.supportsResume) throw new UsageError(`provider ${provider.name} cannot resume sessions`);
   if (!preflight(ctx, spec, provider)) return 4;
+  const jevHalt = jevMisconfigHalt(config);
+  if (jevHalt) return setHalt(ctx, jevHalt);
 
   acquireLock(paths);
   ctx.startBranch = currentBranch(paths.root);

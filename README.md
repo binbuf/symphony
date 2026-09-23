@@ -392,7 +392,7 @@ Escalation is bounded: `maxAttempts` caps it, and `maxIterationsPerTask` still c
 
 ## Jev
 
-**Jev** — TypeSafe's System One decision model — makes fast, typed calls that replace brittle hand-written decisions in the harness. It is reached through [OpenRouter](https://openrouter.ai/settings/keys), so your OpenRouter key is all you need. Jev is off by default and never on the fatal path: every workflow falls back to the harness's own deterministic behavior on a missing key, a timeout, or a low-confidence answer.
+**Jev** — TypeSafe's System One decision model — makes fast, typed calls that replace brittle hand-written decisions in the harness. It is reached through [OpenRouter](https://openrouter.ai/settings/keys), so your OpenRouter key is all you need. Jev is off by default. When it is enabled but its API key is missing, the run halts rather than run with the decision workflows silently disabled; a timeout or a low-confidence answer still falls back to the harness's own deterministic behavior.
 
 It runs up to three independent **workflows**, each behind its own flag:
 
@@ -441,7 +441,7 @@ When [escalation](#escalation) is enabled and a task fails on an `onCategories` 
 
 This is a gate, not a router: `onCategories` is still the trigger, infrastructure failures still never escalate, and any Jev problem escalates as configured. Jev can only *decline* an escalation — it never adds one.
 
-`symphony doctor` reports which workflows are armed and whether the key is present.
+`symphony doctor` reports which workflows are armed and whether the key is present; a missing key halts the next `run` (exit `3`) until it is set or `jev.enabled` is turned off.
 
 ## Config
 

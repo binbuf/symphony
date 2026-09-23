@@ -64,7 +64,9 @@ export type JevProviderName = (typeof JEV_PROVIDERS)[number];
 /**
  * Optional Jev decision calls (TypeSafe's System One model) used as a fast fallback when a session
  * ends without a SYMPHONY_RESULT block: one cheap, typed classification instead of a whole resumed
- * nudge session. Off by default, and every failure path falls back to the existing nudge.
+ * nudge session. Off by default. When it is enabled but its API key is missing the run halts, so the
+ * misconfiguration cannot be missed; a timeout or a low-confidence answer still falls back to the
+ * deterministic path.
  */
 export interface JevConfig {
   /** Master switch for every Jev workflow below. */

@@ -104,7 +104,7 @@ export function runDoctor(i: DoctorInput): Check[] {
     const workflows = [j.resultFallback ? 'resultFallback' : undefined, j.failureTriage ? 'failureTriage' : undefined, j.escalationDecision ? 'escalationDecision' : undefined].filter(Boolean);
     const problem = jevProblem(j, process.env);
     const detail = `Jev [${workflows.join(', ') || 'no workflows'}] via ${j.provider} · ${j.model} (key from ${j.apiKeyEnv})`;
-    add('jev', problem ? 'warn' : 'ok', problem ? `Jev is on but ${problem}; the harness falls back to its deterministic paths. ${detail}` : detail);
+    add('jev', problem ? 'warn' : 'ok', problem ? `Jev is on but ${problem}; run halts until this is fixed (set ${j.apiKeyEnv}, or jev.enabled=false). ${detail}` : detail);
   }
 
   if (stopPresent(i.paths)) add('stop', 'warn', `${rel(i.paths.root, i.paths.stop)} present; run pauses until it is removed`);

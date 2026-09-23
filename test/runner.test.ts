@@ -699,3 +699,40 @@ test('with resultFallback off, a block-less session still nudges and Jev is not 
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
 });
+
+test('run halts when Jev is enabled but its API key is missing', async () => {
+  const { paths, task } = project();
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, jev: { ...DEFAULTS.jev, enabled: true } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  const saved = process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 3);
+    assert.equal(state.halted?.category, 'config');
+    assert.match(state.halted?.reason ?? '', /Jev is enabled but/);
+    assert.equal(state.tasks.T01, undefined); // no session ran
+  } finally {
+    if (saved !== undefined) process.env.OPENROUTER_API_KEY = saved;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('--dry-run previews while Jev is misconfigured without leaving a halt', async () => {
+  const { paths, task } = project();
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, jev: { ...DEFAULTS.jev, enabled: true } };
+  const ctx: RunContext = { paths, config, cli: {}, flags: { ...flags, dryRun: true }, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  const saved = process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    assert.equal(state.halted, undefined);
+    assert.equal(state.tasks.T01, undefined);
+  } finally {
+    if (saved !== undefined) process.env.OPENROUTER_API_KEY = saved;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
