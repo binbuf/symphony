@@ -18,7 +18,7 @@ import { parseResultBlock, type ResultBlock } from './result.js';
 import { canonicalId, patchRoadmapFile, type Roadmap } from './roadmap.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
 import { updatePipelineStatus } from './status.js';
-import { DONE_STATES, SKIP_STATES, acquireLock, newTaskState, releaseLock, saveState, startLockHeartbeat, type Halted, type LastError, type LogRef, type State, type TaskState, type TaskStatus } from './state.js';
+import { DONE_STATES, SKIP_STATES, acquireLock, haltResumeHint, newTaskState, releaseLock, saveState, startLockHeartbeat, type Halted, type LastError, type LogRef, type State, type TaskState, type TaskStatus } from './state.js';
 import type { Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, squash, stamp } from './util.js';
 import { runVerify } from './verify.js';
@@ -488,6 +488,10 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
 
     if (outcome.interrupted || ctx.interrupted) {
       const msg = `interrupted by ${ctx.signalName ?? 'signal'}`;
+      // A human stopping the run is not a task failure: give back the attempt this session consumed
+      // so repeated Ctrl-C during testing cannot exhaust `halt.maxAttemptsPerTask` and halt the run.
+      // The row is still recorded unfinished and retried next run.
+      st.attempts = Math.max(0, st.attempts - 1);
       final = { status: 'failed', summary: msg, lastError: { category: 'interrupted', message: msg, transient: true, fatal: false, at: nowIso() } };
       break;
     }
@@ -594,7 +598,7 @@ export function haltBanner(ctx: RunContext, h: Halted): void {
   ctx.log.banner('HALTED — symphony will not run more tasks', [
     `${h.taskId ? `${h.taskId} · ` : ''}${h.category}: ${h.reason}`,
     `at ${h.at}`,
-    'Fix the cause, then run: symphony clear-halt   (or: symphony run --clear-halt)',
+    haltResumeHint(h),
   ]);
 }
 

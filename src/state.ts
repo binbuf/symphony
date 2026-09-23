@@ -66,6 +66,18 @@ export interface TaskState {
 
 export interface Halted { at: string; taskId?: string; category: string; reason: string }
 
+/**
+ * The command that actually lifts a halt. An `attempts` halt is re-raised by the task-level failure
+ * gate on the very next run, so clearing the halt alone is not enough: the task's counter has to be
+ * reset too (`--retry`, or `reset`). Every other category is lifted by `clear-halt` alone.
+ */
+export function haltResumeHint(h: Halted): string {
+  if (h.category === 'attempts' && h.taskId) {
+    return `Fix the cause, then run: symphony run --clear-halt --retry --only ${h.taskId}   (or: symphony reset ${h.taskId})`;
+  }
+  return 'Fix the cause, then run: symphony clear-halt   (or: symphony run --clear-halt)';
+}
+
 export interface State {
   version: 1;
   halted?: Halted;

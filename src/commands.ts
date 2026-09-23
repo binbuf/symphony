@@ -8,7 +8,7 @@ import { taskLogPath } from './logs.js';
 import { rel, stopIgnoreEntry, stopPresent, type Paths } from './paths.js';
 import { PROGRESS_HEADER } from './prompt.js';
 import { canonicalId, patchRoadmapFile } from './roadmap.js';
-import { DONE_STATES, saveState, type LogRef, type State, type TaskState } from './state.js';
+import { DONE_STATES, haltResumeHint, saveState, type LogRef, type State, type TaskState } from './state.js';
 import { updatePipelineStatus } from './status.js';
 import type { Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDateTime, fmtDuration, nowIso, squash } from './util.js';
@@ -60,7 +60,7 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
     log.plain(JSON.stringify({ root: paths.root, set: activeSet ?? null, provider: config.provider, halted: state.halted ?? null, tasks: tasks.map((t) => ({ ...t, state: state.tasks[t.id] ?? null })) }, null, 2));
     return 0;
   }
-  if (state.halted) log.banner('HALTED', [`${state.halted.taskId ? `${state.halted.taskId} · ` : ''}${state.halted.category}: ${state.halted.reason}`, `at ${state.halted.at}`, 'symphony clear-halt to resume']);
+  if (state.halted) log.banner('HALTED', [`${state.halted.taskId ? `${state.halted.taskId} · ` : ''}${state.halted.category}: ${state.halted.reason}`, `at ${state.halted.at}`, haltResumeHint(state.halted)]);
 
   const rows: string[][] = [];
   for (const t of tasks) {

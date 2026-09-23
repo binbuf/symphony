@@ -160,7 +160,7 @@ docs/
 | `touch .stop` (path configurable) | pauses at the next boundary — before the next task, or after the current slice when a task is split via `continue` — exit `0`; nothing is killed, and a mid-continuation pause resumes the right slice next run. `touch .symphony/STOP` is the legacy alias |
 | commit fails (pre-commit hook, signing, `index.lock`) or a session switched branches | retried once; if it still fails the task is demoted to `failed` instead of recorded `done`, because its work did not land in git |
 | reported session cost crosses `maxCostUsdPerRun` | halts the run before the next task; `clear-halt` to continue |
-| Ctrl-C | kills the current session, records the task unfinished, exits `130`; press twice to force quit |
+| Ctrl-C | kills the current session, records the task unfinished, exits `130`; press twice to force quit. The interrupted attempt is given back, so repeated stops cannot exhaust `halt.maxAttemptsPerTask` |
 | another run already active | refuses to start, exit `4` (lock file holds the live pid and a heartbeat) |
 
 ### After the run: review and steer
@@ -173,7 +173,7 @@ docs/
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also `git revert`s its `T05:` commits (newest first) |
 | `reset --all` | clear every task's state and the halt, and reset every roadmap marker to `[ ]`, so a replaced or rewritten roadmap starts clean |
 | `replan [--direction FILE] [--allow-id-reuse] [--reset-state] [--dry-run]` | stop-and-pivot: let the agent rewrite the plan (roadmap, task files, design docs, a pivot ADR) for a new direction, reconcile state, and commit it as a docs change |
-| `clear-halt` | lift a halt so `run` can start again |
+| `clear-halt` | lift a halt so `run` can start again. For an `attempts` halt, add `--retry` (`run --clear-halt --retry --only T05`) or `reset T05`: clearing the halt alone leaves the task's failure counter at the limit, so the next run re-halts |
 
 `status` shows `running?` for a task whose recorded process is gone (harness crashed); the next `run` retries it. A human ticking `[x]` in `ROADMAP.md` is honoured by the next command that loads the project.
 
@@ -194,7 +194,7 @@ Everything that can happen to a task, and what you do about it.
 | 9 | fatal error (auth, billing, usage limit, model, config) | halts the whole run; sticky until cleared | halt banner in `status` | 3 | fix the cause, `clear-halt`, `run` |
 | 10 | 2 failures in a row / 3 attempts on one task | halts | halt banner in `status` | 3 | fix, `run --clear-halt --retry --only T05` |
 | 11 | `.stop` sentinel present | pauses at the next boundary (before a task, or after a `continue` slice); a mid-continuation pause is remembered and resumes the next slice | – | 0 | `rm .stop`, `run` |
-| 12 | Ctrl-C | kills the current session; task recorded unfinished (failed) | `[~] ⟵ failed` | 130 | `run` retries it |
+| 12 | Ctrl-C | kills the current session; task recorded unfinished (failed), without consuming an attempt | `[~] ⟵ failed` | 130 | `run` retries it |
 | 13 | second run while one is active | refuses to start | lock file with live pid | 4 | wait, or delete `.symphony/lock` if stale |
 | 14 | `maxIterationsPerTask` / `maxTasksPerRun` / budget hit | task fails gracefully, or the run processes only the first N tasks | task `failed` / rest `pending` | – | raise the limit, or split the task |
 | 15 | you tick `[x]` by hand | next load reconciles state to the roadmap tick | `[x]` | – | nothing |
@@ -323,7 +323,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also undoes its `T05:` commits (newest first) |
 | `reset --all` | clear every task's state and the halt, and reset every roadmap marker to `[ ]` |
 | `nudge T05 [--note "…"]` | resume a task's last session and ask it to close out with a result block |
-| `clear-halt` | lift a halt so `run` can start again |
+| `clear-halt` | lift a halt so `run` can start again. For an `attempts` halt, add `--retry` (`run --clear-halt --retry --only T05`) or `reset T05`: clearing the halt alone leaves the task's failure counter at the limit, so the next run re-halts |
 
 ### `run` flags
 

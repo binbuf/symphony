@@ -8,7 +8,7 @@ import { DEFAULTS } from '../src/config.js';
 import { currentBranch } from '../src/git.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths } from '../src/paths.js';
-import { runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
+import { haltBanner, runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
 import { loadState, newTaskState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
 
@@ -345,6 +345,47 @@ test('--dry-run previews the plan while halted without clearing the halt or runn
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
+});
+
+test('a Ctrl-C does not consume the task attempt budget, so it cannot trigger the attempts halt', async () => {
+  const { paths, task } = project();
+  const state: State = loadState(paths);
+  // maxAttemptsPerTask: 1 makes the regression sharp: a single counted interrupt would halt the run.
+  const config = { ...DEFAULTS, provider: 'fake' as const, halt: { ...DEFAULTS.halt, maxAttemptsPerTask: 1 } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: true, signalName: 'SIGINT', abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.interrupted, true);
+    assert.equal(state.tasks.T01.status, 'failed');
+    assert.equal(state.tasks.T01.lastError?.category, 'interrupted');
+    // The attempt the interrupted session consumed is given back.
+    assert.equal(state.tasks.T01.attempts, 0);
+
+    // A subsequent run must not re-halt on the attempts gate; it retries and finishes normally.
+    ctx.interrupted = false;
+    ctx.signalName = undefined;
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    assert.equal(state.halted, undefined);
+    assert.equal(state.tasks.T01.status, 'done');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('the halt banner points at --retry for an attempts halt (clear-halt alone would re-halt)', () => {
+  const seen: string[] = [];
+  const capture: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner(_title, lines) { seen.push(...lines); } };
+  const ctx = { log: capture } as RunContext;
+  haltBanner(ctx, { at: 'now', taskId: 'T03', category: 'attempts', reason: 'T03 has failed 3 times' });
+  const attemptsBanner = seen.join('\n');
+  assert.match(attemptsBanner, /--retry --only T03/);
+  assert.match(attemptsBanner, /symphony run --clear-halt/);
+  seen.length = 0;
+  haltBanner(ctx, { at: 'now', category: 'auth', reason: 'bad key' });
+  const authBanner = seen.join('\n');
+  assert.doesNotMatch(authBanner, /--retry/);
+  assert.match(authBanner, /symphony clear-halt/);
 });
 
 test('preflight fails when a later task uses a provider whose binary is missing', async () => {
