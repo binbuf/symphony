@@ -4,7 +4,7 @@ import { resolveWatch, type Config, type SessionSpec } from './config.js';
 import { readProgressContext } from './context.js';
 import { openRunSinks } from './logger.js';
 import { rel, type Paths } from './paths.js';
-import { getProvider } from './providers/index.js';
+import { getProvider, variantSupported } from './providers/index.js';
 import type { Provider } from './providers/types.js';
 import type { RunContext } from './runner.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
@@ -306,7 +306,7 @@ export function startPipelineWatch(ctx: RunContext): PipelineWatcher | undefined
   const w: Config['watch'] = ctx.config.watch;
   if (!w?.enabled) return undefined;
   const provider = getProvider(w.provider);
-  const { spec, warnings } = resolveWatch(ctx.config);
+  const { spec, warnings } = resolveWatch(ctx.config, variantSupported);
   warnings.forEach((m) => ctx.log.warn(`watch: ${m}`));
   const binary = resolveBinary(spec.bin, { env: process.env, cwd: ctx.paths.root });
   if (!existsSync(binary) && !resolveExecutable(spec.bin, process.env)) {

@@ -106,6 +106,11 @@ export interface WatchConfig {
   provider: ProviderName;
   /** Model the watcher runs (e.g. "openrouter/deepseek/deepseek-v4.1-flash"); empty = provider default. */
   model: string;
+  /**
+   * Optional reasoning-effort override for the watcher model. Unset = the provider's default, which
+   * avoids the synchronous provider-catalog lookup that validating a variant requires.
+   */
+  variant?: string;
   /** Hard wall clock for one check; on timeout the check is abandoned. */
   timeoutMin: number;
 }
@@ -562,6 +567,13 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         intervalMin: positiveOr(watchRaw.intervalMin, DEFAULTS.watch.intervalMin, 'watch.intervalMin', warnings),
         provider,
         model,
+        variant: (() => {
+          const v = watchRaw.variant;
+          if (v === undefined || v === null) return undefined;
+          if (typeof v === 'string') return v.trim() || undefined;
+          warnings.push(`watch.variant: expected a string, got ${JSON.stringify(v)}; using provider default`);
+          return undefined;
+        })(),
         timeoutMin: positiveOr(watchRaw.timeoutMin, DEFAULTS.watch.timeoutMin, 'watch.timeoutMin', warnings),
       };
     })(),
@@ -760,16 +772,25 @@ export function resolveEscalation(
 /**
  * The read-only pipeline-watch spec. Unlike a task it ignores CLI flags, env and front matter: the
  * watcher's provider/model come from the `watch` block alone so it can be a different, cheaper model
- * than the workhorse. Deliberately does not resolve a reasoning-effort variant: the watcher is a
- * short summarizer, and skipping it avoids a synchronous provider-catalog lookup at run start. Pinned
- * to `autoApprove: false` so a mis-prompted watcher cannot edit the tree.
+ * than the workhorse. A variant is only resolved when `watch.variant` is set explicitly — that keeps
+ * the common case free of the synchronous provider-catalog lookup a variant check needs, and lets the
+ * watcher default to the provider's own reasoning effort. Pinned to `autoApprove: false` so a
+ * mis-prompted watcher cannot edit the tree.
  */
-export function resolveWatch(config: Config): { spec: SessionSpec; warnings: string[] } {
+export function resolveWatch(
+  config: Config,
+  variantSupport: (p: ProviderName, bin: string, model: string | undefined, variant: string) => boolean = () => false,
+): { spec: SessionSpec; warnings: string[] } {
   const w = config.watch;
   const warnings: string[] = [];
   const providerName = w.provider;
   const pc = config.providers[providerName];
   const model = w.model.trim() || pc.model;
+  let variant = w.variant;
+  if (variant && !variantSupport(providerName, pc.bin, model, variant)) {
+    warnings.push(`${providerName}${model ? ` model ${model}` : ''} does not support variant "${variant}" (watch.variant); using provider default`);
+    variant = undefined;
+  }
   if (providerName === 'opencode' && model && !model.includes('/')) {
     warnings.push(`opencode models are "provider/model" (e.g. openrouter/deepseek/deepseek-v4.1-flash); watch.model got "${model}"`);
   }
@@ -778,13 +799,13 @@ export function resolveWatch(config: Config): { spec: SessionSpec; warnings: str
       providerName,
       bin: pc.bin,
       model: model || undefined,
-      variant: undefined,
+      variant,
       extraArgs: pc.extraArgs,
       budgetUsd: undefined,
       timeoutMin: w.timeoutMin,
       idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
       autoApprove: false,
-      sources: { provider: 'watch', model: 'watch', variant: 'provider default' },
+      sources: { provider: 'watch', model: 'watch', variant: variant ? 'watch' : 'provider default' },
     },
     warnings,
   };
