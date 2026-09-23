@@ -13,6 +13,7 @@ coverage/
 runs/
 state.json
 symphony.log
+watch.log
 lock
 STOP
 symphony.config.json

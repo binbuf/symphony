@@ -93,6 +93,24 @@ export interface JevConfig {
 }
 
 /**
+ * Optional "pipeline watch": a separate, read-only LLM session the harness runs on a timer while a
+ * run is in flight. It summarizes recent progress and the overall health of the pipeline into the
+ * TUI's top panel and a dedicated log. On by default; a failure never affects the run itself.
+ */
+export interface WatchConfig {
+  /** Master switch. */
+  enabled: boolean;
+  /** How often to check, in minutes (the first check lands one interval after the run starts). */
+  intervalMin: number;
+  /** Provider the watcher runs on; independent of the run's provider. */
+  provider: ProviderName;
+  /** Model the watcher runs (e.g. "openrouter/deepseek/deepseek-v4.1-flash"); empty = provider default. */
+  model: string;
+  /** Hard wall clock for one check; on timeout the check is abandoned. */
+  timeoutMin: number;
+}
+
+/**
  * A named, independent task set. It has its own roadmap, tasks, progress, design and logs, plus
  * harness state isolated under `.symphony/sets/<name>/`, so task ids never collide with another set.
  * The base docs package stays the default; a set runs only when selected with `--set <name>`.
@@ -158,6 +176,8 @@ export interface Config {
   escalation: EscalationConfig;
   /** Optional Jev decision calls as a nudge fallback. See JevConfig. */
   jev: JevConfig;
+  /** Periodic read-only progress/health summary in the TUI. See WatchConfig. */
+  watch: WatchConfig;
 }
 
 export interface CliOverrides {
@@ -236,6 +256,13 @@ export const DEFAULTS: Config = {
     timeoutMs: 4000,
     minConfidence: 0.7,
     acceptStatuses: ['done', 'continue'],
+  },
+  watch: {
+    enabled: true,
+    intervalMin: 5,
+    provider: 'opencode',
+    model: 'openrouter/deepseek/deepseek-v4.1-flash',
+    timeoutMin: 5,
   },
 };
 
@@ -396,6 +423,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const gitRaw = isRecord(raw.git) ? raw.git : {};
   const escRaw = isRecord(raw.escalation) ? raw.escalation : {};
   const jevRaw = isRecord(raw.jev) ? raw.jev : {};
+  const watchRaw = isRecord(raw.watch) ? raw.watch : {};
 
   const config: Config = {
     provider: raw.provider === undefined ? DEFAULTS.provider : asProviderName(raw.provider, 'symphony.config.json provider'),
@@ -512,6 +540,29 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
           return n;
         })(),
         acceptStatuses,
+      };
+    })(),
+    watch: (() => {
+      const model = typeof watchRaw.model === 'string' && watchRaw.model.trim() ? watchRaw.model.trim() : DEFAULTS.watch.model;
+      let provider = DEFAULTS.watch.provider;
+      if (watchRaw.provider !== undefined && watchRaw.provider !== null) {
+        if (typeof watchRaw.provider === 'string' && (PROVIDER_NAMES as string[]).includes(watchRaw.provider)) {
+          provider = watchRaw.provider as ProviderName;
+        } else {
+          warnings.push(`watch.provider: expected one of ${PROVIDER_NAMES.join(', ')}, got ${JSON.stringify(watchRaw.provider)}; using ${DEFAULTS.watch.provider}`);
+        }
+      }
+      let enabled = boolOr(watchRaw.enabled, DEFAULTS.watch.enabled, 'watch.enabled', warnings);
+      if (enabled && !model) {
+        warnings.push('watch.enabled is true but watch.model is empty and the provider declares none; pipeline watch stays off');
+        enabled = false;
+      }
+      return {
+        enabled,
+        intervalMin: positiveOr(watchRaw.intervalMin, DEFAULTS.watch.intervalMin, 'watch.intervalMin', warnings),
+        provider,
+        model,
+        timeoutMin: positiveOr(watchRaw.timeoutMin, DEFAULTS.watch.timeoutMin, 'watch.timeoutMin', warnings),
       };
     })(),
   };
@@ -701,6 +752,39 @@ export function resolveEscalation(
       idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
       autoApprove: config.autoApprove,
       sources: { provider: 'escalation', model: 'escalation', variant: variant ? 'config' : 'provider default' },
+    },
+    warnings,
+  };
+}
+
+/**
+ * The read-only pipeline-watch spec. Unlike a task it ignores CLI flags, env and front matter: the
+ * watcher's provider/model come from the `watch` block alone so it can be a different, cheaper model
+ * than the workhorse. Deliberately does not resolve a reasoning-effort variant: the watcher is a
+ * short summarizer, and skipping it avoids a synchronous provider-catalog lookup at run start. Pinned
+ * to `autoApprove: false` so a mis-prompted watcher cannot edit the tree.
+ */
+export function resolveWatch(config: Config): { spec: SessionSpec; warnings: string[] } {
+  const w = config.watch;
+  const warnings: string[] = [];
+  const providerName = w.provider;
+  const pc = config.providers[providerName];
+  const model = w.model.trim() || pc.model;
+  if (providerName === 'opencode' && model && !model.includes('/')) {
+    warnings.push(`opencode models are "provider/model" (e.g. openrouter/deepseek/deepseek-v4.1-flash); watch.model got "${model}"`);
+  }
+  return {
+    spec: {
+      providerName,
+      bin: pc.bin,
+      model: model || undefined,
+      variant: undefined,
+      extraArgs: pc.extraArgs,
+      budgetUsd: undefined,
+      timeoutMin: w.timeoutMin,
+      idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
+      autoApprove: false,
+      sources: { provider: 'watch', model: 'watch', variant: 'provider default' },
     },
     warnings,
   };

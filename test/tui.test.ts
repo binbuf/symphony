@@ -14,7 +14,7 @@ import { TuiApp } from '../src/tui/app.js';
 import { runWithTui } from '../src/tui/index.js';
 import { KeyParser } from '../src/tui/keys.js';
 import { AnsiTerminal } from '../src/tui/terminal.js';
-import { displayWidth, fit, padTo, sliceColumns, splice, stripAnsi } from '../src/tui/text.js';
+import { displayWidth, fit, padTo, sliceColumns, splice, stripAnsi, wrapText } from '../src/tui/text.js';
 
 const task = (id: string, num: number, phase = 'Phase 1'): Task => ({ id, num, title: `Task ${num}`, phase, order: num - 1, meta: {} });
 
@@ -39,6 +39,13 @@ test('text: display width, slicing, fitting and overlaying account for wide char
   assert.equal(padTo('ab', 5), 'ab   ');
   assert.equal(splice('abcdefgh', 'XY', 3, 8), 'abcXYfgh');
   assert.equal(stripAnsi('\x1b[1mhi\x1b[0m'), 'hi');
+});
+
+test('text: wrapText wraps on spaces, hard-slices long words, and ellipsizes the overflow', () => {
+  assert.deepEqual(wrapText('one two three four', 7, 2).map((s) => s.trimEnd()), ['one two', 'three…']);
+  assert.deepEqual(wrapText('short', 10, 2).map((s) => s.trimEnd()), ['short']);
+  assert.deepEqual(wrapText('abcdefghij', 4, 3).map((s) => s.trimEnd()), ['abcd', 'efgh', 'ij']);
+  assert.deepEqual(wrapText('   ', 5, 2), []);
 });
 
 test('keys: decodes arrows, paging, modifiers, control keys and split sequences', () => {
@@ -100,6 +107,28 @@ test('TuiApp.renderLines produces a fixed-size frame with both panels and the me
   assert.match(text, /task T02 \d\d:\d\d:\d\d/);
   assert.match(text, /1\/2 done/);
   assert.match(text, /q quit/);
+});
+
+test('TuiApp renders the pipeline-watch panel above the status table', () => {
+  const tasks = [task('T01', 1)];
+  const state: State = { version: 1, tasks: { T01: { ...newTaskState('t1'), status: 'running', attempts: 1, durationS: 5, started: new Date().toISOString() } } };
+  const ctx = makeCtx(tasks, state);
+  ctx.watch = { status: 'waiting', enabled: true, intervalMin: 5, provider: 'opencode', model: 'x', nextAt: Date.now() + 300_000, checks: 0 };
+  const app = new TuiApp(ctx, new AnsiTerminal(() => {}));
+  const lines = app.renderLines(100, 24);
+  assert.equal(lines.length, 24);
+  for (const l of lines) assert.equal(displayWidth(l), 100);
+  const text = stripAnsi(lines.join('\n'));
+  assert.match(text, /Pipeline watch/);
+  assert.match(text, /Waiting for updates/);
+  // The watch strip is the first pane; the status table sits directly below it.
+  assert.match(stripAnsi(lines[0]), /Pipeline watch/);
+  assert.match(stripAnsi(lines[3]), /Status/);
+
+  ctx.watch = { status: 'ready', enabled: true, intervalMin: 5, provider: 'opencode', model: 'x', summary: 'On track: T01 is running normally.', updatedAt: new Date().toISOString(), checks: 2 };
+  const ready = stripAnsi(app.renderLines(100, 24).join('\n'));
+  assert.match(ready, /On track: T01 is running normally\./);
+  assert.match(ready, /2 updates/);
 });
 
 test('TuiApp tails the live output and honours the panel split', () => {

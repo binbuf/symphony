@@ -6,7 +6,7 @@ symphony lives in `<your target project>/.symphony/` (gitignored) and reads its 
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Pipeline watch](#pipeline-watch) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -154,6 +154,7 @@ docs/
 When `run` starts with stdout **and** stdin attached to a terminal, it opens a full-screen view instead of scrolling output:
 
 - **Status** (top panel) — the same table as `symphony status`, refreshed from live state: id, phase, title, status, attempts, duration, start/end, cost, provider, model, summary. A task split across sessions or retried lists its per-session rows beneath it.
+- **Pipeline watch** (strip above the status table, when enabled) — a separate read-only model's latest summary of recent developments and overall pipeline health, refreshed on a timer (see [Pipeline watch](#pipeline-watch)). It reads `Waiting for updates — first check in m:ss` until the first check lands.
 - **Live output** (bottom panel) — exactly what `run` streams today: harness `INFO`/`WARN`/`ERROR` lines and the provider's `[think]`/`[text]`/`[tool]`/`[result]` stream, tailing by default.
 - **Status bar** — pipeline progress and duration, the current task and its elapsed time, reported cost, provider/model, and any `PAUSED`/`HALTED`/`blocked` badge, with the key hints beneath.
 
@@ -171,6 +172,7 @@ Each panel scrolls independently, vertically and horizontally. The view turns it
 | `a` | accept the selected blocked/failed task (asks for confirmation) |
 | `c` | clear a halt (asks for confirmation); after a halt the view stays open, so `c` clears it and restarts |
 | `p` | pause / resume by toggling the `.stop` sentinel |
+| `w` | run a pipeline-watch check now |
 | `z` | cycle layout: both panels · status only · output only |
 | `[` `]` (or `-` `+`) | adjust the panel split |
 
@@ -476,6 +478,28 @@ This is a gate, not a router: `onCategories` is still the trigger, infrastructur
 
 `symphony doctor` reports which workflows are armed and whether the key is present; a missing key halts the next `run` (exit `3`) until it is set or `jev.enabled` is turned off.
 
+## Pipeline watch
+
+While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: five minutes after the pipeline kicks off, and every `watch.intervalMin` thereafter, the harness assembles a self-contained snapshot — pipeline counts, the task list with statuses, the most recent task outcomes, the halted banner if any, and the recent `PROGRESS.md` context — and asks the watcher model for two to four sentences on what just changed and the overall health of the pipeline.
+
+The latest answer is shown in the TUI's **Pipeline watch** strip (above the status table) and every check is appended to `.symphony/watch.log` with the snapshot and a link to the session's raw files. The strip shows `Waiting for updates — first check in m:ss` until the first check returns; press `w` to run one immediately.
+
+The watcher is *advisory only*: it never edits the tree (the harness pins `autoApprove: false` and inlines everything the model needs so it does not have to read files), a failed or timed-out check just updates the panel, and a missing watcher binary disables it with a warning — the run is never blocked or halted by it.
+
+Configure it with the `watch` block; the provider and model are independent of the run's, so the watcher can be a cheaper model:
+
+```json
+"watch": {
+  "enabled": true,
+  "intervalMin": 5,
+  "provider": "opencode",
+  "model": "openrouter/deepseek/deepseek-v4.1-flash",
+  "timeoutMin": 5
+}
+```
+
+Set `"enabled": false` to turn it off. The panel appears once the watcher is armed (or, if its provider binary is missing, shows the error while the run continues), and the timer starts after preflight passes — not during `--dry-run`, `prepare`, or an empty run.
+
 ## Config
 
 Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags and environment variables override it per run. Keys beginning with `_` are ignored, so you can leave notes in the file — the example uses `_models` to point at [Models.md](Models.md).
@@ -514,6 +538,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
 | `escalation.enabled`, `.provider`, `.model`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
+| `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.timeoutMin` | `true`, `5`, `opencode`, `openrouter/deepseek/deepseek-v4.1-flash`, `5` | periodic read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
 
 ## Hooks
@@ -542,6 +567,8 @@ docs/INDEX.md                                  generated repo map, rewritten bef
 .symphony/runs/T05-20260917T231530.log         rendered [think]/[text]/[tool] stream, longer lines than stdout
 .symphony/runs/T05-20260917T231530.prompt.md   the exact prompt sent
 .symphony/runs/prepare-<stamp>.*               the prepare session, same three files
+.symphony/runs/watch-<stamp>.*                 each pipeline-watch check, same three files
+.symphony/watch.log                            append-only pipeline-watch summaries: one section per check, with its snapshot
 .symphony/symphony.log                         harness events: task start/finish, retries, halts, commits
 .symphony/state.json                           per-task state and the halt flag; delete it and progress is rebuilt from the roadmap markers
 ```

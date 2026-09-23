@@ -94,6 +94,13 @@
       "continue"
     ]
   },
+  "watch": {
+    "enabled": true,
+    "intervalMin": 5,
+    "provider": "opencode",
+    "model": "openrouter/deepseek/deepseek-v4.1-flash",
+    "timeoutMin": 5
+  },
   "retry": {
     "maxAttempts": 3,
     "backoffSec": [

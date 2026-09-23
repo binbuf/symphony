@@ -116,3 +116,42 @@ export function splice(frameLine: string, boxLine: string, left: number, cols: n
   const after = sliceColumns(plain, left + boxWidth, Math.max(0, cols - left - boxWidth));
   return padTo(before + boxLine + after, cols);
 }
+
+/** Greedily wrap plain text to `width` columns, hard-slicing words that are longer than a line. */
+function wrapAll(text: string, width: number): string[] {
+  const words = text.split(' ').filter(Boolean);
+  const lines: string[] = [];
+  let cur = '';
+  for (const word of words) {
+    const candidate = cur ? `${cur} ${word}` : word;
+    if (displayWidth(candidate) <= width) { cur = candidate; continue; }
+    if (cur) { lines.push(cur); cur = ''; }
+    let rest = word;
+    while (displayWidth(rest) > width) {
+      let take = '';
+      for (const ch of rest) {
+        if (displayWidth(take + ch) > width) break;
+        take += ch;
+      }
+      lines.push(take);
+      rest = [...rest].slice([...take].length).join('');
+    }
+    cur = rest;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+/**
+ * Wrap text to at most `maxLines` lines of `width` columns, appending an ellipsis when it does not
+ * fit. Whitespace is collapsed first, so the result is safe to drop into a single panel body.
+ */
+export function wrapText(text: string, width: number, maxLines: number): string[] {
+  const plain = stripAnsi(text).replace(/\s+/g, ' ').trim();
+  if (!plain || width <= 0 || maxLines <= 0) return [];
+  const all = wrapAll(plain, width);
+  if (all.length <= maxLines) return all.map((l) => fit(l, width));
+  const kept = all.slice(0, maxLines);
+  kept[maxLines - 1] = fit(`${sliceColumns(kept[maxLines - 1], 0, Math.max(0, width - 1))}…`, width);
+  return kept;
+}

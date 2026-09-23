@@ -6,7 +6,9 @@ import { saveState } from '../state.js';
 import { buildStatusTable, formatStatusRow, statusColumnWidths, type StatusTable } from '../status.js';
 import type { Key } from './keys.js';
 import { AnsiTerminal } from './terminal.js';
-import { displayWidth, fit, padTo, sliceColumns, splice } from './text.js';
+import { displayWidth, fit, padTo, sliceColumns, splice, wrapText } from './text.js';
+import { fmtTime } from '../util.js';
+import type { WatchState } from '../watch.js';
 
 const C = {
   reset: '\x1b[0m', dim: '\x1b[2m', bold: '\x1b[1m', inv: '\x1b[7m',
@@ -17,6 +19,8 @@ const STREAM_MAX = 5000;
 const TABLE_TTL_MS = 250;
 const TOAST_MS = 5000;
 const BAR_ROWS = 2;
+/** Height of the pipeline-watch panel (a title line plus two body lines). */
+const WATCH_ROWS = 3;
 
 export type Layout = 'both' | 'top' | 'bottom';
 
@@ -37,6 +41,19 @@ export function fmtClock(seconds?: number): string {
   if (seconds === undefined || !Number.isFinite(seconds)) return '--:--:--';
   const s = Math.max(0, Math.round(seconds));
   return `${pad2(Math.floor(s / 3600))}:${pad2(Math.floor((s % 3600) / 60))}:${pad2(s % 60)}`;
+}
+
+/** `m:ss` until `at` (epoch ms), used for the watch panel's next-check countdown. */
+function fmtCountdown(at: number): string {
+  const s = Math.max(0, Math.round((at - Date.now()) / 1000));
+  return `${Math.floor(s / 60)}:${pad2(s % 60)}`;
+}
+
+/** Local HH:MM:SS for an ISO stamp, for the watch panel's "updated" label. */
+function fmtIsoClock(iso?: string): string {
+  if (!iso) return '--:--:--';
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime()) ? fmtTime(d) : '--:--:--';
 }
 
 function progressBar(done: number, total: number, width: number): string {
@@ -222,6 +239,7 @@ export class TuiApp {
     if (char === 'a') return this.openAccept();
     if (char === 'c') return this.openClearHalt();
     if (char === 'p') return this.togglePause();
+    if (char === 'w') return this.refreshWatch();
     if (char === 'z') return this.cycleLayout();
     if (char === '[' || char === '-') return this.adjustSplit(-0.05);
     if (char === ']' || char === '+') return this.adjustSplit(0.05);
@@ -318,6 +336,15 @@ export class TuiApp {
     this.render();
   }
 
+  /** Ask the pipeline watcher to run a check immediately (the next scheduled one is unchanged). */
+  private refreshWatch(): void {
+    if (!this.ctx.watch) return this.toast('pipeline watch is off');
+    if (!this.ctx.watchRefresh) return this.toast('pipeline watch is not running');
+    this.toast('pipeline watch: checking now…');
+    this.ctx.watchRefresh();
+    this.render();
+  }
+
   // ---------------------------------------------------------------- scrolling
 
   private cycleFocus(dir: number): void {
@@ -392,7 +419,7 @@ export class TuiApp {
 
   private focusBodyHeight(): number {
     const { rows } = this.term.size();
-    const { top, bottom } = this.panelHeights(rows - BAR_ROWS);
+    const { top, bottom } = this.panelHeights(rows - BAR_ROWS - this.watchRows());
     return this.focus === 'status' ? Math.max(1, top - 2) : Math.max(1, bottom - 1);
   }
 
@@ -435,11 +462,19 @@ export class TuiApp {
 
   renderLines(cols: number, rows: number): string[] {
     const out = new Array<string>(rows).fill(' '.repeat(cols));
-    const { top, bottom } = this.panelHeights(rows - BAR_ROWS);
+    const watchRows = this.watchRows(rows);
+    const { top, bottom } = this.panelHeights(rows - BAR_ROWS - watchRows);
     const table = this.table();
     const widths = statusColumnWidths(table);
 
     let y = 0;
+    if (watchRows > 0) {
+      const lines = this.watchPanelLines(cols);
+      for (let i = 0; i < watchRows && i < lines.length; i++) out[y++] = lines[i];
+      y = watchRows;
+    }
+
+    const statusTop = y;
     if (top > 0) {
       out[y++] = this.panelTitle('Status', this.statusTitleRight(table), cols, this.focus === 'status');
       const header = formatStatusRow(table.head, widths);
@@ -456,7 +491,7 @@ export class TuiApp {
         if (table.rowTask[idx] === selectedId) line = `${C.inv}${line}${C.reset}`;
         out[y++] = line;
       }
-      y = top;
+      y = statusTop + top;
     }
 
     if (bottom > 0) {
@@ -505,6 +540,50 @@ export class TuiApp {
     return `${mode} · ${this.stream.length} lines`;
   }
 
+  // ---------------------------------------------------------------- pipeline watch panel
+
+  /** The watch panel only exists once the watcher is running (or has failed to start). */
+  private watchRows(rows = this.term.size().rows): number {
+    if (!this.ctx.watch) return 0;
+    // Never let the strip crowd out the status table on a very short terminal.
+    return Math.max(0, Math.min(WATCH_ROWS, rows - BAR_ROWS - 2));
+  }
+
+  private watchTitleRight(w: WatchState): string {
+    if (w.status === 'waiting') return w.nextAt !== undefined ? `next in ${fmtCountdown(w.nextAt)}` : 'waiting';
+    if (w.status === 'running') return 'checking…';
+    if (w.status === 'error') return `error${w.nextAt !== undefined ? ` · retry in ${fmtCountdown(w.nextAt)}` : ''}`;
+    return `${w.checks} update${w.checks === 1 ? '' : 's'} · ${fmtIsoClock(w.updatedAt)}`;
+  }
+
+  private watchPanelLines(cols: number): string[] {
+    const w = this.ctx.watch!;
+    const lines = [this.panelTitle('Pipeline watch', this.watchTitleRight(w), cols, false)];
+    const bodyRows = WATCH_ROWS - 1;
+    const bodyWidth = Math.max(1, cols - 1);
+    let text: string;
+    let color: string;
+    if (w.status === 'waiting') {
+      text = `Waiting for updates${w.nextAt !== undefined ? ` — first check in ${fmtCountdown(w.nextAt)}` : ''}`;
+      color = C.dim;
+    } else if (w.status === 'running') {
+      text = w.summary ? `${w.summary}  ·  checking for updates…` : 'Checking pipeline health…';
+      color = C.yellow;
+    } else if (w.status === 'error') {
+      text = w.summary ? `${w.summary}  ·  watch error: ${w.error ?? 'unknown'}` : `Watch error: ${w.error ?? 'unknown'}`;
+      color = C.red;
+    } else {
+      text = w.summary ?? '';
+      color = C.green;
+    }
+    const wrapped = wrapText(text, bodyWidth, bodyRows);
+    for (let i = 0; i < bodyRows; i++) {
+      const body = wrapped[i];
+      lines.push(padTo(body ? `${color} ${body}${C.reset}` : '', cols));
+    }
+    return lines;
+  }
+
   private metricsLine(table: StatusTable): string {
     const s = table.summary;
     const pct = s.total > 0 ? Math.round((s.done / s.total) * 100) : 0;
@@ -526,7 +605,7 @@ export class TuiApp {
 
   private hintsLine(): string {
     if (this.haltMode) return 'c clear halt & retry · q quit · ↑↓ scroll · Tab focus';
-    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · c clear-halt · p pause · z zoom · [ ] split';
+    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · c clear-halt · p pause · w watch · z zoom · [ ] split';
     return base;
   }
 
@@ -555,11 +634,13 @@ export class TuiApp {
         'a            accept the selected blocked/failed task',
         'c            clear a halt (asks for confirmation)',
         'p            pause / resume (toggles the .stop sentinel)',
+        'w            run a pipeline-watch check now',
         'z            cycle layout: both / status only / output only',
         '[ ]  or  - + adjust the panel split',
         '',
         'Status: header stays put, rows scroll vertically and pan horizontally.',
         'Live output tails by default; scroll up to pause, s to resume following.',
+        'Pipeline watch (top strip): a separate read-only model summarizes progress and health.',
       ],
     };
   }

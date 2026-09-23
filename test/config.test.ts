@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { DEFAULTS, findTaskSet, loadConfig, resolveEscalation, resolveSession, resolveVerify } from '../src/config.js';
+import { DEFAULTS, findTaskSet, loadConfig, resolveEscalation, resolveSession, resolveVerify, resolveWatch } from '../src/config.js';
 import { resolvePaths, taskSetOverrides } from '../src/paths.js';
 import type { Task } from '../src/tasks.js';
 
@@ -405,4 +405,37 @@ test('jev config parses, defaults to OpenRouter with jev-latest, and validates i
   assert.ok(bad.warnings.some((w) => /jev\.provider/.test(w)));
   assert.ok(bad.warnings.some((w) => /jev\.minConfidence/.test(w)));
   assert.ok(bad.warnings.some((w) => /jev\.acceptStatuses/.test(w)));
+});
+
+test('watch config is on by default every 5 min on OpenCode, parses overrides, and validates keys', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-watchcfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  assert.equal(DEFAULTS.watch.enabled, true);
+  assert.equal(DEFAULTS.watch.intervalMin, 5);
+  assert.equal(DEFAULTS.watch.provider, 'opencode');
+  assert.equal(DEFAULTS.watch.model, 'openrouter/deepseek/deepseek-v4.1-flash');
+  assert.equal(loadConfig(paths, {}).config.watch.enabled, true);
+
+  writeFileSync(paths.config, JSON.stringify({ watch: { enabled: false, intervalMin: 10, provider: 'codex', model: 'gpt-5', timeoutMin: 3 } }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.watch.enabled, false);
+  assert.equal(config.watch.intervalMin, 10);
+  assert.equal(config.watch.provider, 'codex');
+  assert.equal(config.watch.model, 'gpt-5');
+  assert.equal(config.watch.timeoutMin, 3);
+  assert.equal(warnings.length, 0);
+
+  writeFileSync(paths.config, JSON.stringify({ watch: { provider: 'nope', intervalMin: 0 } }));
+  const bad = loadConfig(paths, {});
+  assert.equal(bad.config.watch.provider, DEFAULTS.watch.provider);
+  assert.equal(bad.config.watch.intervalMin, DEFAULTS.watch.intervalMin);
+  assert.ok(bad.warnings.some((w) => /watch\.provider/.test(w)));
+  assert.ok(bad.warnings.some((w) => /watch\.intervalMin/.test(w)));
+
+  // resolveWatch builds a read-only spec from the watch block alone.
+  const rw = resolveWatch({ ...DEFAULTS, watch: { ...DEFAULTS.watch, provider: 'fake', model: '', timeoutMin: 2 } });
+  assert.equal(rw.spec.providerName, 'fake');
+  assert.equal(rw.spec.autoApprove, false);
+  assert.equal(rw.spec.timeoutMin, 2);
 });

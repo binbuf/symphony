@@ -70,6 +70,10 @@ Controls
                            (nothing is killed); configurable via paths.stop
   touch .symphony/STOP     legacy alias for the above
   Ctrl-C                   stop the current session, record it as unfinished, exit 130
+  pipeline watch           while the run is in flight, a separate read-only model summarizes recent
+                           progress and pipeline health into the TUI's top strip and
+                           .symphony/watch.log every watch.intervalMin (default 5 min, on by default;
+                           press w in the TUI to check now). Configure via the "watch" config block.
 
 Exit codes: 0 ok/paused · 1 unexpected error · 2 stopped on a blocked/failed task · 3 halted · 4 usage/preflight · 130/143 interrupted
 Every option also applies to the project given by --root DIR (default: the directory containing .symphony/).
