@@ -125,6 +125,9 @@ test('TuiApp renders the pipeline-watch panel above the status table', () => {
   const text = stripAnsi(lines.join('\n'));
   assert.match(text, /Pipeline watch/);
   assert.match(text, /Waiting for updates/);
+  // One countdown only, on the right of the title — not repeated in the body.
+  assert.match(text, /next in \d+:\d\d/);
+  assert.doesNotMatch(text, /first check in/);
   // The watch strip is the first pane; the status table sits directly below it.
   assert.match(stripAnsi(lines[0]), /Pipeline watch/);
   assert.match(stripAnsi(lines[3]), /Status/);

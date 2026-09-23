@@ -79,6 +79,21 @@ test('a task that reports continue is re-run in a fresh session until done, comm
   }
 });
 
+test('a task ending triggers a pipeline-watch refresh (in addition to the interval)', async () => {
+  const { paths, task } = project();
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 3 };
+  let refreshes = 0;
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), watchRefresh: () => { refreshes += 1; } };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(refreshes, 1, 'one watch refresh fires when the ticket ends');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
 test('continuation is bounded by maxContinuations and ends failed', async () => {
   const { dir, paths, task } = project();
   // Both the first and every continuation session report continue, so the bound is reached.

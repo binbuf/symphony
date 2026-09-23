@@ -154,7 +154,7 @@ docs/
 When `run` starts with stdout **and** stdin attached to a terminal, it opens a full-screen view instead of scrolling output:
 
 - **Status** (top panel) — the same table as `symphony status`, refreshed from live state: id, phase, title, status, attempts, duration, start/end, cost, provider, model, summary. A task split across sessions or retried lists its per-session rows beneath it.
-- **Pipeline watch** (strip above the status table, when enabled) — a separate read-only model's latest summary of recent developments and overall pipeline health, refreshed on a timer (see [Pipeline watch](#pipeline-watch)). It reads `Waiting for updates — first check in m:ss` until the first check lands.
+- **Pipeline watch** (strip above the status table, when enabled) — a separate read-only model's latest summary of the most recent ticket first, then overall pipeline health, refreshed on a timer and whenever a task ends (see [Pipeline watch](#pipeline-watch)). It reads `Waiting for updates` until the first check lands, with the countdown to that check on the right of the title.
 - **Live output** (bottom panel) — exactly what `run` streams today: harness `INFO`/`WARN`/`ERROR` lines and the provider's `[think]`/`[text]`/`[tool]`/`[result]` stream, tailing by default.
 - **Status bar** — pipeline progress and duration, the current task and its elapsed time, reported cost, provider/model, and any `PAUSED`/`HALTED`/`blocked` badge, with the key hints beneath. A transient task-status toast (e.g. `T02 → running`) briefly takes the metrics row; the key-hints row always stays put.
 
@@ -480,9 +480,9 @@ This is a gate, not a router: `onCategories` is still the trigger, infrastructur
 
 ## Pipeline watch
 
-While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: five minutes after the pipeline kicks off, and every `watch.intervalMin` thereafter, the harness assembles a self-contained snapshot — pipeline counts, the task list with statuses, the most recent task outcomes, the halted banner if any, and the recent `PROGRESS.md` context — and asks the watcher model for two to four sentences on what just changed and the overall health of the pipeline.
+While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: the harness assembles a self-contained snapshot — the currently running ticket, the most recent task outcomes, the recent `PROGRESS.md` context, the pipeline counts and task list, and the halted banner if any — and asks the watcher model for two to four sentences. A check runs every `watch.intervalMin`, **and again each time a task ends**, so the summary leads with the ticket that just moved rather than the pipeline's overall health (which only becomes the useful headline once the pipeline has progressed).
 
-The latest answer is shown in the TUI's **Pipeline watch** strip (above the status table) and every check is appended to `.symphony/watch.log` with the snapshot and a link to the session's raw files. The strip shows `Waiting for updates — first check in m:ss` until the first check returns; press `w` to run one immediately.
+The latest answer is shown in the TUI's **Pipeline watch** strip (above the status table) and every check is appended to `.symphony/watch.log` with the snapshot and a link to the session's raw files. The strip shows `Waiting for updates` until the first check returns, with the countdown to the first check on the right of the title; press `w` to run one immediately.
 
 The watcher is *advisory only*: it never edits the tree (the harness pins `autoApprove: false` and inlines everything the model needs so it does not have to read files), a failed or timed-out check just updates the panel, and a missing watcher binary disables it with a warning — the run is never blocked or halted by it.
 
@@ -540,7 +540,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
 | `escalation.enabled`, `.provider`, `.model`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
-| `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `openrouter/deepseek/deepseek-v4.1-flash`, –, `5` | periodic read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
+| `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `openrouter/deepseek/deepseek-v4.1-flash`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
 
 ## Hooks

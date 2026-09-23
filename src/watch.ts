@@ -89,8 +89,9 @@ export function pipelineSnapshot(ctx: RunContext): string {
 
 /**
  * The watcher prompt: a fully self-contained snapshot so the model can answer without tools (and so
- * the watcher never needs write access). Kept short: counts, the task list, recent outcomes and the
- * recent PROGRESS.md context.
+ * the watcher never needs write access). Kept short, and ordered newest-first: the running/recent
+ * ticket leads, then recent progress, and only then the overall pipeline counts — early in a long
+ * pipeline the big picture is not what a human needs, the current ticket is.
  */
 export function buildWatchPrompt(ctx: RunContext): string {
   const { paths, tasks, state } = ctx;
@@ -107,6 +108,17 @@ export function buildWatchPrompt(ctx: RunContext): string {
     const st = state.tasks[t.id];
     return `- ${t.id} [${st?.status ?? '?'}] ${squash(t.title, 80)}${st?.summary ? ` — ${squash(st.summary, 240)}` : ''}`;
   });
+  const runningLines = tasks
+    .filter((t) => statusOf(state, t) === 'running')
+    .map((t) => {
+      const st = state.tasks[t.id];
+      const started = st?.started ? Date.parse(st.started) : NaN;
+      const elapsedS = Number.isFinite(started) ? Math.max(0, (Date.now() - started) / 1000) : undefined;
+      const bits = [`running${elapsedS !== undefined ? ` ${fmtDuration(elapsedS)}` : ''}`];
+      if (st?.attempts && st.attempts > 1) bits.push(`attempt ${st.attempts}`);
+      if (st?.summary) bits.push(squash(st.summary, 240));
+      return `- ${t.id} ${squash(t.title, 80)} — ${bits.join(' · ')}`;
+    });
 
   const progress = readProgressContext(paths.progress, rel(paths.root, paths.progress), { maxBytes: 8000, recentSections: 3 });
 
@@ -118,21 +130,29 @@ export function buildWatchPrompt(ctx: RunContext): string {
     'Rules:',
     '- Do NOT call tools and do NOT modify any files. Everything you need is below.',
     '- Answer in 2 to 4 short sentences of plain prose: no headings, no bullet lists, no code fences.',
-    '- Name the task ids that moved most recently, and any task that looks stuck, blocked or failing.',
-    '- State the overall health in a few words ("on track", "at risk", "blocked", "stalled") and why.',
+    '- Your FIRST sentence is about the most recent ticket: name the task id that moved most recently',
+    '  (the one running now, or the one that just finished) and say whether it is executing well or',
+    '  facing a problem — a failure, a block, a stall, or a retry. That first sentence matters most.',
+    '- Only once the pipeline has clearly moved past its opening tasks, add a few words on overall',
+    '  health ("on track", "at risk", "blocked", "stalled") and why. Early in a long pipeline, skip',
+    '  the big-picture verdict and stay with the recent progress.',
+    '- Call out any task that looks stuck, blocked or failing, even if it is not the newest.',
     '- If almost nothing has happened yet, say so in one sentence.',
     '',
-    `=== PIPELINE SNAPSHOT ===`,
-    pipelineSnapshot(ctx),
-    '',
-    '=== TASK LIST ===',
-    taskLines.join('\n') || '- (no tasks)',
+    '=== CURRENT TASK (what is running now) ===',
+    runningLines.join('\n') || '- (nothing running)',
     '',
     '=== RECENT TASK OUTCOMES (newest first) ===',
     outcomeLines.join('\n') || '- (none finished yet)',
     '',
     `=== RECENT PROGRESS NOTES (${rel(paths.root, paths.progress)}) ===`,
     progress,
+    '',
+    '=== PIPELINE SNAPSHOT (overall) ===',
+    pipelineSnapshot(ctx),
+    '',
+    '=== TASK LIST ===',
+    taskLines.join('\n') || '- (no tasks)',
     '=== END OF SNAPSHOT ===',
   ].join('\n');
 }

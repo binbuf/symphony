@@ -47,6 +47,15 @@ test('buildWatchPrompt and pipelineSnapshot describe the pipeline from live stat
   assert.match(prompt, /RECENT TASK OUTCOMES/);
   assert.match(prompt, /landed the thing/);
   assert.match(prompt, /Do NOT call tools/);
+  // Recent progress leads: the running ticket is called out, and the snapshot sections put recent
+  // activity ahead of the overall pipeline counts.
+  assert.match(prompt, /CURRENT TASK/);
+  assert.match(prompt, /T02 .* — running/);
+  assert.ok(prompt.indexOf('CURRENT TASK') < prompt.indexOf('RECENT TASK OUTCOMES'), 'current ticket precedes recent outcomes');
+  assert.ok(prompt.indexOf('RECENT TASK OUTCOMES') < prompt.indexOf('PIPELINE SNAPSHOT'), 'recent outcomes precede the overall snapshot');
+  // The instructions lead with the recent ticket and defer overall health.
+  assert.match(prompt, /FIRST sentence is about the most recent ticket/);
+  assert.match(prompt, /only once the pipeline has clearly moved past its opening tasks/i);
 });
 
 test('startPipelineWatch waits one interval, then a fake check updates the panel and the watch log', async () => {

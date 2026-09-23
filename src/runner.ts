@@ -310,6 +310,9 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
     SYMPHONY_COST: st.costUsd !== undefined ? st.costUsd.toFixed(2) : '',
   }, (m) => log.warn(`${task.id}: ${m}`));
   log.info(`=== ${task.id} -> ${final.status.toUpperCase()} · ${fmtDuration(st.durationS)} · ${fmtCost(st.costUsd)} · ${final.summary} · git: ${st.commit}`);
+  // A ticket just ended: refresh the advisory watch panel now rather than waiting for the next
+  // interval, so the summary leads with this outcome. Fire-and-forget; a no-op when watch is off.
+  ctx.watchRefresh?.();
 }
 
 function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError: string | undefined, continuation: number, indexBody?: string): PromptCtx {

@@ -577,7 +577,8 @@ export class TuiApp {
     let text: string;
     let color: string;
     if (w.status === 'waiting') {
-      text = `Waiting for updates${w.nextAt !== undefined ? ` — first check in ${fmtCountdown(w.nextAt)}` : ''}`;
+      // The countdown lives in the panel title on the right; keep the body text single-purpose.
+      text = 'Waiting for updates';
       color = C.dim;
     } else if (w.status === 'running') {
       text = w.summary ? `${w.summary}  ·  checking for updates…` : 'Checking pipeline health…';
