@@ -10,6 +10,13 @@ const SHOW_CURSOR = '\x1b[?25h';
 /** Disable/enable the terminal's own line wrap: we pre-wrap, so an over-wide line must clip, not scroll the frame. */
 const WRAP_OFF = '\x1b[?7l';
 const WRAP_ON = '\x1b[?7h';
+/**
+ * Mouse reporting: 1000 = button press/release, 1002 = button-event tracking (drag motion while a
+ * button is held), 1006 = SGR extended coordinates (so x/y can exceed 223). Wheel and horizontal
+ * tilt-wheel events arrive as button codes, decoded in keys.ts.
+ */
+const MOUSE_ON = '\x1b[?1000h\x1b[?1002h\x1b[?1006h';
+const MOUSE_OFF = '\x1b[?1000l\x1b[?1002l\x1b[?1006l';
 const CLEAR = '\x1b[2J\x1b[H';
 const SYNC_ON = '\x1b[?2026h';
 const SYNC_OFF = '\x1b[?2026l';
@@ -39,7 +46,7 @@ export class AnsiTerminal {
   }
 
   enter(): void {
-    this.out(`${ALT_ON}${WRAP_OFF}${HIDE_CURSOR}${CLEAR}`);
+    this.out(`${ALT_ON}${WRAP_OFF}${HIDE_CURSOR}${MOUSE_ON}${CLEAR}`);
     if (process.stdin.isTTY) {
       process.stdin.setEncoding('utf8');
       process.stdin.setRawMode(true);
@@ -52,7 +59,7 @@ export class AnsiTerminal {
       try { process.stdin.setRawMode(false); } catch { /* already gone */ }
       process.stdin.pause();
     }
-    this.out(`${SHOW_CURSOR}${WRAP_ON}${ALT_OFF}`);
+    this.out(`${SHOW_CURSOR}${WRAP_ON}${MOUSE_OFF}${ALT_OFF}`);
     this.prev = [];
   }
 

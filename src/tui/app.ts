@@ -4,9 +4,9 @@ import { stopPresent } from '../paths.js';
 import type { RunContext } from '../runner.js';
 import { saveState } from '../state.js';
 import { buildStatusTable, formatStatusRow, statusColumnWidths, type StatusTable } from '../status.js';
-import type { Key } from './keys.js';
+import type { Key, MouseKey } from './keys.js';
 import { AnsiTerminal } from './terminal.js';
-import { displayWidth, fit, padTo, sanitizeLine, sliceColumns, splice, wrapText } from './text.js';
+import { displayWidth, fit, padTo, sanitizeLine, sliceColumns, splice, wrapColumns, wrapText } from './text.js';
 import { fmtTime } from '../util.js';
 import type { WatchState } from '../watch.js';
 
@@ -19,8 +19,8 @@ const STREAM_MAX = 5000;
 const TABLE_TTL_MS = 250;
 const TOAST_MS = 5000;
 const BAR_ROWS = 2;
-/** Height of the pipeline-watch panel (a title line plus two body lines). */
-const WATCH_ROWS = 3;
+/** Height of the pipeline-watch panel (a title line plus four body lines, enough for a 3–5 sentence summary). */
+const WATCH_ROWS = 5;
 
 export type Layout = 'both' | 'top' | 'bottom';
 
@@ -62,15 +62,21 @@ function progressBar(done: number, total: number, width: number): string {
   return `${'█'.repeat(filled)}${'░'.repeat(width - filled)}`;
 }
 
+/** The ANSI colour a captured stream line is tagged with, or '' when it is plain. */
+function colorFor(line: string): string {
+  if (/\bERROR\b|\[error\]|\[tool-result ERROR\]|\[stderr\]/.test(line)) return C.red;
+  if (/\bWARN\b/.test(line)) return C.yellow;
+  if (line.includes('[think]')) return C.magenta;
+  if (line.includes('[tool]')) return C.cyan;
+  if (line.includes('[result] ok')) return C.green;
+  if (line.includes('[text]')) return C.bold;
+  return '';
+}
+
 /** Colour a captured stream line by its leading tag; ANSI-free input, ANSI-coloured output. */
 function colorLog(line: string): string {
-  if (/\bERROR\b|\[error\]|\[tool-result ERROR\]|\[stderr\]/.test(line)) return `${C.red}${line}${C.reset}`;
-  if (/\bWARN\b/.test(line)) return `${C.yellow}${line}${C.reset}`;
-  if (line.includes('[think]')) return `${C.magenta}${line}${C.reset}`;
-  if (line.includes('[tool]')) return `${C.cyan}${line}${C.reset}`;
-  if (line.includes('[result] ok')) return `${C.green}${line}${C.reset}`;
-  if (line.includes('[text]')) return `${C.bold}${line}${C.reset}`;
-  return line;
+  const color = colorFor(line);
+  return color ? `${color}${line}${C.reset}` : line;
 }
 
 /**
@@ -94,11 +100,18 @@ export class TuiApp {
   private layout: Layout = 'both';
   /** When true every status cell is shown in full and the user pans with ← →. */
   private expand = false;
+  /** When true the live output wraps long lines instead of clipping and panning them. */
+  private logWrap = false;
+  /** Anchor column of an in-progress middle-button drag, for horizontal panning. */
+  private mouseDrag?: { x: number };
   private lastStatuses = new Map<string, string>();
   private lastHalted = false;
   private renderScheduled = false;
   private timer?: NodeJS.Timeout;
   private tableCache?: { at: number; table: StatusTable };
+  private wrapCache?: { cols: number; version: number; lines: string[] };
+  /** Bumped whenever the stream changes; the wrap cache's key, since its length can plateau at the cap. */
+  private streamVersion = 0;
   private haltResolve?: (d: 'clear' | 'quit') => void;
   private stopped = false;
   /** Set once the user confirms quitting; the wrapper stops looping on it. */
@@ -132,6 +145,7 @@ export class TuiApp {
     this.partial = parts.pop() ?? '';
     for (const line of parts) this.stream.push(sanitizeLine(line));
     if (this.stream.length > STREAM_MAX) this.stream.splice(0, this.stream.length - STREAM_MAX);
+    if (parts.length) this.streamVersion += 1;
     this.scheduleRender();
   }
 
@@ -215,6 +229,7 @@ export class TuiApp {
   private handleKey(k: Key): void {
     if (this.help) { this.help = false; this.render(); return; }
     if (this.dialog) return this.handleDialogKey(k);
+    if (k.type === 'mouse') return this.handleMouse(k);
     const name = k.type === 'key' ? k.name : undefined;
     const char = k.type === 'char' ? k.char : undefined;
 
@@ -243,6 +258,7 @@ export class TuiApp {
     if (char === 'p') return this.togglePause();
     if (char === 'w') return this.refreshWatch();
     if (char === 'e') return this.toggleExpand();
+    if (char === 't') return this.toggleWrap();
     if (char === 'z') return this.cycleLayout();
     if (char === '[' || char === '-') return this.adjustSplit(-0.05);
     if (char === ']' || char === '+') return this.adjustSplit(0.05);
@@ -253,6 +269,60 @@ export class TuiApp {
     const char = k.type === 'char' ? k.char : undefined;
     if (char === 'y' || name === 'enter') { const d = this.dialog!; this.dialog = undefined; d.confirm(); this.render(); return; }
     if (char === 'n' || name === 'escape' || char === 'q' || name === 'ctrl-c') { this.dialog = undefined; this.render(); }
+  }
+
+  // ---------------------------------------------------------------- mouse
+
+  /** Route a decoded SGR mouse event: wheels scroll/pan, drag pans, clicks focus and select. */
+  private handleMouse(m: MouseKey): void {
+    if (m.button === 'wheel-up') return this.scroll('up', 3);
+    if (m.button === 'wheel-down') return this.scroll('down', 3);
+    if (m.button === 'wheel-left') return this.pan(-4);
+    if (m.button === 'wheel-right') return this.pan(4);
+    if (m.button === 'middle') {
+      if (m.release) { this.mouseDrag = undefined; return; }
+      if (m.motion) {
+        if (this.mouseDrag) {
+          const delta = m.x - this.mouseDrag.x;
+          this.mouseDrag.x = m.x;
+          if (delta) this.pan(delta);
+        }
+        return;
+      }
+      this.mouseDrag = { x: m.x };
+      return;
+    }
+    if (m.motion || m.release) return;
+    if (m.button === 'left') return this.handleLeftClick(m);
+    if (m.button === 'right') return this.toggleFollow();
+  }
+
+  /** Left click focuses the panel under the pointer; on a status body row it selects that task. */
+  private handleLeftClick(m: MouseKey): void {
+    const row = m.y - 1;
+    const g = this.panelGeometry();
+    if (g.statusHeight > 0 && row >= g.statusTop && row < g.statusTop + g.statusHeight) {
+      this.focus = 'status';
+      const bodyRow = row - (g.statusTop + 2);
+      if (bodyRow >= 0) {
+        const bodyArea = Math.max(0, g.statusHeight - 2);
+        const table = this.table();
+        const maxOff = Math.max(0, table.rows.length - bodyArea);
+        const off = this.statusPanel.follow ? maxOff : clamp(this.statusPanel.vOffset, 0, maxOff);
+        const id = table.rowTask[off + bodyRow];
+        const idx = id ? this.ctx.tasks.findIndex((t) => t.id === id) : -1;
+        if (idx >= 0) {
+          this.selected = idx;
+          this.statusPanel.follow = false;
+        }
+      }
+      return this.render();
+    }
+    if (g.logHeight > 0 && row >= g.logTop && row < g.logTop + g.logHeight) {
+      this.focus = 'log';
+      return this.render();
+    }
+    this.render();
   }
 
   private openQuit(): void {
@@ -406,6 +476,16 @@ export class TuiApp {
     this.render();
   }
 
+  /** Toggle wrapping of over-long live-output lines (on = wrap, off = clip and pan with ← →). */
+  private toggleWrap(): void {
+    this.logWrap = !this.logWrap;
+    this.logPanel.hOffset = 0;
+    this.wrapCache = undefined;
+    if (this.layout !== 'top') this.focus = 'log';
+    this.toast(this.logWrap ? 'live output wraps long lines' : 'live output clips long lines — pan with ← →');
+    this.render();
+  }
+
   private adjustSplit(delta: number): void {
     this.splitRatio = clamp(this.splitRatio + delta, 0.2, 0.8);
     this.render();
@@ -438,7 +518,7 @@ export class TuiApp {
 
   private focusMaxOffset(): number {
     const area = this.focusBodyHeight();
-    const total = this.focus === 'status' ? this.table().rows.length : this.stream.length;
+    const total = this.focus === 'status' ? this.table().rows.length : this.logLineCount();
     return Math.max(0, total - area);
   }
 
@@ -451,9 +531,43 @@ export class TuiApp {
       for (const row of table.rows) max = Math.max(max, displayWidth(formatStatusRow(row, widths)));
       return max;
     }
+    // A wrapped panel always fits the viewport, so there is nothing to pan to.
+    if (this.logWrap) return this.term.size().cols;
     let max = 0;
     for (const line of this.stream) max = Math.max(max, displayWidth(line));
     return max;
+  }
+
+  /** Number of display lines the live output occupies (wrapped or not), for scroll bounds. */
+  private logLineCount(): number {
+    return this.logWrap ? this.wrappedLogLines().length : this.stream.length;
+  }
+
+  /**
+   * The live stream hard-wrapped to the current width, each segment padded to a full row and coloured
+   * by its source line's tag. Cached per (cols, stream length): stream lines are append-only.
+   */
+  private wrappedLogLines(cols = this.term.size().cols): string[] {
+    const cached = this.wrapCache;
+    if (cached && cached.cols === cols && cached.version === this.streamVersion) return cached.lines;
+    const lines: string[] = [];
+    for (const raw of this.stream) {
+      const color = colorFor(raw);
+      for (const segment of wrapColumns(raw, cols)) {
+        const padded = padTo(segment, cols);
+        lines.push(color ? `${color}${padded}${C.reset}` : padded);
+      }
+    }
+    this.wrapCache = { cols, version: this.streamVersion, lines };
+    return lines;
+  }
+
+  /** Screen row spans of each pane, so mouse coordinates can be mapped back to a panel. */
+  private panelGeometry(rows = this.term.size().rows): { statusTop: number; statusHeight: number; logTop: number; logHeight: number } {
+    const watchRows = this.watchRows(rows);
+    const { top, bottom } = this.panelHeights(rows - BAR_ROWS - watchRows);
+    const statusTop = watchRows;
+    return { statusTop, statusHeight: top, logTop: statusTop + top, logHeight: bottom };
   }
 
   private panelHeights(avail: number): { top: number; bottom: number } {
@@ -510,12 +624,23 @@ export class TuiApp {
     if (bottom > 0) {
       out[y++] = this.panelTitle('Live output', this.logTitleRight(), cols, this.focus === 'log');
       const bodyArea = Math.max(0, bottom - 1);
-      const maxOff = Math.max(0, this.stream.length - bodyArea);
-      const off = this.logPanel.follow ? maxOff : clamp(this.logPanel.vOffset, 0, maxOff);
-      for (let i = 0; i < bodyArea; i++) {
-        const idx = off + i;
-        if (idx >= this.stream.length) break;
-        out[y++] = colorLog(this.clip(this.stream[idx], this.logPanel.hOffset, cols));
+      if (this.logWrap) {
+        const wrapped = this.wrappedLogLines(cols);
+        const maxOff = Math.max(0, wrapped.length - bodyArea);
+        const off = this.logPanel.follow ? maxOff : clamp(this.logPanel.vOffset, 0, maxOff);
+        for (let i = 0; i < bodyArea; i++) {
+          const idx = off + i;
+          if (idx >= wrapped.length) break;
+          out[y++] = wrapped[idx];
+        }
+      } else {
+        const maxOff = Math.max(0, this.stream.length - bodyArea);
+        const off = this.logPanel.follow ? maxOff : clamp(this.logPanel.vOffset, 0, maxOff);
+        for (let i = 0; i < bodyArea; i++) {
+          const idx = off + i;
+          if (idx >= this.stream.length) break;
+          out[y++] = colorLog(this.clip(this.stream[idx], this.logPanel.hOffset, cols));
+        }
       }
     }
 
@@ -550,7 +675,7 @@ export class TuiApp {
 
   private logTitleRight(): string {
     const mode = this.logPanel.follow ? 'FOLLOW' : 'SCROLL';
-    return `${mode} · ${this.stream.length} lines`;
+    return `${this.logWrap ? 'WRAP · ' : ''}${mode} · ${this.stream.length} lines`;
   }
 
   // ---------------------------------------------------------------- pipeline watch panel
@@ -619,7 +744,7 @@ export class TuiApp {
 
   private hintsLine(): string {
     if (this.haltMode) return 'c clear halt & retry · q quit · ↑↓ scroll · Tab focus';
-    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · c clear-halt · p pause · w watch · e expand · z zoom · [ ] split';
+    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · c clear-halt · p pause · w watch · e expand · t wrap · z zoom · [ ] split';
     return base;
   }
 
@@ -650,12 +775,16 @@ export class TuiApp {
         'p            pause / resume (toggles the .stop sentinel)',
         'w            run a pipeline-watch check now',
         'e            expand all status columns (pan the focused panel with ← →)',
+        't            wrap long live-output lines (off = clip and pan)',
         'z            cycle layout: both / status only / output only',
         '[ ]  or  - + adjust the panel split',
         '',
         'Status: header stays put, rows scroll vertically and pan horizontally.',
         'Live output tails by default; scroll up to pause, s to resume following.',
         'Pipeline watch (top strip): a separate read-only model summarizes progress and health.',
+        '',
+        'Mouse: wheel scrolls, tilt-wheel pans, middle-drag pans horizontally,',
+        'left-click selects a task, right-click toggles follow. Shift+drag selects text.',
       ],
     };
   }

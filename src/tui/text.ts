@@ -167,3 +167,26 @@ export function wrapText(text: string, width: number, maxLines: number): string[
   kept[maxLines - 1] = fit(`${sliceColumns(kept[maxLines - 1], 0, Math.max(0, width - 1))}…`, width);
   return kept;
 }
+
+/**
+ * Hard-wrap one line into display-column chunks of at most `width`, preserving every character
+ * (leading indentation included) rather than collapsing whitespace. ANSI escapes are stripped; the
+ * caller re-colours each chunk. Used by the live-output panel's optional wrap mode.
+ */
+export function wrapColumns(s: string, width: number): string[] {
+  const plain = stripAnsi(s);
+  if (width <= 0) return [''];
+  if (!plain) return [''];
+  const out: string[] = [];
+  let cur = '';
+  let curW = 0;
+  for (const ch of plain) {
+    const w = charWidth(ch.codePointAt(0)!);
+    if (w === 0) { cur += ch; continue; }
+    if (curW + w > width) { out.push(cur); cur = ''; curW = 0; }
+    cur += ch;
+    curW += w;
+  }
+  out.push(cur);
+  return out;
+}

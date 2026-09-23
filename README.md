@@ -154,11 +154,11 @@ docs/
 When `run` starts with stdout **and** stdin attached to a terminal, it opens a full-screen view instead of scrolling output:
 
 - **Status** (top panel) — the same table as `symphony status`, refreshed from live state: id, phase, title, status, attempts, duration, start/end, cost, provider, model, summary. A task split across sessions or retried lists its per-session rows beneath it.
-- **Pipeline watch** (strip above the status table, when enabled) — a separate read-only model's latest summary of the most recent ticket first, then overall pipeline health, refreshed on a timer and whenever a task ends (see [Pipeline watch](#pipeline-watch)). It reads `Waiting for updates` until the first check lands, with the countdown to that check on the right of the title.
+- **Pipeline watch** (strip above the status table, when enabled) — a separate read-only model's latest short summary, refreshed on a timer and whenever a task ends (see [Pipeline watch](#pipeline-watch)). It reads `Waiting for updates` until the first check lands, with the countdown to that check on the right of the title.
 - **Live output** (bottom panel) — exactly what `run` streams today: harness `INFO`/`WARN`/`ERROR` lines and the provider's `[think]`/`[text]`/`[tool]`/`[result]` stream, tailing by default.
 - **Status bar** — pipeline progress and duration, the current task and its elapsed time, reported cost, provider/model, and any `PAUSED`/`HALTED`/`blocked` badge, with the key hints beneath. A transient task-status toast (e.g. `T02 → running`) briefly takes the metrics row; the key-hints row always stays put.
 
-Each panel scrolls independently, vertically and horizontally. The view turns itself off when output is piped or in CI, with `--no-tui`, or with `"tui": false` in the config; `--tui` forces it.
+Each panel scrolls independently, vertically and horizontally, with the keyboard or a mouse: the wheel scrolls, a horizontal tilt-wheel pans, middle-button drag pans horizontally, left-click selects a task row (or focuses the panel under the pointer), and right-click toggles follow. Because the TUI captures mouse input, use **Shift+drag** for the terminal's native text selection. The view turns itself off when output is piped or in CI, with `--no-tui`, or with `"tui": false` in the config; `--tui` forces it.
 
 | key | action |
 |---|---|
@@ -173,6 +173,7 @@ Each panel scrolls independently, vertically and horizontally. The view turns it
 | `c` | clear a halt (asks for confirmation); after a halt the view stays open, so `c` clears it and restarts |
 | `p` | pause / resume by toggling the `.stop` sentinel |
 | `w` | run a pipeline-watch check now |
+| `t` | wrap long lines in the Live output panel (off = clip and pan with `← →`) |
 | `z` | cycle layout: both panels · status only · output only |
 | `[` `]` (or `-` `+`) | adjust the panel split |
 
@@ -480,7 +481,14 @@ This is a gate, not a router: `onCategories` is still the trigger, infrastructur
 
 ## Pipeline watch
 
-While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: the harness assembles a self-contained snapshot — the currently running ticket, the most recent task outcomes, the recent `PROGRESS.md` context, the pipeline counts and task list, and the halted banner if any — and asks the watcher model for two to four sentences. A check runs every `watch.intervalMin`, **and again each time a task ends**, so the summary leads with the ticket that just moved rather than the pipeline's overall health (which only becomes the useful headline once the pipeline has progressed).
+While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: the harness assembles a self-contained snapshot — the currently running ticket (or the one that just finished), per-phase progress with the current phase flagged, the most recent task outcomes, the recent `PROGRESS.md` context, the pipeline counts and task list, and the halted banner if any — and asks the watcher model for **three to five short sentences**, in this order and covering only what is relevant:
+
+1. the current task: what it has accomplished so far and what is left, plus whether it is still on track if it is running long or looks unhealthy;
+2. the phase / milestone / gate the run is in and how that work is going;
+3. overall progress, but only when the model has a real concern (silence otherwise);
+4. early signals that the pipeline will or will not complete successfully, but only when they are high-confidence (silence when it is too early to tell).
+
+A check runs every `watch.intervalMin`, **and again each time a task ends**, so the summary leads with the ticket that just moved rather than the pipeline's overall health (which only becomes the useful headline once the pipeline has progressed).
 
 The latest answer is shown in the TUI's **Pipeline watch** strip (above the status table) and every check is appended to `.symphony/watch.log` with the snapshot and a link to the session's raw files. The strip shows `Waiting for updates` until the first check returns, with the countdown to the first check on the right of the title; press `w` to run one immediately.
 

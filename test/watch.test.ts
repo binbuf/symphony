@@ -47,15 +47,22 @@ test('buildWatchPrompt and pipelineSnapshot describe the pipeline from live stat
   assert.match(prompt, /RECENT TASK OUTCOMES/);
   assert.match(prompt, /landed the thing/);
   assert.match(prompt, /Do NOT call tools/);
-  // Recent progress leads: the running ticket is called out, and the snapshot sections put recent
-  // activity ahead of the overall pipeline counts.
+  // Recent progress leads: the current ticket and its phase are called out, and the snapshot sections
+  // put recent activity ahead of the overall pipeline counts.
   assert.match(prompt, /CURRENT TASK/);
-  assert.match(prompt, /T02 .* — running/);
-  assert.ok(prompt.indexOf('CURRENT TASK') < prompt.indexOf('RECENT TASK OUTCOMES'), 'current ticket precedes recent outcomes');
+  assert.match(prompt, /T02 .*running/);
+  assert.match(prompt, /CURRENT PHASE \/ GATE/);
+  assert.match(prompt, /▶ Phase 1: 1\/2 done/);
+  assert.ok(prompt.indexOf('CURRENT TASK') < prompt.indexOf('CURRENT PHASE / GATE'), 'current ticket precedes its phase');
+  assert.ok(prompt.indexOf('CURRENT PHASE / GATE') < prompt.indexOf('RECENT TASK OUTCOMES'), 'phase precedes recent outcomes');
   assert.ok(prompt.indexOf('RECENT TASK OUTCOMES') < prompt.indexOf('PIPELINE SNAPSHOT'), 'recent outcomes precede the overall snapshot');
-  // The instructions lead with the recent ticket and defer overall health.
-  assert.match(prompt, /FIRST sentence is about the most recent ticket/);
-  assert.match(prompt, /only once the pipeline has clearly moved past its opening tasks/i);
+  // The instructions ask for an ordered 3-5 sentence read: current task, phase/gate, then only-if-relevant
+  // concerns and early signals.
+  assert.match(prompt, /3 to 5 short sentences/);
+  assert.match(prompt, /what it has accomplished so far and what is left/);
+  assert.match(prompt, /phase \/ milestone \/ gate/);
+  assert.match(prompt, /If you have no concerns, say nothing/);
+  assert.match(prompt, /If it is too early to tell, say nothing/);
 });
 
 test('startPipelineWatch waits one interval, then a fake check updates the panel and the watch log', async () => {

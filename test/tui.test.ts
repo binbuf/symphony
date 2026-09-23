@@ -12,9 +12,9 @@ import { buildStatusTable } from '../src/status.js';
 import type { Task } from '../src/tasks.js';
 import { TuiApp } from '../src/tui/app.js';
 import { runWithTui } from '../src/tui/index.js';
-import { KeyParser, type Key } from '../src/tui/keys.js';
+import { KeyParser, type Key, type MouseButton, type MouseKey } from '../src/tui/keys.js';
 import { AnsiTerminal } from '../src/tui/terminal.js';
-import { displayWidth, fit, padTo, sanitizeLine, sliceColumns, splice, stripAnsi, wrapText } from '../src/tui/text.js';
+import { displayWidth, fit, padTo, sanitizeLine, sliceColumns, splice, stripAnsi, wrapColumns, wrapText } from '../src/tui/text.js';
 
 const task = (id: string, num: number, phase = 'Phase 1'): Task => ({ id, num, title: `Task ${num}`, phase, order: num - 1, meta: {} });
 
@@ -52,6 +52,14 @@ test('text: wrapText wraps on spaces, hard-slices long words, and ellipsizes the
   assert.deepEqual(wrapText('   ', 5, 2), []);
 });
 
+test('text: wrapColumns hard-wraps by display columns without losing characters', () => {
+  assert.deepEqual(wrapColumns('abcdef', 4), ['abcd', 'ef']);
+  assert.deepEqual(wrapColumns('abc', 4), ['abc']);
+  assert.deepEqual(wrapColumns('', 4), ['']);
+  // A wide character is never split across the boundary; it moves to the next chunk whole.
+  assert.deepEqual(wrapColumns('a日b', 2), ['a', '日', 'b']);
+});
+
 test('keys: decodes arrows, paging, modifiers, control keys and split sequences', () => {
   const p = new KeyParser();
   assert.deepEqual(p.feed('\x1b[A'), [{ type: 'key', name: 'up' }]);
@@ -67,6 +75,24 @@ test('keys: decodes arrows, paging, modifiers, control keys and split sequences'
   // A sequence split across two reads is held until it is complete.
   assert.deepEqual(p.feed('\x1b['), []);
   assert.deepEqual(p.feed('A'), [{ type: 'key', name: 'up' }]);
+});
+
+test('keys: decodes SGR mouse press, release, drag and wheel events', () => {
+  const p = new KeyParser();
+  const mouse = (button: MouseButton, x: number, y: number, motion = false, release = false): MouseKey =>
+    ({ type: 'mouse', button, x, y, motion, release });
+  assert.deepEqual(p.feed('\x1b[<0;10;5M'), [mouse('left', 10, 5)]);
+  assert.deepEqual(p.feed('\x1b[<2;7;3M'), [mouse('right', 7, 3)]);
+  assert.deepEqual(p.feed('\x1b[<1;4;9M'), [mouse('middle', 4, 9)]);
+  // 32 marks motion; the low bits still name the held button.
+  assert.deepEqual(p.feed('\x1b[<33;4;9M'), [mouse('middle', 4, 9, true)]);
+  // A trailing `m` is a release (the button bits are meaningless then).
+  assert.deepEqual(p.feed('\x1b[<0;10;5m'), [mouse('none', 10, 5, false, true)]);
+  // 64 selects the wheel; the low bits give the axis and direction.
+  assert.deepEqual(p.feed('\x1b[<64;1;1M'), [mouse('wheel-up', 1, 1)]);
+  assert.deepEqual(p.feed('\x1b[<65;1;1M'), [mouse('wheel-down', 1, 1)]);
+  assert.deepEqual(p.feed('\x1b[<66;1;1M'), [mouse('wheel-left', 1, 1)]);
+  assert.deepEqual(p.feed('\x1b[<67;1;1M'), [mouse('wheel-right', 1, 1)]);
 });
 
 test('buildStatusTable maps child session rows back to their parent task', () => {
@@ -130,7 +156,7 @@ test('TuiApp renders the pipeline-watch panel above the status table', () => {
   assert.doesNotMatch(text, /first check in/);
   // The watch strip is the first pane; the status table sits directly below it.
   assert.match(stripAnsi(lines[0]), /Pipeline watch/);
-  assert.match(stripAnsi(lines[3]), /Status/);
+  assert.match(stripAnsi(lines[5]), /Status/);
 
   ctx.watch = { status: 'ready', enabled: true, intervalMin: 5, provider: 'opencode', model: 'x', summary: 'On track: T01 is running normally.', updatedAt: new Date().toISOString(), checks: 2 };
   const ready = stripAnsi(app.renderLines(100, 24).join('\n'));
@@ -157,6 +183,65 @@ test('TuiApp: e expands every status column and panning can reach the full text'
 
   press('e');
   assert.ok(priv.focusMaxWidth() < expandedWidth, 'toggling back compacts the table again');
+});
+
+test('TuiApp: t toggles live-output wrapping, which reflows a long line instead of clipping it', () => {
+  const term = new AnsiTerminal(() => {});
+  const app = new TuiApp(makeCtx([task('T01', 1)], { version: 1, tasks: {} }), term);
+  const priv = app as unknown as { handleKey(k: Key): void; logLineCount(): number; focusMaxWidth(): number };
+  const press = (char: string) => priv.handleKey({ type: 'char', char });
+  const cols = term.size().cols;
+  app.pushOutput(`${'x'.repeat(cols + 10)}\n`);
+
+  assert.equal(priv.logLineCount(), 1, 'one stream line is one display line while wrapping is off');
+  press('t');
+  assert.match(stripAnsi(app.renderLines(cols, 14).join('\n')), /live output wraps long lines/, 'the toggle announces itself');
+  assert.equal(priv.logLineCount(), 2, 'the long line now occupies two wrapped rows');
+  assert.equal(priv.focusMaxWidth(), cols, 'a wrapped panel has nothing left to pan to');
+  press('t');
+  assert.equal(priv.logLineCount(), 1, 'toggling back returns to one clipped row per line');
+});
+
+test('TuiApp: mouse wheel, tilt-wheel, middle-drag and clicks drive the panels', () => {
+  const tasks = [task('T01', 1), task('T02', 2)];
+  const term = new AnsiTerminal(() => {});
+  const app = new TuiApp(makeCtx(tasks, { version: 1, tasks: {} }), term);
+  const priv = app as unknown as {
+    handleKey(k: Key): void;
+    selected: number;
+    focus: string;
+    logPanel: { hOffset: number; vOffset: number; follow: boolean };
+    focusMaxWidth(): number;
+    panelGeometry(): { statusTop: number; statusHeight: number; logTop: number; logHeight: number };
+  };
+  const mouse = (button: MouseButton, x: number, y: number, extra: Partial<MouseKey> = {}): Key =>
+    ({ type: 'mouse', button, x, y, motion: false, release: false, ...extra });
+  const cols = term.size().cols;
+  const g = priv.panelGeometry();
+
+  // Left click on the second status body row selects T02; a click in the output pane focuses it.
+  priv.handleKey(mouse('left', 1, g.statusTop + 4));
+  assert.equal(priv.selected, 1);
+  assert.equal(priv.focus, 'status');
+  priv.handleKey(mouse('left', 1, g.logTop + 1));
+  assert.equal(priv.focus, 'log');
+
+  // Long lines give the output pane plenty to pan: tilt-wheel pans, middle-drag pans further.
+  for (let i = 0; i < 100; i++) app.pushOutput(`line-${i}-${'x'.repeat(cols * 2)}\n`);
+  assert.ok(priv.focusMaxWidth() > cols);
+  priv.handleKey(mouse('wheel-right', 1, g.logTop + 1));
+  const panned = priv.logPanel.hOffset;
+  assert.ok(panned > 0, 'tilt-wheel pans right');
+  priv.handleKey(mouse('middle', 40, g.logTop + 1));
+  priv.handleKey(mouse('middle', 60, g.logTop + 1, { motion: true }));
+  assert.equal(priv.logPanel.hOffset, panned + 20, 'middle-drag pans by the column delta');
+
+  // Wheel up pauses tailing; right-click toggles follow back on.
+  priv.logPanel.follow = true;
+  priv.handleKey(mouse('wheel-up', 1, g.logTop + 1));
+  assert.equal(priv.logPanel.follow, false, 'wheel up pauses tailing');
+  priv.handleKey(mouse('right', 1, g.logTop + 1));
+  assert.equal(priv.logPanel.follow, true, 'right-click toggles follow back on');
 });
 
 test('TuiApp sanitizes the live stream so every frame line is exactly cols wide', () => {
@@ -232,6 +317,7 @@ test('AnsiTerminal turns autowrap off while drawing and always repaints the bott
   const term = new AnsiTerminal((s) => out.push(s));
   term.enter();
   assert.ok(out.join('').includes('\x1b[?7l'), 'autowrap disabled on entry');
+  assert.ok(out.join('').includes('\x1b[?1006h'), 'SGR mouse reporting enabled on entry');
 
   const frame = ['a', 'b', 'c', 'd', 'e'];
   term.draw(frame);          // first frame primes prev
@@ -245,4 +331,5 @@ test('AnsiTerminal turns autowrap off while drawing and always repaints the bott
   out.length = 0;
   term.leave();
   assert.ok(out.join('').includes('\x1b[?7h'), 'autowrap restored on leave');
+  assert.ok(out.join('').includes('\x1b[?1006l'), 'mouse reporting restored on leave');
 });

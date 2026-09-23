@@ -15,10 +15,11 @@ import { ensureDir, fmtCost, fmtDuration, nowIso, resolveBinary, resolveExecutab
 
 /**
  * Pipeline watch: a separate, read-only LLM session the harness runs on a timer while `run` is in
- * flight. It reads a self-contained snapshot of the pipeline (counts, task outcomes, PROGRESS.md)
- * and answers with a few sentences on recent developments and overall health. The latest answer is
- * shown in the TUI's top panel and every check is appended to a dedicated watch log. It is advisory:
- * an unavailable provider or a failed check only updates the panel, never the run.
+ * flight. It reads a self-contained snapshot of the pipeline (current task, phase progress, task
+ * outcomes, PROGRESS.md, counts) and answers in a few short sentences: the current ticket first,
+ * then the phase/gate, then only-if-warranted concerns and early signals. The latest answer is shown
+ * in the TUI's top panel and every check is appended to a dedicated watch log. It is advisory: an
+ * unavailable provider or a failed check only updates the panel, never the run.
  */
 
 export type WatchStatus = 'waiting' | 'running' | 'ready' | 'error';
@@ -89,9 +90,9 @@ export function pipelineSnapshot(ctx: RunContext): string {
 
 /**
  * The watcher prompt: a fully self-contained snapshot so the model can answer without tools (and so
- * the watcher never needs write access). Kept short, and ordered newest-first: the running/recent
- * ticket leads, then recent progress, and only then the overall pipeline counts — early in a long
- * pipeline the big picture is not what a human needs, the current ticket is.
+ * the watcher never needs write access). It leads with the current ticket and its phase, then recent
+ * outcomes and progress, and only then the overall counts. The instructions ask for a short, ordered
+ * read — current task, then phase/gate, then (only when warranted) concerns and early signals.
  */
 export function buildWatchPrompt(ctx: RunContext): string {
   const { paths, tasks, state } = ctx;
@@ -108,17 +109,39 @@ export function buildWatchPrompt(ctx: RunContext): string {
     const st = state.tasks[t.id];
     return `- ${t.id} [${st?.status ?? '?'}] ${squash(t.title, 80)}${st?.summary ? ` — ${squash(st.summary, 240)}` : ''}`;
   });
-  const runningLines = tasks
-    .filter((t) => statusOf(state, t) === 'running')
-    .map((t) => {
-      const st = state.tasks[t.id];
+
+  // The ticket in flight, or the one that just finished when nothing is running.
+  const currentTask = tasks.find((t) => statusOf(state, t) === 'running') ?? recent[0];
+  const currentLine = (() => {
+    if (!currentTask) return undefined;
+    const st = state.tasks[currentTask.id];
+    const status = st?.status ?? 'pending';
+    const bits: string[] = [status];
+    if (status === 'running') {
       const started = st?.started ? Date.parse(st.started) : NaN;
       const elapsedS = Number.isFinite(started) ? Math.max(0, (Date.now() - started) / 1000) : undefined;
-      const bits = [`running${elapsedS !== undefined ? ` ${fmtDuration(elapsedS)}` : ''}`];
+      if (elapsedS !== undefined) bits.push(`running ${fmtDuration(elapsedS)}`);
       if (st?.attempts && st.attempts > 1) bits.push(`attempt ${st.attempts}`);
-      if (st?.summary) bits.push(squash(st.summary, 240));
-      return `- ${t.id} ${squash(t.title, 80)} — ${bits.join(' · ')}`;
-    });
+    } else if (st?.durationS) {
+      bits.push(`took ${fmtDuration(st.durationS)}`);
+    }
+    if (st?.summary) bits.push(squash(st.summary, 300));
+    return `- ${currentTask.id} — ${squash(currentTask.title, 100)} · phase: ${currentTask.phase} · ${bits.join(' · ')}`;
+  })();
+
+  // Per-phase progress, with the current phase flagged, so the model can judge the gate we are in.
+  const phaseStats = new Map<string, { done: number; total: number; remaining: string[] }>();
+  for (const t of tasks) {
+    const s = phaseStats.get(t.phase) ?? { done: 0, total: 0, remaining: [] };
+    s.total += 1;
+    if ((DONE_STATES as string[]).includes(state.tasks[t.id]?.status ?? 'pending')) s.done += 1;
+    else s.remaining.push(t.id);
+    phaseStats.set(t.phase, s);
+  }
+  const phaseLines = [...phaseStats.entries()].map(([name, s]) => {
+    const mark = name === currentTask?.phase ? '▶ ' : '  ';
+    return `${mark}${name}: ${s.done}/${s.total} done${s.remaining.length ? ` · remaining ${s.remaining.join(', ')}` : ' · complete'}`;
+  });
 
   const progress = readProgressContext(paths.progress, rel(paths.root, paths.progress), { maxBytes: 8000, recentSections: 3 });
 
@@ -129,18 +152,23 @@ export function buildWatchPrompt(ctx: RunContext): string {
     '',
     'Rules:',
     '- Do NOT call tools and do NOT modify any files. Everything you need is below.',
-    '- Answer in 2 to 4 short sentences of plain prose: no headings, no bullet lists, no code fences.',
-    '- Your FIRST sentence is about the most recent ticket: name the task id that moved most recently',
-    '  (the one running now, or the one that just finished) and say whether it is executing well or',
-    '  facing a problem — a failure, a block, a stall, or a retry. That first sentence matters most.',
-    '- Only once the pipeline has clearly moved past its opening tasks, add a few words on overall',
-    '  health ("on track", "at risk", "blocked", "stalled") and why. Early in a long pipeline, skip',
-    '  the big-picture verdict and stay with the recent progress.',
-    '- Call out any task that looks stuck, blocked or failing, even if it is not the newest.',
-    '- If almost nothing has happened yet, say so in one sentence.',
+    '- Answer in 3 to 5 short sentences of plain prose: no headings, no bullet lists, no code fences.',
+    '- Cover only what is relevant, in this order, and skip a point entirely when you have nothing',
+    '  useful to say about it:',
+    '  1. The current task: what it has accomplished so far and what is left. If it is running long or',
+    '     looks unhealthy, say whether you still expect it to finish as intended.',
+    '  2. This phase / milestone / gate: how you think the work is going here.',
+    '  3. Overall progress: only if you have a real concern. If you have no concerns, say nothing.',
+    '  4. Early signals: only if you see high-confidence signs the pipeline will or will not complete',
+    '     successfully. If it is too early to tell, say nothing.',
+    '- Ground every sentence in the snapshot below; never invent progress that is not there.',
+    '- If almost nothing has happened yet, say so in one sentence and stop.',
     '',
-    '=== CURRENT TASK (what is running now) ===',
-    runningLines.join('\n') || '- (nothing running)',
+    '=== CURRENT TASK (running now, or most recently finished) ===',
+    currentLine ?? '- (nothing running and nothing finished yet)',
+    '',
+    '=== CURRENT PHASE / GATE (▶ marks the phase of the current task) ===',
+    phaseLines.join('\n') || '- (no tasks)',
     '',
     '=== RECENT TASK OUTCOMES (newest first) ===',
     outcomeLines.join('\n') || '- (none finished yet)',
@@ -223,7 +251,8 @@ async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider):
     await sinks.close();
   }
   const durationS = Math.round(outcome.durationMs / 1000);
-  const summary = squash(outcome.result.text || outcome.allText, 800);
+  // Room for the requested 3–5 sentences; the panel and log both cap their own display.
+  const summary = squash(outcome.result.text || outcome.allText, 1200);
   const failed = !outcome.result.ok || outcome.interrupted || outcome.timedOut || outcome.stalled || !!outcome.spawnError;
   if (failed && !summary) {
     const error = outcome.spawnError ?? outcome.result.errorSubtype ?? (outcome.timedOut ? 'timeout' : outcome.stalled ? 'stalled' : 'no answer');

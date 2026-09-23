@@ -5,7 +5,8 @@
 
 export type Key =
   | { type: 'char'; char: string }
-  | { type: 'key'; name: NamedKey };
+  | { type: 'key'; name: NamedKey }
+  | MouseKey;
 
 export type NamedKey =
   | 'up' | 'down' | 'left' | 'right'
@@ -13,7 +14,45 @@ export type NamedKey =
   | 'tab' | 'shift-tab' | 'enter' | 'escape' | 'backspace' | 'delete'
   | 'ctrl-c';
 
+/** A decoded SGR mouse event (`CSI < b ; x ; y M|m`), coordinates 1-based from the top-left. */
+export type MouseButton =
+  | 'left' | 'middle' | 'right'
+  | 'wheel-up' | 'wheel-down' | 'wheel-left' | 'wheel-right'
+  | 'none';
+
+export interface MouseKey {
+  type: 'mouse';
+  button: MouseButton;
+  x: number;
+  y: number;
+  /** True for a drag/motion report (a button is held). */
+  motion: boolean;
+  /** True for a button-release report. */
+  release: boolean;
+}
+
 const CSI_FINAL = /[@-~]/;
+
+function decodeSgrMouse(params: string, final: string): MouseKey | undefined {
+  const [rawCb, rawX, rawY] = params.split(';');
+  const cb = Number(rawCb);
+  const x = Number(rawX);
+  const y = Number(rawY);
+  if (!Number.isFinite(cb) || !Number.isFinite(x) || !Number.isFinite(y)) return undefined;
+  const motion = (cb & 32) !== 0;
+  const release = final === 'm';
+  const low = cb & 3;
+  let button: MouseButton;
+  if (cb & 64) {
+    // Wheel events carry the 0x40 flag; the low bits select the axis/direction.
+    button = low === 0 ? 'wheel-up' : low === 1 ? 'wheel-down' : low === 2 ? 'wheel-left' : 'wheel-right';
+  } else if (release) {
+    button = 'none';
+  } else {
+    button = low === 0 ? 'left' : low === 1 ? 'middle' : low === 2 ? 'right' : 'none';
+  }
+  return { type: 'mouse', button, x, y, motion, release };
+}
 
 function csiKey(params: string, final: string): NamedKey | undefined {
   const p = params.replace(/^[?>!]/, '');
@@ -72,6 +111,11 @@ export class KeyParser {
         const params = rest.slice(0, finalIdx);
         const final = rest[finalIdx];
         this.buf = this.buf.slice(2 + finalIdx + 1);
+        if (params.startsWith('<')) {
+          const mouse = decodeSgrMouse(params.slice(1), final);
+          if (mouse) out.push(mouse);
+          return true;
+        }
         const name = csiKey(params, final);
         if (name) out.push({ type: 'key', name });
         return true;
