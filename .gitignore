@@ -13,10 +13,14 @@ coverage/
 runs/
 state.json
 symphony.log
+watch.log
 lock
 STOP
 symphony.config.json
 fixtures/
+
+# throwaway project created by `npm run mock` (scripts/mock.mjs)
+.mock/
 
 # logs
 npm-debug.log*

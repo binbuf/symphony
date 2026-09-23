@@ -43,6 +43,7 @@
   "paths": {},
   "taskSets": [],
   "autoApprove": true,
+  "tui": true,
   "nudge": true,
   "timeoutMin": 240,
   "idleTimeoutMin": 20,
@@ -92,6 +93,13 @@
       "done",
       "continue"
     ]
+  },
+  "watch": {
+    "enabled": true,
+    "intervalMin": 5,
+    "provider": "opencode",
+    "model": "openrouter/deepseek/deepseek-v4.1-flash",
+    "timeoutMin": 5
   },
   "retry": {
     "maxAttempts": 3,

@@ -22,6 +22,7 @@ import { DONE_STATES, SKIP_STATES, acquireLock, haltResumeHint, newTaskState, re
 import type { Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, squash, stamp } from './util.js';
 import { runVerify } from './verify.js';
+import { startPipelineWatch, type WatchState } from './watch.js';
 
 export interface RunFlags {
   from?: string;
@@ -52,6 +53,10 @@ export interface RunContext {
   startBranch?: string;
   /** Session cost reported during this invocation, for the provider-agnostic run budget. */
   runCostUsd?: number;
+  /** Live pipeline-watch state shown in the TUI's top panel; undefined when the watcher is off. */
+  watch?: WatchState;
+  /** Trigger an immediate pipeline-watch check (bound by the watcher). */
+  watchRefresh?: () => void;
 }
 
 interface Final { status: TaskStatus; summary: string; lastError?: LastError }
@@ -789,10 +794,14 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   acquireLock(paths);
   ctx.startBranch = currentBranch(paths.root);
   const stopHeartbeat = startLockHeartbeat(paths);
+  // The pipeline has kicked off: arm the periodic, read-only progress/health watcher now. It is
+  // advisory — a missing provider or a failed check updates the TUI panel and watch log only.
+  const watcher = startPipelineWatch(ctx);
   let code: number;
   try {
     code = await runLoop();
   } finally {
+    watcher?.stop();
     stopHeartbeat();
     releaseLock(paths);
   }

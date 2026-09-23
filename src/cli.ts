@@ -16,6 +16,7 @@ import { parseRoadmap, patchRoadmapFile, type Roadmap } from './roadmap.js';
 import { nudgeCommand, runCommand, type RunContext, type RunFlags } from './runner.js';
 import { loadState, reconcile, saveState, type State } from './state.js';
 import { discoverTasks, type Task } from './tasks.js';
+import { runWithTui } from './tui/index.js';
 import { UsageError, fileExists } from './util.js';
 
 const HELP = `symphony — run an LLM coding agent through your roadmap, one fresh session per task
@@ -23,7 +24,7 @@ const HELP = `symphony — run an LLM coding agent through your roadmap, one fre
 Usage
   symphony run     [--prepare] [--provider P] [--model M] [--variant V] [--from T03] [--to T10] [--only T05,T06] [--retry]
                    [--continue-on-failure] [--dry-run] [--safe] [--no-nudge] [--timeout-min N] [--max-tasks N]
-                   [--max-iterations N] [--budget USD] [--max-cost USD] [--clear-halt] [--set NAME]
+                   [--max-iterations N] [--budget USD] [--max-cost USD] [--clear-halt] [--set NAME] [--tui|--no-tui]
   symphony status  [--json]              progress table (or JSON)
   symphony logs    [T05]                 print a task's per-run log (docs/logs/T05.md); with no id, list them
   symphony doctor                        preflight: binaries, auth, git, roadmap, verify, halt/STOP/lock
@@ -61,10 +62,18 @@ Limits
                            Unset: the package.json test script is used when one exists (inferVerify)
 
 Controls
+  --tui / --no-tui         full-screen run view: a self-updating status table above the live output,
+                           with scrolling, follow, pause, accept and clear-halt keys. Default on when
+                           stdout and stdin are a terminal; off when piped, in CI, or with --no-tui.
+                           Set "tui": false in the config to disable it by default.
   touch .stop              pause at the next boundary: a task start or a continuation session end
                            (nothing is killed); configurable via paths.stop
   touch .symphony/STOP     legacy alias for the above
   Ctrl-C                   stop the current session, record it as unfinished, exit 130
+  pipeline watch           while the run is in flight, a separate read-only model summarizes recent
+                           progress and pipeline health into the TUI's top strip and
+                           .symphony/watch.log every watch.intervalMin (default 5 min, on by default;
+                           press w in the TUI to check now). Configure via the "watch" config block.
 
 Exit codes: 0 ok/paused · 1 unexpected error · 2 stopped on a blocked/failed task · 3 halted · 4 usage/preflight · 130/143 interrupted
 Every option also applies to the project given by --root DIR (default: the directory containing .symphony/).
@@ -153,6 +162,8 @@ export async function main(argv: string[]): Promise<number> {
       'max-cost': { type: 'string' },
       'clear-halt': { type: 'boolean' },
       prepare: { type: 'boolean' },
+      tui: { type: 'boolean' },
+      'no-tui': { type: 'boolean' },
       direction: { type: 'string' },
       'allow-id-reuse': { type: 'boolean' },
       'reset-state': { type: 'boolean' },
@@ -283,7 +294,12 @@ export async function main(argv: string[]): Promise<number> {
         if (!id) throw new UsageError('nudge: give a task id, e.g. symphony nudge T05');
         return nudgeCommand(ctx, id, v.note);
       }
-      return runCommand(ctx);
+      // The full-screen view is the default on a real terminal; --no-tui (or config tui:false, CI, a
+      // pipe) falls back to the plain stream. --tui forces it and warns when that is not possible.
+      // --dry-run prints prompts meant to be read or piped, so it always stays plain.
+      const tuiEnabled = v['no-tui'] === true ? false : v.tui === true ? true : config.tui;
+      const tui = v['dry-run'] === true ? { enabled: false, force: false } : { enabled: tuiEnabled, force: v.tui === true };
+      return runWithTui(ctx, () => runCommand(ctx), tui);
     }
     default:
       throw new UsageError(`unknown command "${cmd}"\n\n${HELP}`);

@@ -8,10 +8,10 @@ import { taskLogPath } from './logs.js';
 import { rel, stopIgnoreEntry, stopPresent, type Paths } from './paths.js';
 import { PROGRESS_HEADER } from './prompt.js';
 import { canonicalId, patchRoadmapFile } from './roadmap.js';
-import { DONE_STATES, haltResumeHint, saveState, type LogRef, type State, type TaskState } from './state.js';
-import { updatePipelineStatus } from './status.js';
+import { DONE_STATES, haltResumeHint, saveState, type State } from './state.js';
+import { buildStatusTable, formatStatusRow, statusColumnWidths, updatePipelineStatus } from './status.js';
 import type { Task } from './tasks.js';
-import { UsageError, ensureDir, fmtCost, fmtDateTime, fmtDuration, nowIso, squash } from './util.js';
+import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso } from './util.js';
 
 function writeIfMissing(path: string, content: string, created: string[]): void {
   if (existsSync(path)) return;
@@ -62,65 +62,15 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
   }
   if (state.halted) log.banner('HALTED', [`${state.halted.taskId ? `${state.halted.taskId} · ` : ''}${state.halted.category}: ${state.halted.reason}`, `at ${state.halted.at}`, haltResumeHint(state.halted)]);
 
-  const rows: string[][] = [];
-  for (const t of tasks) {
-    const s = state.tasks[t.id];
-    const status = s?.status ?? 'pending';
-    const running = status === 'running';
-    const shown = running && s?.pid && !pidAlive(s.pid) ? 'running?' : status;
-    const time = running ? `${fmtDuration(runningSeconds(s))} (running)` : fmtDuration(s?.durationS || undefined);
-    // The parent line spans the whole task: the first session's start through the finish, with the
-    // accumulated duration and the final summary.
-    const start = s?.logs?.[0]?.started ?? s?.started;
-    rows.push([t.id, squash(t.phase, 18), squash(t.title, 42), shown, String(s?.attempts ?? 0), time, fmtDateTime(start), fmtDateTime(s?.finished), fmtCost(s?.costUsd), s?.provider ?? '', squash(s?.model ? `${s.model}${s.variant ? `#${s.variant}` : ''}` : '', 28), squash(s?.summary ?? '', 60)]);
-    // A task split across sessions or retried (att >= 2) gets one child line per session, so each
-    // round reports its own start/end, duration and summary instead of only the task's running total.
-    if ((s?.attempts ?? 0) >= 2 && s?.logs?.length) {
-      s.logs.forEach((l, i) => {
-        const run = runTiming(l, running);
-        const label = `run ${i + 1} · ${l.kind}`;
-        // The session's own provider and model, so an escalated run is visible in the table too.
-        rows.push(['  ↳', '', squash(label, 42), l.status ?? '', '', run.duration, run.start, run.end, fmtCost(l.costUsd), squash(l.provider ?? '', 16), squash(l.model ? `${l.model}${l.variant ? `#${l.variant}` : ''}` : '', 28), squash(l.summary ?? '', 60)]);
-      });
-    }
-  }
-  const head = ['id', 'phase', 'title', 'status', 'att', 'duration', 'start', 'end', 'cost', 'provider', 'model', 'summary'];
-  const widths = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
-  const fmt = (r: string[]) => r.map((c, i) => (i === head.length - 1 ? c : c.padEnd(widths[i]))).join('  ');
-  log.plain(fmt(head));
+  const table = buildStatusTable(tasks, state);
+  const widths = statusColumnWidths(table);
+  log.plain(formatStatusRow(table.head, widths));
   log.plain(widths.map((w) => '-'.repeat(w)).join('  '));
-  rows.forEach((r) => log.plain(fmt(r)));
+  table.rows.forEach((r) => log.plain(formatStatusRow(r, widths)));
 
-  const done = tasks.filter((t) => DONE_STATES.includes(state.tasks[t.id]?.status ?? 'pending')).length;
-  const cost = tasks.reduce((a, t) => a + (state.tasks[t.id]?.costUsd ?? 0), 0);
-  const time = tasks.reduce((a, t) => {
-    const s = state.tasks[t.id];
-    return a + (s?.status === 'running' ? runningSeconds(s) : s?.durationS ?? 0);
-  }, 0);
-  const blocked = tasks.filter((t) => state.tasks[t.id]?.status === 'blocked').map((t) => t.id);
-  log.plain(`\n${done}/${tasks.length} done · ${fmtDuration(time || undefined)} · ${fmtCost(cost || undefined)} · default provider ${config.provider}${activeSet ? ` · task set ${activeSet}` : ''}${blocked.length ? ` · awaiting a human: ${blocked.join(' ')}` : ''}${stopPresent(paths) ? ` · STOP present (${rel(paths.root, paths.stop)})` : ''}`);
+  const { done, costUsd, durationS, blocked } = table.summary;
+  log.plain(`\n${done}/${tasks.length} done · ${fmtDuration(durationS || undefined)} · ${fmtCost(costUsd || undefined)} · default provider ${config.provider}${activeSet ? ` · task set ${activeSet}` : ''}${blocked.length ? ` · awaiting a human: ${blocked.join(' ')}` : ''}${stopPresent(paths) ? ` · STOP present (${rel(paths.root, paths.stop)})` : ''}`);
   return 0;
-}
-
-function pidAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
-}
-
-/** Time a still-running task has spent so far: its finished sessions plus the one in flight. */
-function runningSeconds(s: TaskState | undefined): number {
-  const base = s?.durationS ?? 0;
-  if (!s?.started) return base;
-  const started = Date.parse(s.started);
-  if (!Number.isFinite(started)) return base;
-  return base + Math.max(0, Math.round((Date.now() - started) / 1000));
-}
-
-/** The start stamp, computed end stamp and duration of one recorded session run (in flight included). */
-function runTiming(l: LogRef, running: boolean): { start: string; end: string; duration: string } {
-  const started = l.started ? Date.parse(l.started) : NaN;
-  const seconds = l.durationS ?? (running && Number.isFinite(started) ? Math.max(0, Math.round((Date.now() - started) / 1000)) : undefined);
-  const end = Number.isFinite(started) && seconds !== undefined ? new Date(started + seconds * 1000).toISOString() : undefined;
-  return { start: fmtDateTime(l.started), end: fmtDateTime(end), duration: fmtDuration(seconds) };
 }
 
 /** Print a task's per-run log (docs/logs/TNN.md), or list the log files when no id is given. */
