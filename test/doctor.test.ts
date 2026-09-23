@@ -71,3 +71,15 @@ test('doctor fails on a lock held by a live process and on a sticky halt', async
     child.kill();
   }
 });
+
+test('doctor halt advice names --retry for an attempts halt, clear-halt otherwise', () => {
+  const { paths, state } = project();
+  const config = { ...DEFAULTS, provider: 'fake' as const };
+  state.halted = { at: new Date().toISOString(), taskId: 'T03', category: 'attempts', reason: 'T03 has failed 3 times' };
+  const attempts = runDoctor({ paths, config, state }).find((c) => c.name === 'halt')?.detail ?? '';
+  assert.match(attempts, /--retry --only T03/);
+  state.halted = { at: new Date().toISOString(), category: 'auth', reason: 'no key' };
+  const auth = runDoctor({ paths, config, state }).find((c) => c.name === 'halt')?.detail ?? '';
+  assert.match(auth, /symphony clear-halt/);
+  assert.doesNotMatch(auth, /--retry/);
+});
