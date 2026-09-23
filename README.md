@@ -167,7 +167,7 @@ docs/
 
 | command | what it does |
 |---|---|
-| `status [--json]` | progress table: id, phase, title, status, attempts, duration, start/end, cost, provider, summary. A task split across sessions or retried (attempts ≥ 2) also lists one line per session run beneath its parent line, each with its own start/end, duration and summary |
+| `status [--json]` | progress table: id, phase, title, status, attempts, duration, start/end, cost, provider, model, summary. A task split across sessions or retried (attempts ≥ 2) also lists one line per session run beneath its parent line, each with its own start/end, duration, provider/model and summary — so an escalated run's model is visible at a glance |
 | `accept T05 [--note "…"]` | human sign-off on a blocked/failed task; counts as done, bullet becomes `[x] ⟵ accepted` |
 | `nudge T05 [--note "…"]` | resume the task's last session and ask it to close out with a result block |
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also `git revert`s its `T05:` commits (newest first) |

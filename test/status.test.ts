@@ -111,6 +111,6 @@ test('statusCommand splits a task into a parent line plus one line per session r
   assert.match(children[2], /run 3 · task\s+done/);
   assert.match(children[2], /40 min\s+2026-01-02 02:00:00Z\s+2026-01-02 02:40:00Z/);
   assert.match(children[2], /last slice/);
-  // The session's own provider/model is shown, so an escalated run is visible in the table.
-  assert.match(children[2], /opencode · z-ai\/glm-5\.3/);
+  // The session's own provider and model are shown in separate columns, so an escalated run is visible in the table.
+  assert.match(children[2], /opencode\s+z-ai\/glm-5\.3/);
 });
