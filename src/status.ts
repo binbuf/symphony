@@ -4,7 +4,7 @@ import { patchRoadmapStatus } from './roadmap.js';
 import type { Paths } from './paths.js';
 import { DONE_STATES, type State, type TaskState, type TaskStatus } from './state.js';
 import type { Task } from './tasks.js';
-import { fmtCost, fmtDateTime, fmtDuration, nowIso, squash } from './util.js';
+import { fmtCost, fmtDateTime, fmtDuration, nowIso, squash, squashTail } from './util.js';
 
 const ORDER: TaskStatus[] = ['done', 'accepted', 'blocked', 'failed', 'pending', 'running'];
 
@@ -54,7 +54,14 @@ export interface StatusTable {
   summary: StatusSummary;
 }
 
-export function buildStatusTable(tasks: Task[], state: State): StatusTable {
+export interface StatusTableOptions {
+  /** Skip every per-cell cap so the full text is available to a horizontally scrolling renderer. */
+  expand?: boolean;
+}
+
+export function buildStatusTable(tasks: Task[], state: State, opts: StatusTableOptions = {}): StatusTable {
+  // Expanded mode disables the caps; a cap of Infinity still collapses whitespace but never truncates.
+  const cap = (max: number) => (opts.expand ? Number.POSITIVE_INFINITY : max);
   const rows: string[][] = [];
   const rowTask: string[] = [];
   const taskRow: Record<string, number> = {};
@@ -68,7 +75,7 @@ export function buildStatusTable(tasks: Task[], state: State): StatusTable {
     // accumulated duration and the final summary.
     const start = s?.logs?.[0]?.started ?? s?.started;
     taskRow[t.id] = rows.length;
-    rows.push([t.id, squash(t.phase, 18), squash(t.title, 42), shown, String(s?.attempts ?? 0), time, fmtDateTime(start), fmtDateTime(s?.finished), fmtCost(s?.costUsd), s?.provider ?? '', squash(s?.model ? `${s.model}${s.variant ? `#${s.variant}` : ''}` : '', 28), squash(s?.summary ?? '', 60)]);
+    rows.push([t.id, squash(t.phase, cap(18)), squash(t.title, cap(42)), shown, String(s?.attempts ?? 0), time, fmtDateTime(start), fmtDateTime(s?.finished), fmtCost(s?.costUsd), s?.provider ?? '', squashTail(s?.model ? `${s.model}${s.variant ? `#${s.variant}` : ''}` : '', cap(28)), squash(s?.summary ?? '', cap(60))]);
     rowTask.push(t.id);
     // A task split across sessions or retried (att >= 2) gets one child line per session, so each
     // round reports its own start/end, duration and summary instead of only the task's running total.
@@ -77,7 +84,7 @@ export function buildStatusTable(tasks: Task[], state: State): StatusTable {
         const run = runTiming(l, running);
         const label = `run ${i + 1} · ${l.kind}`;
         // The session's own provider and model, so an escalated run is visible in the table too.
-        rows.push(['  ↳', '', squash(label, 42), l.status ?? '', '', run.duration, run.start, run.end, fmtCost(l.costUsd), squash(l.provider ?? '', 16), squash(l.model ? `${l.model}${l.variant ? `#${l.variant}` : ''}` : '', 28), squash(l.summary ?? '', 60)]);
+        rows.push(['  ↳', '', squash(label, cap(42)), l.status ?? '', '', run.duration, run.start, run.end, fmtCost(l.costUsd), squash(l.provider ?? '', cap(16)), squashTail(l.model ? `${l.model}${l.variant ? `#${l.variant}` : ''}` : '', cap(28)), squash(l.summary ?? '', cap(60))]);
         rowTask.push(t.id);
       });
     }

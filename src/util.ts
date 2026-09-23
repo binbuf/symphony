@@ -24,6 +24,16 @@ export function squash(s: string, max: number): string {
   return t.length > max ? `${t.slice(0, Math.max(0, max - 1))}…` : t;
 }
 
+/**
+ * Collapse whitespace and, when too long, truncate from the *front* so the tail survives. Used for
+ * values like `provider/model#variant` where the end (the specific model) matters more than the
+ * leading namespace.
+ */
+export function squashTail(s: string, max: number): string {
+  const t = s.replace(/\s+/g, ' ').trim();
+  return t.length > max ? `…${t.slice(t.length - Math.max(0, max - 1))}` : t;
+}
+
 /** Truncate but keep line breaks (for log files). */
 export function clip(s: string, max: number): string {
   const t = s.trim();

@@ -7,7 +7,7 @@ import { statusCommand } from '../src/commands.js';
 import { DEFAULTS } from '../src/config.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths } from '../src/paths.js';
-import { buildPipelineStatus } from '../src/status.js';
+import { buildPipelineStatus, buildStatusTable } from '../src/status.js';
 import { newTaskState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
 
@@ -17,6 +17,21 @@ function captureLogger(): { log: Logger; lines: string[] } {
   const lines: string[] = [];
   return { log: { info() {}, warn() {}, error() {}, plain: (m) => lines.push(m), banner() {} }, lines };
 }
+
+test('buildStatusTable keeps the model tail compact and shows it in full when expanded', () => {
+  const model = 'some-provider-namespace/claude-sonnet-4-5';
+  const tasks = [task('T01', 1, 'Phase 1')];
+  const state: State = { version: 1, tasks: { T01: { ...newTaskState('t1'), status: 'running', provider: 'opencode', model } } };
+
+  const compact = buildStatusTable(tasks, state);
+  // The compact cell is ellipsized from the front, so the specific model name survives.
+  assert.ok(compact.rows[0][10].startsWith('…'));
+  assert.ok(compact.rows[0][10].endsWith('claude-sonnet-4-5'));
+  assert.ok(compact.rows[0][10].length <= 28);
+
+  const expanded = buildStatusTable(tasks, state, { expand: true });
+  assert.equal(expanded.rows[0][10], model, 'expand disables the per-cell cap');
+});
 
 test('buildPipelineStatus reports done, blocked, failed, remaining and the last finished task', () => {
   const tasks = [task('T01', 1, 'Phase 1'), task('T02', 2, 'Phase 1'), task('T03', 3, 'Phase 2'), task('T04', 4, 'Phase 2')];

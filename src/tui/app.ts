@@ -92,6 +92,8 @@ export class TuiApp {
   private toastUntil = 0;
   private splitRatio = 0.5;
   private layout: Layout = 'both';
+  /** When true every status cell is shown in full and the user pans with ← →. */
+  private expand = false;
   private lastStatuses = new Map<string, string>();
   private lastHalted = false;
   private renderScheduled = false;
@@ -199,7 +201,7 @@ export class TuiApp {
   private table(): StatusTable {
     const now = Date.now();
     if (!this.tableCache || now - this.tableCache.at > TABLE_TTL_MS) {
-      this.tableCache = { at: now, table: buildStatusTable(this.ctx.tasks, this.ctx.state) };
+      this.tableCache = { at: now, table: buildStatusTable(this.ctx.tasks, this.ctx.state, { expand: this.expand }) };
     }
     return this.tableCache.table;
   }
@@ -240,6 +242,7 @@ export class TuiApp {
     if (char === 'c') return this.openClearHalt();
     if (char === 'p') return this.togglePause();
     if (char === 'w') return this.refreshWatch();
+    if (char === 'e') return this.toggleExpand();
     if (char === 'z') return this.cycleLayout();
     if (char === '[' || char === '-') return this.adjustSplit(-0.05);
     if (char === ']' || char === '+') return this.adjustSplit(0.05);
@@ -393,6 +396,16 @@ export class TuiApp {
     this.render();
   }
 
+  /** Toggle full-width status cells; the extra width is reached by panning the focused panel. */
+  private toggleExpand(): void {
+    this.expand = !this.expand;
+    this.tableCache = undefined;
+    this.statusPanel.hOffset = 0;
+    if (this.layout !== 'bottom') this.focus = 'status';
+    this.toast(this.expand ? 'columns expanded — pan with ← →' : 'columns compact');
+    this.render();
+  }
+
   private adjustSplit(delta: number): void {
     this.splitRatio = clamp(this.splitRatio + delta, 0.2, 0.8);
     this.render();
@@ -532,7 +545,7 @@ export class TuiApp {
 
   private statusTitleRight(table: StatusTable): string {
     const s = table.summary;
-    return `${s.done}/${s.total} done${this.statusPanel.follow ? ' · follow' : ''}`;
+    return `${s.done}/${s.total} done${this.statusPanel.follow ? ' · follow' : ''}${this.expand ? ' · wide' : ''}`;
   }
 
   private logTitleRight(): string {
@@ -605,7 +618,7 @@ export class TuiApp {
 
   private hintsLine(): string {
     if (this.haltMode) return 'c clear halt & retry · q quit · ↑↓ scroll · Tab focus';
-    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · c clear-halt · p pause · w watch · z zoom · [ ] split';
+    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · c clear-halt · p pause · w watch · e expand · z zoom · [ ] split';
     return base;
   }
 
@@ -635,6 +648,7 @@ export class TuiApp {
         'c            clear a halt (asks for confirmation)',
         'p            pause / resume (toggles the .stop sentinel)',
         'w            run a pipeline-watch check now',
+        'e            expand all status columns (pan the focused panel with ← →)',
         'z            cycle layout: both / status only / output only',
         '[ ]  or  - + adjust the panel split',
         '',

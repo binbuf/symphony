@@ -12,7 +12,7 @@ import { buildStatusTable } from '../src/status.js';
 import type { Task } from '../src/tasks.js';
 import { TuiApp } from '../src/tui/app.js';
 import { runWithTui } from '../src/tui/index.js';
-import { KeyParser } from '../src/tui/keys.js';
+import { KeyParser, type Key } from '../src/tui/keys.js';
 import { AnsiTerminal } from '../src/tui/terminal.js';
 import { displayWidth, fit, padTo, sanitizeLine, sliceColumns, splice, stripAnsi, wrapText } from '../src/tui/text.js';
 
@@ -133,6 +133,27 @@ test('TuiApp renders the pipeline-watch panel above the status table', () => {
   const ready = stripAnsi(app.renderLines(100, 24).join('\n'));
   assert.match(ready, /On track: T01 is running normally\./);
   assert.match(ready, /2 updates/);
+});
+
+test('TuiApp: e expands every status column and panning can reach the full text', () => {
+  const tasks = [task('T01', 1)];
+  const state: State = {
+    version: 1,
+    tasks: { T01: { ...newTaskState('t1'), status: 'running', attempts: 1, started: new Date().toISOString(), provider: 'opencode', model: 'some-provider-namespace/claude-sonnet-4-5', summary: 'a deliberately long summary that compact mode truncates' } },
+  };
+  const app = new TuiApp(makeCtx(tasks, state), new AnsiTerminal(() => {}));
+  const priv = app as unknown as { handleKey(k: Key): void; focusMaxWidth(): number };
+  const press = (char: string) => priv.handleKey({ type: 'char', char });
+
+  const compactWidth = priv.focusMaxWidth();
+  press('e');
+  assert.match(stripAnsi(app.renderLines(100, 24).join('\n')), /columns expanded/, 'the toggle announces itself');
+  const expandedWidth = priv.focusMaxWidth();
+  assert.ok(expandedWidth > compactWidth, 'expanded columns are wider than the compact table');
+  assert.ok(stripAnsi(app.renderLines(expandedWidth + 1, 24).join('\n')).includes('claude-sonnet-4-5'), 'the full model is now rendered');
+
+  press('e');
+  assert.ok(priv.focusMaxWidth() < expandedWidth, 'toggling back compacts the table again');
 });
 
 test('TuiApp sanitizes the live stream so every frame line is exactly cols wide', () => {
