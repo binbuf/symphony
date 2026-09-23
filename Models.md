@@ -56,6 +56,11 @@ OpenCode addresses every model as `provider/model` and routes to any provider, s
 list to pin here. Browse the live catalogue at **<https://openrouter.ai/models>**, then use the id
 in that form — for example `openrouter/deepseek/deepseek-v4.1-flash` or `z-ai/glm-5.3`.
 
+symphony requires **OpenCode 1.x** (`opencode-ai@1`); 2.x is beta and not yet supported. Reasoning
+effort uses the 1.x `--variant` run flag (e.g. `high`), gated on the model's `variants` from
+`opencode models --verbose`. OpenCode 2.x replaces the flag with a `provider/model#variant` model
+reference and regroups the catalog, which this harness does not yet read.
+
 ## codex — Codex CLI (`codex`)
 
 | model | id | notes |

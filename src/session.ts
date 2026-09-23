@@ -3,6 +3,8 @@ import { createInterface } from 'node:readline';
 import type { RunSinks } from './logger.js';
 import type { ClassifyHints, NormalizedEvent, Provider, ResultEvent, SpawnSpec } from './providers/types.js';
 import { renderEvent } from './render.js';
+import { resolveSpawn } from './spawn.js';
+import { fmtTime } from './util.js';
 
 export type KillReason = 'timeout' | 'stall' | 'interrupt' | 'force';
 
@@ -70,11 +72,14 @@ export function startSession(o: SessionOpts): Session {
 
   let child: ChildProcess;
   try {
-    child = spawn(o.spec.bin, o.spec.args, {
+    const env = { ...process.env, ...(o.spec.env ?? {}) };
+    const launch = resolveSpawn(o.spec.bin, o.spec.args, { env, cwd: o.cwd });
+    child = spawn(launch.command, launch.args, {
       cwd: o.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       detached,
-      env: { ...process.env, ...(o.spec.env ?? {}) },
+      env,
+      windowsVerbatimArguments: launch.windowsVerbatimArguments,
     });
   } catch (e) {
     // Some launch failures (notably ENAMETOOLONG on Windows) are thrown synchronously by spawn()
@@ -86,7 +91,7 @@ export function startSession(o: SessionOpts): Session {
       timedOut: false, stalled: false, interrupted: false, spawnError, stderrTail: '',
       durationMs: Date.now() - t0, hints: parser.hints(), sawResult: false, sawError: false,
     };
-    const line = `[error] could not start provider: ${spawnError}`;
+    const line = `${fmtTime()} [error] could not start provider: ${spawnError}`;
     if (o.live !== false) process.stdout.write(`${line}\n`);
     o.sinks.log.write(`${line}\n`);
     return { done: Promise.resolve(outcome), kill: () => {} };
@@ -148,12 +153,13 @@ export function startSession(o: SessionOpts): Session {
         break;
       default: break;
     }
+    const ts = fmtTime();
     if (o.live !== false) {
       const live = renderEvent(ev, { maxChars: o.liveMaxChars, color: o.color });
-      if (live) process.stdout.write(`${live}\n`);
+      if (live) process.stdout.write(`${ts} ${live}\n`);
     }
     const full = renderEvent(ev, { maxChars: o.logMaxChars, color: false, multiline: true });
-    if (full) o.sinks.log.write(`${full}\n`);
+    if (full) o.sinks.log.write(`${ts} ${full}\n`);
   };
 
   child.stdin?.on('error', () => { /* EPIPE when the child does not read stdin */ });

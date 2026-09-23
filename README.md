@@ -44,7 +44,7 @@ The installer builds symphony in the clone (`npm install && npm run build`) and 
 - appends `.symphony/` to your project's `.gitignore`;
 - seeds `<project>/.symphony/symphony.config.json` from the example if it does not exist.
 
-Re-run the installer any time to upgrade: build output is replaced, your config is left alone. Requirements: **Node ≥ 20.11** and **git**. The installed copy has no runtime dependencies.
+Re-run the installer any time to upgrade: build output is replaced, your config is left alone. Requirements: **Node ≥ 20.11**, **git**, and the agent CLI you use. **OpenCode must be 1.x** — 2.x is beta and not yet supported (see [Providers](#providers)). The installed copy has no runtime dependencies.
 
 ### 2. (Optional) Pick a provider and configure it
 
@@ -120,13 +120,15 @@ docs/
 3. **Spawns the provider CLI** in the project root with permissions bypassed, and streams what it does:
 
    ```
-   [init] session=... model=...
-   [think] I should read the existing schema before adding the table
-   [text]  Adding the migration.
-   [tool]  Bash: npm test
-   [tool-result] 42 passing
-   [result] ok ($0.42 · 12 turns · 310s)
+   14:08:10 [init] session=... model=...
+   14:08:12 [think] I should read the existing schema before adding the table
+   14:08:15 [text]  Adding the migration.
+   14:08:18 [tool]  Bash: npm test
+   14:08:24 [tool-result] 42 passing
+   14:08:31 [result] ok ($0.42 · 12 turns · 310s)
    ```
+
+   Every line written to stdout and to a session log carries a local `HH:MM:SS` timestamp (harness `INFO`/`WARN`/`ERROR` lines too), so a run's timing is visible at a glance. Raw NDJSON (`.jsonl`) stays byte-faithful and is not timestamped.
 
 4. **Parses the result block** every session must end with:
 
@@ -351,17 +353,20 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 |---|---|---|---|---|
 | `claude` | `claude` | `-p --output-format stream-json --verbose`, prompt on stdin | `--dangerously-skip-permissions` | `--permission-mode acceptEdits --permission-prompts none` |
 | `cursor` | `agent` | `-p --output-format stream-json --workspace <root> --trust` + prompt-file bootstrap | `--force` | no `--force` |
-| `opencode` | `opencode` | `run --standalone --format json --thinking --file <prompt>` + bootstrap | `--auto` | no `--auto` |
+| `opencode` | `opencode` | `run --format json --thinking <bootstrap> --file <prompt>` | `--auto` | no `--auto` |
 | `codex` | `codex` | `exec --json --color never --skip-git-repo-check --cd <root> -`, prompt on stdin | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write --ask-for-approval never` |
 | `gemini` | `gemini` | `--output-format json --prompt <bootstrap>` (prompt-file) | `--yolo` | no `--yolo` |
 | `antigravity` | `agy` | `-p --output-format json --workspace <root>` + prompt-file bootstrap | `--dangerously-skip-permissions` | no bypass flag |
 | `fake` | node | replays an NDJSON fixture; for tests | | |
 
 - **Models:** pass `--model`, or set `providers.<name>.model`. Current ids per provider are listed in [Models.md](Models.md); OpenCode addresses models as `provider/model` (browse <https://openrouter.ai/models>). Ids churn, so confirm against each CLI's own listing.
+- **OpenCode 1.x required:** the OpenCode adapter targets the 1.x CLI (`opencode run --format json --thinking --variant …`). OpenCode 2.x is beta and not supported yet — it moves the variant into the model reference (`provider/model#variant`), regroups the model catalog, and adds server flags (`--standalone`) the adapter does not pass. `doctor` warns when it detects a non-1.x version. Pin 1.x with `npm i -g opencode-ai@1` until 2.x is stable.
+- **Running alongside OpenCode 2.x:** the harness launches whatever `providers.opencode.bin` names (default `opencode`) and reports the version it finds — it does not detect or pin a version itself. A 2.x **desktop/GUI** app does not put `opencode` on your shell `PATH`, so it leaves a 1.x CLI install alone. Two **CLI** installs, however, share the `opencode` command name (the V2 CLI is `@opencode/cli` / the `opencode-v2` tap / `opencode-beta`; the V2 curl installer replaces the V1 binary), so whichever is first on `PATH` wins. Pin 1.x explicitly by setting `providers.opencode.bin` to a path (see below), then confirm with `doctor`.
+- **Choosing the binary:** `providers.<name>.bin` may be a command name looked up on `PATH` (the default), or a path — absolute, `~`, or relative to the project root — which always wins over `PATH`. Point it at a chosen install, e.g. `/usr/local/bin/opencode` or `~/.opencode/bin/opencode`. The harness reports the resolved path and version in `doctor`. On Windows an npm `.cmd`/`.bat` shim is launched through `cmd.exe` automatically (argv escaped), so a normal npm install works with no config; a native `.exe` is spawned directly.
 - **Reasoning effort ("variant"):** defaults to `high` and is sent only to providers that expose an effort knob and models that support it — `--effort` for Claude, `--variant` for OpenCode, `model_reasoning_effort` for Codex, `--effort` for Antigravity. Override with `--variant`, task front matter `variant:`, or `providers.<name>.variant`. OpenCode's per-model support is read from its own catalog (`opencode models --verbose`), so a model without variants simply runs at its default instead of erroring.
 - **Session resume** for retries and nudges uses `--resume` (Claude, Cursor), `--session` (OpenCode) and `exec resume <id>` (Codex); Gemini and Antigravity do not advertise resume, so retries start fresh.
 - **Cost** is surfaced for Claude (per session) and OpenCode (cumulative); `--budget` is Claude-only. Codex reports token usage instead.
-- **Correcting an adapter:** each provider's argv can be adjusted for your install with `providers.<name>.bin` and `providers.<name>.extraArgs`; unknown stream shapes are parsed best-effort.
+- **Correcting an adapter:** each provider's argv can be adjusted for your install with `providers.<name>.extraArgs`; unknown stream shapes are parsed best-effort.
 - **Prompt size:** prompts are always written to a file first; providers get them over stdin, as an attached file, or via a short bootstrap that names the file, so OS command-line limits are never a problem.
 
 ## Escalation
@@ -450,7 +455,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | key | default | meaning |
 |---|---|---|
 | `provider` | `claude` | `claude` · `cursor` · `opencode` · `codex` · `gemini` · `antigravity` |
-| `providers.<name>.bin` `.model` `.variant` `.extraArgs` `.budgetUsd` `.idleTimeoutMin` | see `symphony.config.example.json` | binary, model, reasoning-effort default (`high`), extra CLI args, per-task budget (Claude), stall timeout override |
+| `providers.<name>.bin` `.model` `.variant` `.extraArgs` `.budgetUsd` `.idleTimeoutMin` | see `symphony.config.example.json` | binary (a `PATH` name, or an absolute/`~`/project-relative path that overrides `PATH`), model, reasoning-effort default (`high`), extra CLI args, per-task budget (Claude), stall timeout override |
 | `paths.docs` | `docs` (legacy `.docs` honoured) | planning package directory |
 | `paths.roadmap` `.progress` `.tasks` `.design` `.adr` `.logs` `.index` | derived from `paths.docs` | individual overrides, absolute or root-relative |
 | `paths.stop` | `.stop` | graceful-pause sentinel (absolute or root-relative) |

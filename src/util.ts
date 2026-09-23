@@ -1,8 +1,15 @@
 import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { homedir } from 'node:os';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 
 export function nowIso(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+/** Local wall-clock time-of-day: `14:08:10`. Used to timestamp stdout and log entries. */
+export function fmtTime(d = new Date()): string {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 /** Filesystem-friendly local timestamp: 20260917T231530 */
@@ -78,6 +85,52 @@ export function slugify(s: string): string {
 
 export function fileExists(p: string): boolean {
   return existsSync(p);
+}
+
+/**
+ * Resolve a command to the absolute path that PATH lookup would use, so preflight can show which
+ * binary actually runs when several are installed (e.g. OpenCode 1.x and 2.x). Only bare command
+ * names are searched (use `resolveBinary` for paths, which also expands `~` and relative paths); a
+ * value that looks like a path is returned as-is when it exists. Returns undefined when nothing
+ * matches; this is best-effort only and never decides whether a command can run.
+ */
+export function resolveExecutable(bin: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  if (bin.includes('/') || bin.includes('\\')) return existsSync(bin) ? bin : undefined;
+  const pathValue = env.PATH ?? env.Path ?? env.path ?? '';
+  const exts = process.platform === 'win32'
+    ? (env.PATHEXT ?? env.PathExt ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)
+    : [''];
+  for (const dir of pathValue.split(delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const candidate = join(dir, bin + ext);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+/** Whether a configured binary is a path the user chose (absolute, `~`, or containing a separator). */
+export function isPathLike(bin: string): boolean {
+  return bin.startsWith('~') || isAbsolute(bin) || bin.includes('/') || bin.includes('\\');
+}
+
+/** Expand a leading `~` or `~/` to the user's home directory. Other values pass through. */
+export function expandHome(p: string): string {
+  if (p !== '~' && !p.startsWith('~/') && !p.startsWith('~\\')) return p;
+  return p === '~' ? homedir() : join(homedir(), p.slice(2));
+}
+
+/**
+ * The binary a configured `providers.<name>.bin` names: an explicit path is expanded (`~`) and made
+ * absolute against `cwd`, so the user's chosen install wins; a bare command name is looked up on
+ * PATH. Falls back to the configured value when a bare name is not found, so the spawn error still
+ * names what was asked for.
+ */
+export function resolveBinary(bin: string, opts: { env?: NodeJS.ProcessEnv; cwd?: string } = {}): string {
+  if (!isPathLike(bin)) return resolveExecutable(bin, opts.env) ?? bin;
+  const expanded = expandHome(bin);
+  return isAbsolute(expanded) ? expanded : resolve(opts.cwd ?? process.cwd(), expanded);
 }
 
 export function isRecord(x: unknown): x is Record<string, unknown> {

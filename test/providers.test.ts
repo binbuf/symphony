@@ -5,7 +5,7 @@ import { ClaudeParser, claudeProvider } from '../src/providers/claude.js';
 import { CodexParser, codexProvider } from '../src/providers/codex.js';
 import { ATTACHED_BOOTSTRAP, fileBootstrap } from '../src/providers/common.js';
 import { CursorParser, cursorProvider } from '../src/providers/cursor.js';
-import { OpenCodeParser, opencodeProvider, parseModelVariants } from '../src/providers/opencode.js';
+import { OpenCodeParser, opencodeProvider, opencodeVersionWarning, parseModelVariants } from '../src/providers/opencode.js';
 import type { BuildCommandOpts } from '../src/providers/types.js';
 
 const j = (o: unknown) => JSON.stringify(o);
@@ -95,10 +95,17 @@ test('opencode buildCommand: prompt attached via --file, --auto by default, --se
   assert.equal(c.args[0], 'run');
   assert.ok(c.args.includes('--auto'));
   assert.ok(c.args.join(' ').includes('--session sess'));
-  assert.ok(c.args.join(' ').includes('--file /tmp/p.md'));
-  assert.equal(c.args[c.args.length - 1], ATTACHED_BOOTSTRAP);
+  // `--file` is an array flag in the 1.x CLI: the bootstrap message is the positional and must come
+  // first, with `--file <path>` last so the bootstrap is never swallowed as a second file.
+  assert.equal(c.args[c.args.length - 2], '--file');
+  assert.equal(c.args[c.args.length - 1], '/tmp/p.md');
+  assert.equal(c.args[c.args.length - 3], ATTACHED_BOOTSTRAP);
   assert.equal(c.stdinPayload, undefined);
   assert.ok(!c.args.includes('--dir'));
+  // OpenCode 1.x flags only: `--standalone` is a 2.x server flag the 1.x CLI rejects.
+  assert.ok(!c.args.includes('--standalone'));
+  assert.ok(c.args.join(' ').includes('--format json'));
+  assert.ok(c.args.includes('--thinking'));
 });
 
 test('codex parser: thread, items, turn.completed → result with last message; turn.failed → error result', () => {
@@ -166,6 +173,14 @@ test('opencode model variant catalog: refs map to their advertised variants', ()
   const map = parseModelVariants(out);
   assert.deepEqual([...map.get('deepinfra/deepseek-ai/X')!].sort(), ['high', 'low']);
   assert.deepEqual([...map.get('other/plain')!], []);
+});
+
+test('opencode version gate: 1.x is accepted, 2.x warns, unknown shapes do not block', () => {
+  assert.equal(opencodeVersionWarning('1.18.29'), undefined);
+  assert.equal(opencodeVersionWarning('1.0.0\n'), undefined);
+  assert.match(opencodeVersionWarning('2.0.0-beta.3') ?? '', /requires OpenCode 1\.x/);
+  assert.match(opencodeVersionWarning('2.1.0') ?? '', /2\.1\.0/);
+  assert.equal(opencodeVersionWarning('not a version'), undefined);
 });
 
 test('provider capability flags: variant support matches the CLI', () => {

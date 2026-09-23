@@ -46,6 +46,7 @@ test('normal session: events accumulate, result captured, files written', async 
   assert.ok(out.result.text.includes('status: done'));
   assert.equal(out.allText, 'working');
   const log = readFileSync(sinks.logPath, 'utf8');
+  assert.match(log, /^\d{2}:\d{2}:\d{2} \[think\] let me see$/m);
   assert.ok(log.includes('[think] let me see'));
   assert.ok(log.includes('[stdout] plain text line'));
   assert.ok(log.includes('[result] ok'));

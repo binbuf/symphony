@@ -40,7 +40,7 @@ Usage
   symphony brief                         print a paste-ready prompt that makes any LLM client emit the docs package in this format
   symphony --version                     print the version
 
-Providers: claude (Claude Code) · cursor (Cursor agent) · opencode · codex (Codex CLI) · gemini (Gemini CLI) · antigravity (Google Antigravity) · fake (fixture replay)
+Providers: claude (Claude Code) · cursor (Cursor agent) · opencode (1.x) · codex (Codex CLI) · gemini (Gemini CLI) · antigravity (Google Antigravity) · fake (fixture replay)
 Provider/model precedence: --provider/--model/--variant > SYMPHONY_PROVIDER/SYMPHONY_MODEL/SYMPHONY_VARIANT
 > task front matter (provider, model, variant) > .symphony/symphony.config.json > defaults. All providers run with
 permissions bypassed unless --safe. Reasoning effort ("variant") defaults to "high" for providers that support it

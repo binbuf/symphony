@@ -1,6 +1,6 @@
 import { appendFileSync, createWriteStream, type WriteStream } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { ensureDir, nowIso } from './util.js';
+import { ensureDir, fmtTime } from './util.js';
 
 export interface Logger {
   info(m: string): void;
@@ -17,7 +17,7 @@ const COLORS = { INFO: '\x1b[2m', WARN: '\x1b[33m', ERROR: '\x1b[31m' } as const
 export function createLogger(file?: string, color = process.stdout.isTTY === true): Logger {
   if (file) ensureDir(dirname(file));
   const write = (level: keyof typeof COLORS, m: string) => {
-    const ts = nowIso();
+    const ts = fmtTime();
     const head = color ? `${COLORS[level]}${ts} ${level}\x1b[0m` : `${ts} ${level}`;
     process.stdout.write(`${head} ${m}\n`);
     if (file) { try { appendFileSync(file, `${ts} ${level} ${m}\n`); } catch { /* logging must never crash the run */ } }
@@ -32,7 +32,7 @@ export function createLogger(file?: string, color = process.stdout.isTTY === tru
       const bar = '═'.repeat(width);
       const body = [bar, `  ${title}`, ...lines.map((l) => `  ${l}`), bar].join('\n');
       process.stdout.write(`${color ? '\x1b[1;31m' : ''}${body}${color ? '\x1b[0m' : ''}\n`);
-      if (file) { try { appendFileSync(file, `${nowIso()} HALT ${title} | ${lines.join(' | ')}\n`); } catch { /* ignore */ } }
+      if (file) { try { appendFileSync(file, `${fmtTime()} HALT ${title} | ${lines.join(' | ')}\n`); } catch { /* ignore */ } }
     },
   };
 }

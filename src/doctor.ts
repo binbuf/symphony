@@ -4,8 +4,11 @@ import { resolveVerify, type Config, type SessionSpec } from './config.js';
 import { dirtyFiles, gitAvailable, gitToplevel } from './git.js';
 import { jevProblem } from './jev.js';
 import { rel, stopPresent, type Paths } from './paths.js';
+import { opencodeVersionWarning } from './providers/opencode.js';
 import type { Provider } from './providers/types.js';
 import { haltResumeHint, liveLock, type State } from './state.js';
+import { resolveSpawn } from './spawn.js';
+import { isPathLike, resolveBinary } from './util.js';
 
 export interface Check { name: string; level: 'ok' | 'warn' | 'fail'; detail: string }
 
@@ -29,8 +32,15 @@ export interface DoctorInput {
   skipRoadmap?: boolean;
 }
 
-function probe(bin: string, args: string[], timeoutMs = 15_000): { ok: boolean; enoent: boolean; timedOut: boolean; out: string } {
-  const r = spawnSync(bin, args, { encoding: 'utf8', timeout: timeoutMs, env: process.env });
+function probe(bin: string, args: string[], opts: { timeoutMs?: number; cwd?: string } = {}): { ok: boolean; enoent: boolean; timedOut: boolean; out: string } {
+  const launch = resolveSpawn(bin, args, { cwd: opts.cwd });
+  const r = spawnSync(launch.command, launch.args, {
+    encoding: 'utf8',
+    timeout: opts.timeoutMs ?? 15_000,
+    env: process.env,
+    cwd: opts.cwd,
+    windowsVerbatimArguments: launch.windowsVerbatimArguments,
+  });
   const enoent = (r.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
   const timedOut = r.error !== undefined && /ETIMEDOUT/.test(String((r.error as NodeJS.ErrnoException).code ?? ''));
   const all = `${r.stdout ?? ''}\n${r.stderr ?? ''}`.trim();
@@ -73,13 +83,28 @@ export function runDoctor(i: DoctorInput): Check[] {
       add('provider', 'ok', `fake provider (fixture replay)${where}`);
       return;
     }
-    const v = probe(spec.bin, ['--version']);
-    if (v.enoent) add('provider', 'fail', `${spec.bin} not found on PATH (provider ${provider.name}${where}); set providers.${provider.name}.bin`);
-    else if (v.timedOut) add('provider', 'warn', `${spec.bin} --version did not answer within 15 s`);
-    else add('provider', v.ok ? 'ok' : 'warn', `${provider.name} via ${spec.bin}${v.out ? ` (${v.out})` : ''} · model ${spec.model ?? 'provider default'} [${spec.sources.model}]${spec.variant ? ` · variant ${spec.variant} [${spec.sources.variant}]` : ''}${where}`);
+    const explicit = isPathLike(spec.bin);
+    const target = resolveBinary(spec.bin, { cwd: i.paths.root });
+    if (explicit && !existsSync(target)) {
+      add('provider', 'fail', `configured binary ${spec.bin} not found at ${target} (provider ${provider.name}${where}); fix providers.${provider.name}.bin`);
+      return;
+    }
+    const v = probe(spec.bin, ['--version'], { cwd: i.paths.root });
+    if (v.enoent) {
+      if (explicit) add('provider', 'fail', `configured binary ${spec.bin} could not be launched (provider ${provider.name}${where}); check providers.${provider.name}.bin`);
+      else add('provider', 'fail', `${spec.bin} not found on PATH (provider ${provider.name}${where}); set providers.${provider.name}.bin to a path to choose a specific install`);
+    } else if (v.timedOut) add('provider', 'warn', `${spec.bin} --version did not answer within 15 s`);
+    else {
+      const at = target !== spec.bin ? ` at ${target}` : '';
+      add('provider', v.ok ? 'ok' : 'warn', `${provider.name} via ${spec.bin}${at}${v.out ? ` (${v.out})` : ''} · model ${spec.model ?? 'provider default'} [${spec.sources.model}]${spec.variant ? ` · variant ${spec.variant} [${spec.sources.variant}]` : ''}${where}`);
+    }
+    if (provider.name === 'opencode' && v.ok) {
+      const versionWarning = opencodeVersionWarning(v.out);
+      if (versionWarning) add('opencode', 'warn', `${versionWarning}${where}`);
+    }
     if (!v.enoent && !i.skipAuth) {
       if (provider.authCheckArgs) {
-        const a = probe(spec.bin, provider.authCheckArgs);
+        const a = probe(spec.bin, provider.authCheckArgs, { cwd: i.paths.root });
         if (a.timedOut) add('auth', 'warn', `${spec.bin} ${provider.authCheckArgs.join(' ')} did not answer within 15 s`);
         else add('auth', a.ok ? 'ok' : 'fail', a.ok ? `authenticated${where}${a.out ? ` (${a.out.slice(0, 120)})` : ''}` : `not authenticated${where}: ${a.out || 'non-zero exit'}`);
       } else add('auth', 'warn', `${provider.name}${where}: no auth probe available; first session will tell`);

@@ -55,6 +55,15 @@ test('doctor checks every provider a run will use, not just the first', () => {
   assert.match(fail.detail, /T02/);
 });
 
+test('doctor fails clearly when a configured binary path does not exist', () => {
+  const { dir, paths, state } = project();
+  const config = { ...DEFAULTS, provider: 'fake' as const };
+  const spec = { ...resolveSession(config, undefined, {}, {}).spec, providerName: 'opencode' as const, bin: join(dir, 'no-such-opencode') };
+  const checks = runDoctor({ paths, config, state, spec, provider: getProvider('opencode') });
+  const fail = checks.find((c) => c.level === 'fail' && c.name === 'provider');
+  assert.match(fail?.detail ?? '', /configured binary .* not found at/);
+});
+
 test('doctor fails on a lock held by a live process and on a sticky halt', async () => {
   const { paths, state } = project();
   mkdirSync(paths.symphony, { recursive: true });

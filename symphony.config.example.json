@@ -1,5 +1,6 @@
 {
   "_models": "Current model ids per provider are documented in Models.md.",
+  "_bin": "providers.<name>.bin is a command name looked up on PATH, or a path (absolute, ~, or project-relative) that overrides PATH and pins a specific install.",
   "provider": "opencode",
   "providers": {
     "claude": {

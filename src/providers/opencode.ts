@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { resolveSpawn } from '../spawn.js';
 import { isRecord, num, str } from '../util.js';
 import { ATTACHED_BOOTSTRAP, hintFromInput, newHints, toText, tryJson } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
@@ -126,13 +127,27 @@ export function opencodeModelVariants(bin: string, model: string | undefined): S
 
 /** Run `opencode models --verbose` and parse it, or null when the catalog cannot be read. */
 function readCatalog(bin: string): Map<string, Set<string>> | null {
-  const args = ['models', '--verbose'];
-  let r = spawnSync(bin, args, { encoding: 'utf8', timeout: 20_000, env: process.env });
-  // On Windows the CLI is an npm shim (`opencode.cmd`), which CreateProcess does not resolve.
-  if (r.error && (r.error as NodeJS.ErrnoException).code === 'ENOENT' && process.platform === 'win32') {
-    r = spawnSync(bin, args, { encoding: 'utf8', timeout: 20_000, env: process.env, shell: true });
-  }
+  const launch = resolveSpawn(bin, ['models', '--verbose']);
+  const r = spawnSync(launch.command, launch.args, {
+    encoding: 'utf8',
+    timeout: 20_000,
+    env: process.env,
+    windowsVerbatimArguments: launch.windowsVerbatimArguments,
+  });
   return r.status === 0 && r.stdout ? parseModelVariants(r.stdout) : null;
+}
+
+/**
+ * OpenCode 2.x is in beta and symphony targets the OpenCode 1.x CLI: 2.x moves the variant into the
+ * model reference (`provider/model#variant`), regroups the model catalog, and adds server flags
+ * (`--standalone`) this adapter does not pass. Returns a warning when `--version` output names a
+ * non-1.x major, and `undefined` when it is 1.x or unparseable (so an unknown shape never blocks).
+ */
+export function opencodeVersionWarning(versionOutput: string): string | undefined {
+  const m = /(\d+)\.\d+/.exec(versionOutput.trim());
+  if (!m) return undefined;
+  if (Number(m[1]) === 1) return undefined;
+  return `opencode ${versionOutput.trim()} detected; symphony requires OpenCode 1.x (2.x is beta and not yet supported)`;
 }
 
 export const opencodeProvider: Provider = {
@@ -143,18 +158,21 @@ export const opencodeProvider: Provider = {
   modelVariants: opencodeModelVariants,
   authCheckArgs: ['auth', 'list'],
   buildCommand(o) {
-    // The working directory is set via the spawn cwd; opencode has no `--dir` flag (the directory is
+    // OpenCode 1.x only: `--standalone` is a 2.x server flag and is not passed. The working
+    // directory is set via the spawn cwd; opencode has no `--dir` flag (the directory is
     // positional for the top-level command). Pass only flags this CLI understands.
-    const args = ['run', '--standalone', '--format', 'json', '--thinking'];
+    const args = ['run', '--format', 'json', '--thinking'];
     if (o.resumeId) args.push('--session', o.resumeId);
     if (o.model) args.push('--model', o.model);
     // A model variant is the provider-specific reasoning effort (e.g. "high"); `--variant` is the
-    // native run flag. The `#variant` model suffix the V2 docs show is not parsed by current builds.
+    // OpenCode 1.x run flag. (2.x moves it into the model reference as `provider/model#variant`.)
     if (o.variant) args.push('--variant', o.variant);
     if (o.autoApprove) args.push('--auto');
     // The full prompt is attached with `--file`; argv only carries a short bootstrap so an oversized
-    // prompt can never overflow the OS command-line limit.
-    args.push('--file', o.promptFile, ...o.extraArgs, ATTACHED_BOOTSTRAP);
+    // prompt can never overflow the OS command-line limit. In the OpenCode 1.x CLI `--file` is an
+    // array flag that would swallow a following positional as another file, so the bootstrap message
+    // must come first and `--file` must be last.
+    args.push(...o.extraArgs, ATTACHED_BOOTSTRAP, '--file', o.promptFile);
     return { bin: o.bin, args };
   },
   createParser: () => new OpenCodeParser(),
