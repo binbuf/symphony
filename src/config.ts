@@ -160,8 +160,8 @@ export const DEFAULTS: Config = {
     cursor: { bin: 'agent', model: 'claude-opus-5', extraArgs: [], idleTimeoutMin: 45 },
     opencode: { bin: 'opencode', model: 'anthropic/claude-sonnet-4-5', extraArgs: [], idleTimeoutMin: 45 },
     codex: { bin: 'codex', model: 'gpt-6-sol', extraArgs: [], idleTimeoutMin: 45 },
-    gemini: { bin: 'gemini', model: 'gemini-3-pro-preview', extraArgs: [], idleTimeoutMin: 45 },
-    antigravity: { bin: 'antigravity', model: 'gemini-3.1-pro-high', extraArgs: [], idleTimeoutMin: 45 },
+    gemini: { bin: 'gemini', model: 'gemini-3.1-pro-preview', extraArgs: [], idleTimeoutMin: 45 },
+    antigravity: { bin: 'agy', model: 'gemini-3.1-pro-high', extraArgs: [], idleTimeoutMin: 45 },
     fake: { bin: process.execPath, extraArgs: [] },
   },
   paths: {},
@@ -290,7 +290,7 @@ function pathOverrides(x: unknown, warnings: string[]): PathOverrides {
     if (typeof v === 'string' && v.trim()) out[k] = v.trim();
     else warnings.push(`paths.${k}: expected a non-empty string; using default`);
   }
-  for (const k of Object.keys(x)) if (!(PATH_KEYS as readonly string[]).includes(k)) warnings.push(`paths.${k}: unknown key ignored`);
+  for (const k of Object.keys(x)) if (!(PATH_KEYS as readonly string[]).includes(k) && !k.startsWith('_')) warnings.push(`paths.${k}: unknown key ignored`);
   return out;
 }
 
@@ -311,12 +311,13 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   }
 
   const known = new Set(Object.keys(DEFAULTS));
-  for (const k of Object.keys(raw)) if (!known.has(k)) warnings.push(`symphony.config.json: unknown key "${k}" ignored`);
+  for (const k of Object.keys(raw)) if (!known.has(k) && !k.startsWith('_')) warnings.push(`symphony.config.json: unknown key "${k}" ignored`);
 
   const providers = { ...DEFAULTS.providers } as Record<ProviderName, ProviderConfig>;
   if (raw.providers !== undefined) {
     if (!isRecord(raw.providers)) throw new UsageError('symphony.config.json: "providers" must be an object');
     for (const [name, val] of Object.entries(raw.providers)) {
+      if (name.startsWith('_')) continue;
       const pn = asProviderName(name, 'symphony.config.json providers');
       if (!isRecord(val)) throw new UsageError(`symphony.config.json: providers.${name} must be an object`);
       const base = providers[pn];

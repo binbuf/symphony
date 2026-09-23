@@ -1,4 +1,5 @@
 {
+  "_models": "Current model ids per provider are documented in Models.md.",
   "provider": "opencode",
   "providers": {
     "claude": {
@@ -26,13 +27,13 @@
     },
     "gemini": {
       "bin": "gemini",
-      "model": "gemini-3-pro-preview",
+      "model": "gemini-3.1-pro-preview",
       "extraArgs": [],
       "idleTimeoutMin": 45
     },
     "antigravity": {
-      "bin": "antigravity",
-      "model": "gemini-3.1-pro-high",
+      "bin": "agy",
+      "model": "gemini-3.1-pro-preview",
       "extraArgs": [],
       "idleTimeoutMin": 45
     }
@@ -66,8 +67,8 @@
   },
   "escalation": {
     "enabled": false,
-    "provider": "claude",
-    "model": "claude-fable-5-1",
+    "provider": "opencode",
+    "model": "z-ai/glm-5.3",
     "maxAttempts": 1,
     "onCategories": [
       "task",

@@ -322,11 +322,10 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `opencode` | `opencode` | `run --standalone --format json --thinking --file <prompt>` + bootstrap | `--auto` | no `--auto` |
 | `codex` | `codex` | `exec --json --color never --skip-git-repo-check --cd <root> -`, prompt on stdin | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write --ask-for-approval never` |
 | `gemini` | `gemini` | `--output-format json --prompt <bootstrap>` (prompt-file) | `--yolo` | no `--yolo` |
-| `antigravity` | `antigravity` | `-p --output-format json --workspace <root>` + prompt-file bootstrap | `--dangerously-skip-permissions` | no bypass flag |
+| `antigravity` | `agy` | `-p --output-format json --workspace <root>` + prompt-file bootstrap | `--dangerously-skip-permissions` | no bypass flag |
 | `fake` | node | replays an NDJSON fixture; for tests | | |
 
-- **Models:** pass `--model`, or set `providers.<name>.model`. Each CLI has its own ids: Claude and Cursor take `claude-opus-5`, Codex `gpt-6-sol`, Gemini `gemini-3-pro-preview`, Antigravity `gemini-3.1-pro-high`; OpenCode wants `provider/model` (e.g. `openrouter/deepseek/deepseek-v4.1-flash`). Ids churn quickly — run the CLI's own `--help` / `models` / `/model` to list the current ones.
-- **Antigravity's binary** is `agy` in Google's docs; if `antigravity` is not on your PATH, set `providers.antigravity.bin` to `agy`.
+- **Models:** pass `--model`, or set `providers.<name>.model`. Current ids per provider are listed in [Models.md](Models.md); OpenCode addresses models as `provider/model` (browse <https://openrouter.ai/models>). Ids churn, so confirm against each CLI's own listing.
 - **Session resume** for retries and nudges uses `--resume` (Claude, Cursor), `--session` (OpenCode) and `exec resume <id>` (Codex); Gemini and Antigravity do not advertise resume, so retries start fresh.
 - **Cost** is surfaced for Claude (per session) and OpenCode (cumulative); `--budget` is Claude-only. Codex reports token usage instead.
 - **Correcting an adapter:** each provider's argv can be adjusted for your install with `providers.<name>.bin` and `providers.<name>.extraArgs`; unknown stream shapes are parsed best-effort.
@@ -413,7 +412,7 @@ This is a gate, not a router: `onCategories` is still the trigger, infrastructur
 
 ## Config
 
-Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags and environment variables override it per run.
+Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags and environment variables override it per run. Keys beginning with `_` are ignored, so you can leave notes in the file — the example uses `_models` to point at [Models.md](Models.md).
 
 | key | default | meaning |
 |---|---|---|

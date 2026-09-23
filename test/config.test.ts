@@ -41,6 +41,25 @@ test('config file merges per provider and unknown keys warn', () => {
   assert.ok(warnings.some((w) => w.includes('bogus')));
 });
 
+test('keys beginning with "_" are comments: ignored silently at every level', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-comment-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({
+    _models: 'current ids per provider: see Models.md',
+    provider: 'cursor',
+    providers: { _note: 'claude lives in the project config', cursor: { model: 'gpt-5' } },
+    paths: { _note: 'defaults', docs: 'planning' },
+    bogus: 1,
+  }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.provider, 'cursor');
+  assert.equal(config.providers.cursor.model, 'gpt-5');
+  assert.equal(config.paths.docs, 'planning');
+  assert.ok(!warnings.some((w) => /_models|_note/.test(w)), 'comment keys must not warn');
+  assert.ok(warnings.some((w) => w.includes('bogus')), 'a real unknown key still warns');
+});
+
 test('resolveSession precedence: cli > env > front matter > config', () => {
   const cfg = { ...DEFAULTS, provider: 'opencode' as const };
   const byConfig = resolveSession(cfg, task(), {}, {}).spec;
