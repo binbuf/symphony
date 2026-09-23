@@ -33,6 +33,61 @@ export interface GitConfig {
   extraIgnore: string[];
 }
 
+/**
+ * Escalation: when the workhorse model fails to *finish the task* (it reports `failed`, the
+ * independent verify command rejects its `done`, or it burns through `maxContinuations`), give a
+ * stronger provider/model a fresh shot instead of failing the task outright. Infrastructure
+ * failures (auth, rate limits, timeouts, …) are never escalated — they are handled by the existing
+ * retry/halt logic. Off by default so an existing run behaves exactly as before until you opt in.
+ */
+export interface EscalationConfig {
+  enabled: boolean;
+  /**
+   * Provider the escalated sessions run on. Defaults to OpenCode, the provider that can reach the
+   * shipped default model (GLM-5.3). Set it to your own provider for a same-provider model bump.
+   */
+  provider?: ProviderName;
+  /** Model the escalation provider runs, e.g. "z-ai/glm-5.3" (OpenCode) or a Claude model id. */
+  model: string;
+  /** How many escalation sessions a single task may take before it is failed for good. */
+  maxAttempts: number;
+  /** Failure categories that hand the task to the escalation model. */
+  onCategories: string[];
+}
+
+/** Where a System One (Jev) decision call is routed. Only OpenRouter is built in. */
+export const JEV_PROVIDERS = ['openrouter'] as const;
+export type JevProviderName = (typeof JEV_PROVIDERS)[number];
+
+/**
+ * Optional Jev decision calls (TypeSafe's System One model) used as a fast fallback when a session
+ * ends without a SYMPHONY_RESULT block: one cheap, typed classification instead of a whole resumed
+ * nudge session. Off by default, and every failure path falls back to the existing nudge.
+ */
+export interface JevConfig {
+  /** Master switch for every Jev workflow below. */
+  enabled: boolean;
+  /** Workflow: settle a session that ended cleanly without a SYMPHONY_RESULT block. */
+  resultFallback: boolean;
+  /** Workflow: place a failure the regex classifier could not (the `unknown` bucket). */
+  failureTriage: boolean;
+  /** Workflow: read the task + failure and decide whether escalating to the escalation model is worth it. */
+  escalationDecision: boolean;
+  provider: JevProviderName;
+  /** Overrides the provider's base URL (e.g. a self-hosted gateway). */
+  baseUrl?: string;
+  /** System One model id; "jev-latest" tracks the newest Jev release. */
+  model: string;
+  /** Environment variable holding the bearer token. */
+  apiKeyEnv: string;
+  /** Hard cap on one decision call; on timeout the harness falls back to its deterministic path. */
+  timeoutMs: number;
+  /** Below this confidence the decision is discarded and the fallback runs instead. */
+  minConfidence: number;
+  /** Dispositions `resultFallback` is allowed to settle. Ending a task stays with the nudge by default. */
+  acceptStatuses: string[];
+}
+
 export interface Config {
   provider: ProviderName;
   providers: Record<ProviderName, ProviderConfig>;
@@ -80,6 +135,10 @@ export interface Config {
   inferVerify: boolean;
   hooks: HooksConfig;
   git: GitConfig;
+  /** Second provider/model a failed task can be handed to. See EscalationConfig. */
+  escalation: EscalationConfig;
+  /** Optional Jev decision calls as a nudge fallback. See JevConfig. */
+  jev: JevConfig;
 }
 
 export interface CliOverrides {
@@ -97,12 +156,12 @@ export interface CliOverrides {
 export const DEFAULTS: Config = {
   provider: 'claude',
   providers: {
-    claude: { bin: 'claude', model: 'claude-fable-5-1', extraArgs: [] },
-    cursor: { bin: 'agent', extraArgs: [], idleTimeoutMin: 45 },
+    claude: { bin: 'claude', model: 'claude-opus-5', extraArgs: [] },
+    cursor: { bin: 'agent', model: 'claude-opus-5', extraArgs: [], idleTimeoutMin: 45 },
     opencode: { bin: 'opencode', model: 'anthropic/claude-sonnet-4-5', extraArgs: [], idleTimeoutMin: 45 },
-    codex: { bin: 'codex', extraArgs: [], idleTimeoutMin: 45 },
-    gemini: { bin: 'gemini', extraArgs: [], idleTimeoutMin: 45 },
-    antigravity: { bin: 'antigravity', extraArgs: [], idleTimeoutMin: 45 },
+    codex: { bin: 'codex', model: 'gpt-6-sol', extraArgs: [], idleTimeoutMin: 45 },
+    gemini: { bin: 'gemini', model: 'gemini-3.1-pro-preview', extraArgs: [], idleTimeoutMin: 45 },
+    antigravity: { bin: 'agy', model: 'gemini-3.1-pro-high', extraArgs: [], idleTimeoutMin: 45 },
     fake: { bin: process.execPath, extraArgs: [] },
   },
   paths: {},
@@ -137,6 +196,25 @@ export const DEFAULTS: Config = {
   inferVerify: true,
   hooks: {},
   git: { autoIgnoreUntracked: true, extraIgnore: [] },
+  escalation: {
+    enabled: false,
+    provider: 'opencode',
+    model: 'z-ai/glm-5.3',
+    maxAttempts: 1,
+    onCategories: ['task', 'verify'],
+  },
+  jev: {
+    enabled: false,
+    resultFallback: true,
+    failureTriage: true,
+    escalationDecision: true,
+    provider: 'openrouter',
+    model: 'jev-latest',
+    apiKeyEnv: 'OPENROUTER_API_KEY',
+    timeoutMs: 4000,
+    minConfidence: 0.7,
+    acceptStatuses: ['done', 'continue'],
+  },
 };
 
 export interface LoadedConfig {
@@ -212,7 +290,7 @@ function pathOverrides(x: unknown, warnings: string[]): PathOverrides {
     if (typeof v === 'string' && v.trim()) out[k] = v.trim();
     else warnings.push(`paths.${k}: expected a non-empty string; using default`);
   }
-  for (const k of Object.keys(x)) if (!(PATH_KEYS as readonly string[]).includes(k)) warnings.push(`paths.${k}: unknown key ignored`);
+  for (const k of Object.keys(x)) if (!(PATH_KEYS as readonly string[]).includes(k) && !k.startsWith('_')) warnings.push(`paths.${k}: unknown key ignored`);
   return out;
 }
 
@@ -233,12 +311,13 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   }
 
   const known = new Set(Object.keys(DEFAULTS));
-  for (const k of Object.keys(raw)) if (!known.has(k)) warnings.push(`symphony.config.json: unknown key "${k}" ignored`);
+  for (const k of Object.keys(raw)) if (!known.has(k) && !k.startsWith('_')) warnings.push(`symphony.config.json: unknown key "${k}" ignored`);
 
   const providers = { ...DEFAULTS.providers } as Record<ProviderName, ProviderConfig>;
   if (raw.providers !== undefined) {
     if (!isRecord(raw.providers)) throw new UsageError('symphony.config.json: "providers" must be an object');
     for (const [name, val] of Object.entries(raw.providers)) {
+      if (name.startsWith('_')) continue;
       const pn = asProviderName(name, 'symphony.config.json providers');
       if (!isRecord(val)) throw new UsageError(`symphony.config.json: providers.${name} must be an object`);
       const base = providers[pn];
@@ -256,6 +335,8 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const haltRaw = isRecord(raw.halt) ? raw.halt : {};
   const hooksRaw = isRecord(raw.hooks) ? raw.hooks : {};
   const gitRaw = isRecord(raw.git) ? raw.git : {};
+  const escRaw = isRecord(raw.escalation) ? raw.escalation : {};
+  const jevRaw = isRecord(raw.jev) ? raw.jev : {};
 
   const config: Config = {
     provider: raw.provider === undefined ? DEFAULTS.provider : asProviderName(raw.provider, 'symphony.config.json provider'),
@@ -314,6 +395,64 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
       autoIgnoreUntracked: boolOr(gitRaw.autoIgnoreUntracked, DEFAULTS.git.autoIgnoreUntracked, 'git.autoIgnoreUntracked', warnings),
       extraIgnore: stringArray(gitRaw.extraIgnore, DEFAULTS.git.extraIgnore, 'git.extraIgnore', warnings),
     },
+    escalation: (() => {
+      const model = typeof escRaw.model === 'string' ? escRaw.model.trim() : DEFAULTS.escalation.model;
+      let enabled = boolOr(escRaw.enabled, DEFAULTS.escalation.enabled, 'escalation.enabled', warnings);
+      if (enabled && !model) {
+        warnings.push('escalation.enabled is true but escalation.model is empty; escalation stays off');
+        enabled = false;
+      }
+      return {
+        enabled,
+        provider: escRaw.provider === undefined || escRaw.provider === null
+          ? DEFAULTS.escalation.provider
+          : asProviderName(escRaw.provider, 'symphony.config.json escalation.provider'),
+        model,
+        maxAttempts: Math.max(0, numberOr(escRaw.maxAttempts, DEFAULTS.escalation.maxAttempts, 'escalation.maxAttempts', warnings)),
+        onCategories: stringArray(escRaw.onCategories, DEFAULTS.escalation.onCategories, 'escalation.onCategories', warnings),
+      };
+    })(),
+    jev: (() => {
+      let provider: JevProviderName = DEFAULTS.jev.provider;
+      if (jevRaw.provider !== undefined && jevRaw.provider !== null) {
+        if (typeof jevRaw.provider === 'string' && (JEV_PROVIDERS as readonly string[]).includes(jevRaw.provider)) {
+          provider = jevRaw.provider as JevProviderName;
+        } else {
+          warnings.push(`jev.provider: expected one of ${JEV_PROVIDERS.join(', ')}, got ${JSON.stringify(jevRaw.provider)}; using ${DEFAULTS.jev.provider}`);
+        }
+      }
+      const model = typeof jevRaw.model === 'string' && jevRaw.model.trim() ? jevRaw.model.trim() : DEFAULTS.jev.model;
+      let enabled = boolOr(jevRaw.enabled, DEFAULTS.jev.enabled, 'jev.enabled', warnings);
+      if (enabled && !model) {
+        warnings.push('jev.enabled is true but jev.model is empty; Jev stays off');
+        enabled = false;
+      }
+      const acceptStatuses = stringArray(jevRaw.acceptStatuses, DEFAULTS.jev.acceptStatuses, 'jev.acceptStatuses', warnings).filter((s) => {
+        if (['done', 'continue', 'blocked', 'failed'].includes(s)) return true;
+        warnings.push(`jev.acceptStatuses: ignoring unknown status ${JSON.stringify(s)}`);
+        return false;
+      });
+      return {
+        enabled,
+        resultFallback: boolOr(jevRaw.resultFallback, DEFAULTS.jev.resultFallback, 'jev.resultFallback', warnings),
+        failureTriage: boolOr(jevRaw.failureTriage, DEFAULTS.jev.failureTriage, 'jev.failureTriage', warnings),
+        escalationDecision: boolOr(jevRaw.escalationDecision, DEFAULTS.jev.escalationDecision, 'jev.escalationDecision', warnings),
+        provider,
+        baseUrl: typeof jevRaw.baseUrl === 'string' && jevRaw.baseUrl.trim() ? jevRaw.baseUrl.trim() : undefined,
+        model,
+        apiKeyEnv: typeof jevRaw.apiKeyEnv === 'string' && jevRaw.apiKeyEnv.trim() ? jevRaw.apiKeyEnv.trim() : DEFAULTS.jev.apiKeyEnv,
+        timeoutMs: positiveOr(jevRaw.timeoutMs, DEFAULTS.jev.timeoutMs, 'jev.timeoutMs', warnings),
+        minConfidence: (() => {
+          const n = numberOr(jevRaw.minConfidence, DEFAULTS.jev.minConfidence, 'jev.minConfidence', warnings);
+          if (n < 0 || n > 1) {
+            warnings.push(`jev.minConfidence: expected a number in 0..1, got ${JSON.stringify(jevRaw.minConfidence)}; using ${DEFAULTS.jev.minConfidence}`);
+            return DEFAULTS.jev.minConfidence;
+          }
+          return n;
+        })(),
+        acceptStatuses,
+      };
+    })(),
   };
 
   if (cli.timeoutMin !== undefined) config.timeoutMin = cli.timeoutMin;
@@ -434,4 +573,47 @@ export function resolveVerify(config: Config, task: Task | undefined, root?: str
     if (inferred) return { command: inferred, timeoutMin: config.verifyTimeoutMin, source: 'package.json' };
   }
   return undefined;
+}
+
+/**
+ * The escalation target, when one is configured and enabled. Returns undefined when escalation is
+ * off or has no usable model (so the caller falls back to failing the task as before). The spec is
+ * built from config alone: escalation is its own provider/model, not a per-task front-matter knob.
+ */
+export function resolveEscalation(
+  config: Config,
+  primary: SessionSpec,
+  supportsBudget: (p: ProviderName) => boolean = () => true,
+): { spec: SessionSpec; warnings: string[] } | undefined {
+  if (!config.escalation.enabled) return undefined;
+  const warnings: string[] = [];
+  const providerName = config.escalation.provider ?? primary.providerName;
+  const model = config.escalation.model.trim();
+  if (!model) {
+    warnings.push('escalation.model is empty; escalation stays off');
+    return undefined;
+  }
+  const pc = config.providers[providerName];
+  let budgetUsd = pc.budgetUsd;
+  if (budgetUsd !== undefined && !supportsBudget(providerName)) {
+    warnings.push(`escalation budget ${budgetUsd} USD ignored: provider ${providerName} has no budget flag`);
+    budgetUsd = undefined;
+  }
+  if (providerName === 'opencode' && !model.includes('/')) {
+    warnings.push(`opencode models are "provider/model" (e.g. z-ai/glm-5.3); escalation got "${model}"`);
+  }
+  return {
+    spec: {
+      providerName,
+      bin: pc.bin,
+      model,
+      extraArgs: pc.extraArgs,
+      budgetUsd,
+      timeoutMin: config.timeoutMin,
+      idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
+      autoApprove: config.autoApprove,
+      sources: { provider: 'escalation', model: 'escalation' },
+    },
+    warnings,
+  };
 }

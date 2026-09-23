@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { DEFAULTS, loadConfig, resolveSession, resolveVerify } from '../src/config.js';
+import { DEFAULTS, loadConfig, resolveEscalation, resolveSession, resolveVerify } from '../src/config.js';
 import { resolvePaths } from '../src/paths.js';
 import type { Task } from '../src/tasks.js';
 
@@ -39,6 +39,25 @@ test('config file merges per provider and unknown keys warn', () => {
   assert.equal(config.nudge, false);
   assert.equal(config.timeoutMin, 9);
   assert.ok(warnings.some((w) => w.includes('bogus')));
+});
+
+test('keys beginning with "_" are comments: ignored silently at every level', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-comment-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({
+    _models: 'current ids per provider: see Models.md',
+    provider: 'cursor',
+    providers: { _note: 'claude lives in the project config', cursor: { model: 'gpt-5' } },
+    paths: { _note: 'defaults', docs: 'planning' },
+    bogus: 1,
+  }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.provider, 'cursor');
+  assert.equal(config.providers.cursor.model, 'gpt-5');
+  assert.equal(config.paths.docs, 'planning');
+  assert.ok(!warnings.some((w) => /_models|_note/.test(w)), 'comment keys must not warn');
+  assert.ok(warnings.some((w) => w.includes('bogus')), 'a real unknown key still warns');
 });
 
 test('resolveSession precedence: cli > env > front matter > config', () => {
@@ -209,4 +228,77 @@ test('front matter timeoutMin must be a positive number and warns otherwise', ()
   assert.ok(bad.warnings.some((w) => /timeoutMin/.test(w)));
   const negative = resolveSession(DEFAULTS, task({ timeoutMin: '-5' }), {}, {});
   assert.equal(negative.spec.timeoutMin, DEFAULTS.timeoutMin);
+});
+
+test('escalation defaults to GLM-5.3 via OpenCode, is off until enabled, and resolves to a spec', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-esc-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  // The shipped default is a real, usable pair even though escalation is off by default.
+  assert.equal(DEFAULTS.escalation.enabled, false);
+  assert.equal(DEFAULTS.escalation.provider, 'opencode');
+  assert.equal(DEFAULTS.escalation.model, 'z-ai/glm-5.3');
+  const off = loadConfig(paths, {}).config;
+  assert.equal(off.escalation.enabled, false);
+  assert.equal(resolveEscalation(off, resolveSession(off, task(), {}, {}).spec), undefined);
+
+  writeFileSync(paths.config, JSON.stringify({ escalation: { enabled: true, provider: 'codex', model: 'gpt-5', maxAttempts: 2, onCategories: ['task'] } }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.escalation.enabled, true);
+  assert.equal(config.escalation.provider, 'codex');
+  assert.equal(config.escalation.model, 'gpt-5');
+  assert.equal(config.escalation.maxAttempts, 2);
+  assert.deepEqual(config.escalation.onCategories, ['task']);
+  assert.equal(warnings.length, 0);
+  const resolved = resolveEscalation(config, resolveSession(config, task(), {}, {}).spec);
+  assert.equal(resolved?.spec.providerName, 'codex');
+  assert.equal(resolved?.spec.model, 'gpt-5');
+  assert.equal(resolved?.spec.sources.provider, 'escalation');
+  assert.equal(resolved?.spec.sources.model, 'escalation');
+
+  // An enabled escalation with no model is turned off with a warning rather than guessing.
+  writeFileSync(paths.config, JSON.stringify({ escalation: { enabled: true, model: '' } }));
+  const empty = loadConfig(paths, {});
+  assert.equal(empty.config.escalation.enabled, false);
+  assert.ok(empty.warnings.some((w) => /escalation.model is empty/.test(w)));
+
+  // An unknown escalation provider is rejected outright.
+  writeFileSync(paths.config, JSON.stringify({ escalation: { enabled: true, provider: 'nope' } }));
+  assert.throws(() => loadConfig(paths, {}), /unknown provider/);
+});
+
+test('jev config parses, defaults to OpenRouter with jev-latest, and validates its keys', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-jev-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  assert.equal(DEFAULTS.jev.enabled, false);
+  assert.equal(DEFAULTS.jev.provider, 'openrouter');
+  assert.equal(DEFAULTS.jev.model, 'jev-latest');
+  // Every workflow ships on, so flipping `enabled` turns them all on until you opt one out.
+  assert.equal(DEFAULTS.jev.resultFallback, true);
+  assert.equal(DEFAULTS.jev.failureTriage, true);
+  assert.equal(DEFAULTS.jev.escalationDecision, true);
+  assert.equal(loadConfig(paths, {}).config.jev.enabled, false);
+
+  writeFileSync(paths.config, JSON.stringify({ jev: { enabled: true, model: 'typesafe/jev-1.13', minConfidence: 0.5, acceptStatuses: ['done'], resultFallback: false, escalationDecision: false } }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.jev.enabled, true);
+  assert.equal(config.jev.model, 'typesafe/jev-1.13');
+  assert.equal(config.jev.minConfidence, 0.5);
+  assert.deepEqual(config.jev.acceptStatuses, ['done']);
+  assert.equal(config.jev.apiKeyEnv, 'OPENROUTER_API_KEY');
+  assert.equal(config.jev.resultFallback, false);
+  assert.equal(config.jev.failureTriage, true);
+  assert.equal(config.jev.escalationDecision, false);
+  assert.equal(warnings.length, 0);
+
+  // Unknown provider, out-of-range confidence and an unknown status all warn and fall back.
+  writeFileSync(paths.config, JSON.stringify({ jev: { enabled: true, provider: 'nope', minConfidence: 5, acceptStatuses: ['done', 'bogus'] } }));
+  const bad = loadConfig(paths, {});
+  assert.equal(bad.config.jev.provider, 'openrouter');
+  assert.equal(bad.config.jev.minConfidence, DEFAULTS.jev.minConfidence);
+  assert.deepEqual(bad.config.jev.acceptStatuses, ['done']);
+  assert.ok(bad.warnings.some((w) => /jev\.provider/.test(w)));
+  assert.ok(bad.warnings.some((w) => /jev\.minConfidence/.test(w)));
+  assert.ok(bad.warnings.some((w) => /jev\.acceptStatuses/.test(w)));
 });

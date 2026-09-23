@@ -79,7 +79,9 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
       s.logs.forEach((l, i) => {
         const run = runTiming(l, running);
         const label = `run ${i + 1} · ${l.kind}`;
-        rows.push(['  ↳', '', squash(label, 42), l.status ?? '', '', run.duration, run.start, run.end, fmtCost(l.costUsd), '', squash(l.summary ?? '', 60)]);
+        // The session's own provider/model, so an escalated run is visible in the table too.
+        const model = l.provider ? `${l.provider}${l.model ? ` · ${l.model}` : ''}` : '';
+        rows.push(['  ↳', '', squash(label, 42), l.status ?? '', '', run.duration, run.start, run.end, fmtCost(l.costUsd), squash(model, 28), squash(l.summary ?? '', 60)]);
       });
     }
   }

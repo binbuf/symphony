@@ -68,6 +68,7 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
       lines.push(`### ${i + 1} · ${l.kind}${parts.length ? ` · ${parts.join(' · ')}` : ''}`);
       lines.push('');
       lines.push(`- summary: ${l.summary?.trim() || '_(none)_'}`);
+      if (l.provider) lines.push(`- model: ${l.provider}${l.model ? ` · ${l.model}` : ''}`);
       lines.push(`- raw: ${l.jsonl} · log: ${l.log} · prompt: ${l.prompt}`);
       lines.push('');
     });

@@ -1,15 +1,16 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { relative } from 'node:path';
-import { classifyFailure, type Classified, type FailureEvidence } from './classify.js';
-import { resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
+import { classifyFailure, evidenceText, makeClassified, type Classified, type FailureEvidence } from './classify.js';
+import { resolveEscalation, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
 import { writeProgressDigest } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { commitAll, currentBranch, describeCommit } from './git.js';
 import { fireHook } from './hooks.js';
+import { classifyError, classifyEscalation, classifySessionResult, jevProblem } from './jev.js';
 import { createLogger, openRunSinks, type Logger } from './logger.js';
 import { writeTaskLog } from './logs.js';
 import { stopPresent, type Paths } from './paths.js';
-import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, type PromptCtx } from './prompt.js';
+import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
 import { getProvider } from './providers/index.js';
 import type { Provider, SpawnSpec } from './providers/types.js';
 import { generateIndex, writeIndex } from './repomap.js';
@@ -45,6 +46,8 @@ export interface RunContext {
   signalName?: string;
   active?: Session;
   abort: AbortController;
+  /** Overridable for tests: the fetch used for Jev decision calls (defaults to the global fetch). */
+  fetchImpl?: typeof fetch;
   /** Branch HEAD pointed at when the run started; commits refuse to land elsewhere. */
   startBranch?: string;
   /** Session cost reported during this invocation, for the provider-agnostic run budget. */
@@ -111,6 +114,39 @@ export function outcomeEvidence(out: SessionOutcome): FailureEvidence {
   };
 }
 
+/**
+ * The harness's own failure classifier, with Jev as a tie-breaker for the `unknown` bucket only.
+ * The regex stays primary: Jev is consulted solely when the rules admit they do not know, and its
+ * answer is mapped back through the harness's own fatal/transient rules. Any problem keeps `unknown`.
+ */
+async function classifyOutcome(ctx: RunContext, task: Task, st: TaskState, ev: FailureEvidence): Promise<Classified> {
+  const { config, log } = ctx;
+  const base = classifyFailure(ev, config.halt.onCategories);
+  if (base.category !== 'unknown' || !config.jev.enabled || !config.jev.failureTriage) return base;
+  const problem = jevProblem(config.jev, process.env);
+  if (problem) {
+    log.warn(`${task.id}: failure is unclassified but Jev is unavailable (${problem})`);
+    return base;
+  }
+  const decision = await classifyError(config.jev, { evidence: evidenceText(ev), exitCode: ev.exitCode, resultSubtype: ev.resultSubtype }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal });
+  if (!decision) {
+    log.warn(`${task.id}: failure is unclassified; Jev returned no usable category`);
+    return base;
+  }
+  const pct = Math.round(decision.confidence * 100);
+  if (decision.confidence < config.jev.minConfidence) {
+    log.warn(`${task.id}: failure is unclassified; Jev's ${decision.category} was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)`);
+    return base;
+  }
+  const classified = makeClassified(decision.category, `${base.message} · Jev: ${decision.category} (${pct}%)`, config.halt.onCategories);
+  log.warn(`${task.id}: failure was unclassified; Jev reads it as ${classified.category} (${pct}%) — ${classified.fatal ? 'fatal' : classified.transient ? 'retryable' : 'terminal'}`);
+  if (decision.costUsd !== undefined) {
+    st.costUsd = (st.costUsd ?? 0) + decision.costUsd;
+    ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd;
+  }
+  return classified;
+}
+
 /** Merge a nudge outcome into the attempt: flags/result from the nudge, hints from both. */
 function mergeOutcome(first: SessionOutcome, second: SessionOutcome): SessionOutcome {
   return {
@@ -126,7 +162,7 @@ function mergeOutcome(first: SessionOutcome, second: SessionOutcome): SessionOut
 }
 
 interface SessionRun {
-  kind: 'task' | 'resume' | 'nudge' | 'continue';
+  kind: 'task' | 'resume' | 'nudge' | 'continue' | 'escalate';
   logKind: 'task' | 'retry' | 'nudge';
   attempt: number;
   resumeId?: string;
@@ -140,7 +176,7 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
   const sinks = openRunSinks(paths.runs, `${task.id}-${stamp()}${suffix}`);
   writeFileSync(sinks.promptPath, prompt);
   const rel = (p: string) => relative(paths.root, p);
-  const entry: LogRef = { kind: r.logKind, jsonl: rel(sinks.jsonlPath), log: rel(sinks.logPath), prompt: rel(sinks.promptPath), started: nowIso() };
+  const entry: LogRef = { kind: r.logKind, jsonl: rel(sinks.jsonlPath), log: rel(sinks.logPath), prompt: rel(sinks.promptPath), started: nowIso(), provider: spec.providerName, model: spec.model };
   st.logs.push(entry);
 
   const cmd = provider.buildCommand({
@@ -287,9 +323,18 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   const { paths, config, log, state } = ctx;
   const st = (state.tasks[task.id] ??= newTaskState(task.title));
   st.title = task.title;
-  const { spec, warnings } = resolveSession(config, task, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+  const resolved = resolveSession(config, task, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+  const warnings = resolved.warnings;
+  // `spec`/`provider` are mutable: escalation swaps them mid-task for the rest of the attempts.
+  let spec = resolved.spec;
   warnings.forEach((w) => log.warn(`${task.id}: ${w}`));
-  const provider = getProvider(spec.providerName);
+  let provider = getProvider(spec.providerName);
+  const escalation = resolveEscalation(config, spec, (p) => getProvider(p).supportsBudget);
+  escalation?.warnings.forEach((w) => log.warn(`${task.id}: ${w}`));
+  const maxEscalations = escalation ? Math.max(0, config.escalation.maxAttempts) : 0;
+  const escalationCategories = new Set(config.escalation.onCategories);
+  let escalations = 0;
+  let escalating = false;
   const maxAttempts = Math.max(1, config.retry.maxAttempts);
   const maxContinuations = Math.max(0, config.maxContinuations);
   const maxIterations = Math.max(0, config.maxIterationsPerTask);
@@ -304,6 +349,54 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   let iterations = 0;
   let final: Final | undefined;
   let halt: Halted | undefined;
+
+  /**
+   * Hand the task to the escalation provider/model for a fresh attempt. Bounded by
+   * `escalation.maxAttempts` and gated by `escalation.onCategories`, so it can never loop. When the
+   * `escalationDecision` workflow is on, Jev reads the task and the failure first and may decline —
+   * a stronger model is not worth a session when the task is stuck on missing context or a human
+   * decision. Any Jev problem (off, no key, timeout, low confidence) escalates as configured.
+   */
+  const tryEscalate = async (category: string, reason: string): Promise<boolean> => {
+    if (!escalation || escalations >= maxEscalations) return false;
+    if (!escalationCategories.has(category)) return false;
+    if (config.jev.enabled && config.jev.escalationDecision) {
+      const problem = jevProblem(config.jev, process.env);
+      if (problem) {
+        log.warn(`${task.id}: Jev escalation check unavailable (${problem}); escalating on ${category} as configured`);
+      } else {
+        const decision = await classifyEscalation(
+          config.jev,
+          { taskTitle: task.title, taskBody: taskFileBody(task, config.maxTaskBytes), failure: reason },
+          { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal },
+        );
+        const pct = decision ? Math.round(decision.confidence * 100) : 0;
+        if (decision?.costUsd !== undefined) { st.costUsd = (st.costUsd ?? 0) + decision.costUsd; ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd; }
+        if (decision && decision.confidence >= config.jev.minConfidence) {
+          if (!decision.escalate) {
+            log.warn(`${task.id}: ${category} — ${reason}. Jev says a stronger model would not help (${pct}%); not escalating.`);
+            return false;
+          }
+          log.info(`${task.id}: Jev agrees escalation is worth it (${pct}%)`);
+        } else if (decision) {
+          log.warn(`${task.id}: Jev's escalation call was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%); escalating as configured`);
+        } else {
+          log.warn(`${task.id}: Jev returned no usable escalation decision; escalating as configured`);
+        }
+      }
+    }
+    escalations += 1;
+    escalating = true;
+    spec = escalation.spec;
+    provider = getProvider(spec.providerName);
+    // A fresh session on the new model: no resume, no pending retry, and a full task prompt.
+    resumeId = undefined;
+    lastTransient = undefined;
+    continuation = 0;
+    delete st.continuation;
+    log.warn(`${task.id}: ${category} — ${reason}. Escalating to ${spec.providerName}${spec.model ? ` · ${spec.model}` : ''} (escalation ${escalations}/${maxEscalations}).`);
+    return true;
+  };
 
   for (let attempt = 1; ; attempt++) {
     if (maxIterations > 0 && iterations >= maxIterations) {
@@ -335,18 +428,43 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       : continuation > 0
         ? buildContinuePrompt(pc)
         : buildTaskPrompt(pc);
-    let outcome = await runOneSession(ctx, task, st, provider, spec, prompt, { kind: continuation > 0 && !lastTransient ? 'continue' : resumeId ? 'resume' : 'task', logKind: retryCount > 0 ? 'retry' : 'task', attempt, resumeId, timeoutMin: spec.timeoutMin });
+    const sessionKind: SessionRun['kind'] = escalating ? 'escalate' : continuation > 0 && !lastTransient ? 'continue' : resumeId ? 'resume' : 'task';
+    let outcome = await runOneSession(ctx, task, st, provider, spec, prompt, { kind: sessionKind, logKind: escalating || retryCount > 0 ? 'retry' : 'task', attempt, resumeId, timeoutMin: spec.timeoutMin });
     resumeId = outcome.sessionId ?? resumeId;
     let block: ResultBlock | undefined = parseResultBlock(outcome.result.text) ?? parseResultBlock(outcome.allText);
 
-    if (!block && outcome.result.ok && outcome.sessionId && !outcome.timedOut && !outcome.stalled && !outcome.interrupted && !ctx.interrupted && config.nudge && provider.supportsResume) {
+    const endedCleanly = outcome.result.ok && !outcome.timedOut && !outcome.stalled && !outcome.interrupted && !ctx.interrupted;
+    if (!block && endedCleanly && config.jev.enabled && config.jev.resultFallback) {
+      // Jev first: one fast, typed decision instead of a whole resumed session. Any problem below
+      // (no key, timeout, low confidence, an unaccepted disposition) falls through to the nudge.
+      const problem = jevProblem(config.jev, process.env);
+      if (problem) {
+        log.warn(`${task.id}: session ended without a SYMPHONY_RESULT block; Jev fallback unavailable (${problem})`);
+      } else {
+        const decision = await classifySessionResult(config.jev, { taskTitle: task.title, output: outcome.allText }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal });
+        const pct = decision ? Math.round(decision.confidence * 100) : 0;
+        if (decision && decision.confidence >= config.jev.minConfidence && config.jev.acceptStatuses.includes(decision.status)) {
+          block = { status: decision.status, summary: `Jev classified the session as ${decision.status} (confidence ${pct}%)` };
+          if (decision.costUsd !== undefined) { st.costUsd = (st.costUsd ?? 0) + decision.costUsd; ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd; }
+          log.info(`${task.id}: no SYMPHONY_RESULT block; Jev classified the session as ${decision.status} (confidence ${pct}%, model ${decision.model ?? config.jev.model})`);
+        } else if (decision && !config.jev.acceptStatuses.includes(decision.status)) {
+          log.warn(`${task.id}: no SYMPHONY_RESULT block; Jev said ${decision.status} (${pct}%) but only ${config.jev.acceptStatuses.join('/')} are accepted`);
+        } else if (decision) {
+          log.warn(`${task.id}: no SYMPHONY_RESULT block; Jev's ${decision.status} was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)`);
+        } else {
+          log.warn(`${task.id}: no SYMPHONY_RESULT block; Jev returned no usable decision`);
+        }
+      }
+    }
+
+    if (!block && endedCleanly && outcome.sessionId && config.nudge && provider.supportsResume) {
       log.warn(`${task.id}: session ended without a SYMPHONY_RESULT block; resuming ${outcome.sessionId} once to close out`);
       const nudge = await runOneSession(ctx, task, st, provider, spec, buildNudgePrompt(pc), { kind: 'nudge', logKind: 'nudge', attempt, resumeId: outcome.sessionId, timeoutMin: Math.min(spec.timeoutMin, config.nudgeTimeoutMin) });
       st.nudged = true;
       resumeId = nudge.sessionId ?? resumeId;
       block = parseResultBlock(nudge.result.text) ?? parseResultBlock(nudge.allText);
       if (!block && !nudge.result.ok) {
-        const c = classifyFailure(outcomeEvidence(nudge), config.halt.onCategories);
+        const c = await classifyOutcome(ctx, task, st, outcomeEvidence(nudge));
         if (c.fatal && c.category !== 'config') outcome = mergeOutcome(outcome, nudge);
         else log.warn(`${task.id}: nudge session failed (${c.category}: ${c.message}); judging the task on its original session`);
       } else {
@@ -384,7 +502,9 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           lastTransient = undefined;
           continue;
         }
-        final = { status: 'failed', summary: `${block.summary || 'more work remains'} | gave up after ${maxContinuations} continuation sessions (maxContinuations)`, lastError: { category: 'task', message: 'continuation limit reached', transient: false, fatal: false, at: nowIso() } };
+        const contSummary = `${block.summary || 'more work remains'} | gave up after ${maxContinuations} continuation sessions (maxContinuations)`;
+        if (await tryEscalate('task', `continuation limit (${maxContinuations}) reached`)) continue;
+        final = { status: 'failed', summary: contSummary, lastError: { category: 'task', message: 'continuation limit reached', transient: false, fatal: false, at: nowIso() } };
         break;
       }
       if (block.status === 'done') {
@@ -396,18 +516,20 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           if (!res.ok) {
             const msg = `verify failed (exit ${res.code ?? 'timeout'}): ${verify.command} — ${squash(res.output, 240) || 'no output'}`;
             log.error(`${task.id}: ${msg}`);
+            if (await tryEscalate('verify', msg)) continue;
             final = { status: 'failed', summary: msg, lastError: { category: 'verify', message: msg, transient: false, fatal: false, at: nowIso() } };
             break;
           }
           log.info(`${task.id}: verify passed`);
         }
       }
+      if (block.status === 'failed' && (await tryEscalate('task', block.summary || 'model reported failed'))) continue;
       final = { status: block.status, summary: block.summary || block.status };
       if (block.status !== 'done') final.lastError = { category: 'task', message: block.summary || `model reported ${block.status}`, transient: false, fatal: false, at: nowIso() };
       break;
     }
 
-    const classified = classifyFailure(outcomeEvidence(outcome), config.halt.onCategories);
+    const classified = await classifyOutcome(ctx, task, st, outcomeEvidence(outcome));
     const summary = block ? `${block.summary} | ${classified.category}: ${classified.message}` : `${classified.category}: ${classified.message}`;
     const lastError = mkError(classified);
     if (classified.fatal) {
@@ -427,6 +549,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       if (!provider.supportsResume || !outcome.sessionId) resumeId = undefined;
       continue;
     }
+    if (await tryEscalate(classified.category, summary)) continue;
     final = { status: 'failed', summary: classified.transient ? `${summary} (gave up after ${retryCount} retries)` : summary, lastError };
     break;
   }
@@ -513,15 +636,20 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   const provider = getProvider(spec.providerName);
   // Tasks may override the provider in front matter: preflight every provider this run will use.
   const extraProviders: ExtraProvider[] = [];
-  {
-    const seen = new Set([spec.providerName]);
-    for (const t of todo) {
-      const rs = resolveSession(config, t, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
-      if (seen.has(rs.spec.providerName)) continue;
-      seen.add(rs.spec.providerName);
-      rs.warnings.forEach((w) => log.warn(`${t.id}: ${w}`));
-      extraProviders.push({ spec: rs.spec, provider: getProvider(rs.spec.providerName), label: t.id });
-    }
+  const seenProviders = new Set([spec.providerName]);
+  for (const t of todo) {
+    const rs = resolveSession(config, t, ctx.cli, process.env, (p) => getProvider(p).supportsBudget);
+    if (seenProviders.has(rs.spec.providerName)) continue;
+    seenProviders.add(rs.spec.providerName);
+    rs.warnings.forEach((w) => log.warn(`${t.id}: ${w}`));
+    extraProviders.push({ spec: rs.spec, provider: getProvider(rs.spec.providerName), label: t.id });
+  }
+  // The escalation target only launches when a task fails, but its provider still has to pass
+  // preflight now: discovering a missing binary mid-run is exactly what preflight exists to avoid.
+  const escPreflight = resolveEscalation(config, spec, (p) => getProvider(p).supportsBudget);
+  escPreflight?.warnings.forEach((w) => log.warn(w));
+  if (escPreflight && !seenProviders.has(escPreflight.spec.providerName)) {
+    extraProviders.push({ spec: escPreflight.spec, provider: getProvider(escPreflight.spec.providerName), label: 'escalation' });
   }
   if (!preflight(ctx, spec, provider, { skipAuth: flags.dryRun, ignoreHalt: flags.dryRun, extraProviders })) {
     log.error('preflight failed; fix the ✗ items above (or run: symphony doctor)');
@@ -550,6 +678,8 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       const cmd = tProvider.buildCommand({ bin: rs.spec.bin, prompt, promptFile: `${paths.runs}/${t.id}-<stamp>.prompt.md`, taskId: t.id, attempt: st.attempts + 1, kind: 'task', model: rs.spec.model, autoApprove: rs.spec.autoApprove, budgetUsd: rs.spec.budgetUsd, extraArgs: rs.spec.extraArgs, cwd: paths.root });
       log.plain(`\n=== ${t.id} — ${t.title}`);
       log.plain(`provider: ${rs.spec.providerName} [${rs.spec.sources.provider}] · model: ${rs.spec.model ?? 'provider default'} [${rs.spec.sources.model}] · timeout ${rs.spec.timeoutMin} min · idle ${rs.spec.idleTimeoutMin} min · auto-approve ${rs.spec.autoApprove}`);
+      const esc = resolveEscalation(config, rs.spec, (p) => getProvider(p).supportsBudget);
+      if (esc) log.plain(`escalation: ${esc.spec.providerName} · ${esc.spec.model} if the task fails (${config.escalation.onCategories.join(', ')}; max ${config.escalation.maxAttempts} session${config.escalation.maxAttempts === 1 ? '' : 's'})`);
       log.plain(`command: ${describeCmd(cmd)}`);
       log.plain(`--- prompt for ${t.id} (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);
     }
@@ -684,7 +814,7 @@ export async function nudgeCommand(ctx: RunContext, rawId: string, note?: string
     else if (block && outcome.result.ok && block.status === 'continue') final = { status: 'failed', summary: `${block.summary || 'more work remains'} | reported continue; run \`symphony run\` to continue in a fresh session`, lastError: { category: 'task', message: 'reported continue', transient: false, fatal: false, at: nowIso() } };
     else if (block && outcome.result.ok) final = { status: block.status as TaskStatus, summary: block.summary || block.status };
     else {
-      const c = classifyFailure(outcomeEvidence(outcome), config.halt.onCategories);
+      const c = await classifyOutcome(ctx, task, st, outcomeEvidence(outcome));
       final = { status: 'failed', summary: block ? `${block.summary} | ${c.category}: ${c.message}` : `${c.category}: ${c.message} (still no SYMPHONY_RESULT after nudge)`, lastError: mkError(c) };
       if (c.fatal) halt = { at: nowIso(), taskId: task.id, category: c.category, reason: c.message };
     }

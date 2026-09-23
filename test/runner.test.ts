@@ -371,3 +371,331 @@ test('preflight fails when a later task uses a provider whose binary is missing'
   assert.equal(code, 4);
   assert.equal(state.tasks.T01, undefined);
 });
+
+test('a task the workhorse fails is escalated to the configured model and can then finish', async () => {
+  const { dir, paths, task } = project();
+  // The primary model reports failed; the escalated session (a distinct kind) does the work.
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    claudeResult('failed', 'gave up'),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.escalate.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    JSON.stringify({ type: 'fake_write', path: 'escalated.txt', content: 'done by the strong model' }),
+    claudeResult('done', 'finished after escalation'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    nudge: false,
+    escalation: { ...DEFAULTS.escalation, enabled: true, provider: 'fake' as const, model: 'strong-model', onCategories: ['task'] },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.status, 'done');
+    assert.equal(state.tasks.T01.attempts, 2);
+    assert.equal(state.tasks.T01.model, 'strong-model');
+    assert.ok(readFileSync(join(dir, 'escalated.txt'), 'utf8').includes('strong model'));
+    assert.match(readFileSync(paths.roadmap, 'utf8'), /\[x\] T01/);
+    // The committed run log records which model ran each session.
+    const taskLog = readFileSync(join(paths.logsDir, 'T01.md'), 'utf8');
+    assert.match(taskLog, /summary: gave up/);
+    assert.match(taskLog, /summary: finished after escalation/);
+    assert.match(taskLog, /- model: fake · strong-model/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('escalation is bounded by maxAttempts and still fails when the strong model also fails', async () => {
+  const { dir, paths, task } = project();
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    claudeResult('failed', 'weak failed'),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.escalate.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('failed', 'strong failed too'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    nudge: false,
+    escalation: { ...DEFAULTS.escalation, enabled: true, provider: 'fake' as const, model: 'strong-model', maxAttempts: 1, onCategories: ['task'] },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'failed');
+    assert.equal(state.tasks.T01.status, 'failed');
+    assert.equal(state.tasks.T01.attempts, 2); // one workhorse session, one escalation, then stop
+    assert.match(state.tasks.T01.summary ?? '', /strong failed too/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('an infrastructure failure is not escalated even when escalation is enabled', async () => {
+  const { dir, paths, task } = project();
+  // A fatal auth error: classifyFailure halts the run rather than handing it to a stronger model.
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', result: 'Invalid API key' }),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    nudge: false,
+    escalation: { ...DEFAULTS.escalation, enabled: true, provider: 'fake' as const, model: 'strong-model', onCategories: ['task'] },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'failed');
+    assert.equal(out.halt?.category, 'auth');
+    assert.equal(state.tasks.T01.attempts, 1); // never escalated
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+/** A fetch double for the Jev System One call. */
+function jevFetch(choice: string, confidence: number): typeof fetch {
+  return (async () => new Response(JSON.stringify({
+    model: 'typesafe/jev-1.13',
+    answers: { disposition: { type: 'choice', choice, confidence } },
+    usage: { cost: 0.00002 },
+  }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+}
+
+/** A session that ended cleanly but never emitted its SYMPHONY_RESULT block. */
+function blocklessTaskFixture(dir: string): void {
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 's1', result: 'I believe I am finished.' }),
+  ].join('\n') + '\n');
+}
+
+test('a session without a result block is settled by Jev instead of a nudge session', async () => {
+  const { dir, paths, task } = project();
+  blocklessTaskFixture(dir);
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, jev: { ...DEFAULTS.jev, enabled: true } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: jevFetch('done', 0.95) };
+  process.env.OPENROUTER_API_KEY = 'sk-or-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.attempts, 1); // the nudge session never ran
+    assert.equal(state.tasks.T01.nudged, undefined);
+    assert.match(readFileSync(join(paths.logsDir, 'T01.md'), 'utf8'), /Jev classified the session as done/);
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a low-confidence Jev answer falls back to the nudge session', async () => {
+  const { dir, paths, task } = project();
+  blocklessTaskFixture(dir);
+  writeFileSync(join(dir, 'fixtures', 'T01.nudge.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('done', 'reported after nudge'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, jev: { ...DEFAULTS.jev, enabled: true } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: jevFetch('done', 0.3) };
+  process.env.OPENROUTER_API_KEY = 'sk-or-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.nudged, true); // the nudge ran (within the same attempt)
+    assert.match(readFileSync(join(paths.logsDir, 'T01.md'), 'utf8'), /summary: reported after nudge/);
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('Jev may not end a task as failed by default; the nudge runs instead', async () => {
+  const { dir, paths, task } = project();
+  blocklessTaskFixture(dir);
+  writeFileSync(join(dir, 'fixtures', 'T01.nudge.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('done', 'actually finished'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, jev: { ...DEFAULTS.jev, enabled: true } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: jevFetch('failed', 0.99) };
+  process.env.OPENROUTER_API_KEY = 'sk-or-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done'); // the nudge settled it, not Jev's "failed"
+    assert.equal(state.tasks.T01.nudged, true);
+    assert.match(state.tasks.T01.summary ?? '', /actually finished/);
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+/** A fetch double for the Jev error-classification call. */
+function jevErrorFetch(category: string, confidence: number): typeof fetch {
+  return (async () => new Response(JSON.stringify({
+    model: 'typesafe/jev-1.13',
+    answers: { category: { type: 'choice', choice: category, confidence } },
+    usage: { cost: 0.00001 },
+  }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+}
+
+/** A session that failed with error text no classifyFailure rule matches. */
+function unclassifiedFailureFixture(dir: string): void {
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', result: 'The widget subsystem returned an odd state.' }),
+  ].join('\n') + '\n');
+}
+
+test('an unclassified failure is retried when Jev reads it as transient', async () => {
+  const { dir, paths, task } = project();
+  unclassifiedFailureFixture(dir);
+  writeFileSync(join(dir, 'fixtures', 'T01.resume.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('done', 'recovered on retry'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, retry: { maxAttempts: 2, backoffSec: [0] }, jev: { ...DEFAULTS.jev, enabled: true } };
+  const warnings: string[] = [];
+  const log: Logger = { info() {}, warn: (m) => warnings.push(m), error() {}, plain() {}, banner() {} };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: jevErrorFetch('server', 0.9) };
+  process.env.OPENROUTER_API_KEY = 'sk-or-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.attempts, 2); // the unknown failure became a retry
+    assert.ok(warnings.some((l) => /Jev reads it as server/.test(l)), warnings.join('\n'));
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('the same unclassified failure stays terminal when Jev is off', async () => {
+  const { dir, paths, task } = project();
+  unclassifiedFailureFixture(dir);
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, retry: { maxAttempts: 2, backoffSec: [0] } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: jevErrorFetch('server', 0.9) };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'failed');
+    assert.equal(state.tasks.T01.attempts, 1); // no tie-breaker, no retry
+    assert.equal(state.tasks.T01.lastError?.category, 'unknown');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+/** A fetch double for the Jev escalation-decision call. */
+function jevEscalationFetch(choice: string, confidence: number): typeof fetch {
+  return (async () => new Response(JSON.stringify({
+    model: 'typesafe/jev-1.13',
+    answers: { decision: { type: 'choice', choice, confidence } },
+    usage: { cost: 0.00001 },
+  }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+}
+
+/** A fetch double that fails the test if Jev is called at all. */
+const throwingFetch = (async () => { throw new Error('Jev must not be called for this workflow'); }) as unknown as typeof fetch;
+
+/** Escalation enabled on the `task` category, with the escalation session's fixture written. */
+function escalationProject(): { dir: string; paths: ReturnType<typeof resolvePaths>; task: Task; config: typeof DEFAULTS } {
+  const { dir, paths, task } = project();
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    claudeResult('failed', 'workhorse gave up'),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.escalate.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('done', 'strong model finished'),
+  ].join('\n') + '\n');
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    nudge: false,
+    escalation: { ...DEFAULTS.escalation, enabled: true, provider: 'fake' as const, model: 'strong-model', onCategories: ['task'] },
+  };
+  return { dir, paths, task, config };
+}
+
+test('Jev can decline an escalation the category list would otherwise allow', async () => {
+  const { paths, task, config } = escalationProject();
+  const state: State = loadState(paths);
+  const ctx: RunContext = { paths, config: { ...config, jev: { ...DEFAULTS.jev, enabled: true } }, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: jevEscalationFetch('stay', 0.9) };
+  process.env.OPENROUTER_API_KEY = 'sk-or-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'failed');
+    assert.equal(state.tasks.T01.attempts, 1); // the escalation session was skipped
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('Jev can approve an escalation, which then runs on the escalation model', async () => {
+  const { paths, task, config } = escalationProject();
+  const state: State = loadState(paths);
+  const ctx: RunContext = { paths, config: { ...config, jev: { ...DEFAULTS.jev, enabled: true } }, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: jevEscalationFetch('escalate', 0.9) };
+  process.env.OPENROUTER_API_KEY = 'sk-or-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.attempts, 2);
+    assert.equal(state.tasks.T01.model, 'strong-model');
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('with escalationDecision off, escalation stays deterministic and Jev is not consulted', async () => {
+  const { paths, task, config } = escalationProject();
+  const state: State = loadState(paths);
+  const ctx: RunContext = { paths, config: { ...config, jev: { ...DEFAULTS.jev, enabled: true, escalationDecision: false } }, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: throwingFetch };
+  process.env.OPENROUTER_API_KEY = 'sk-or-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done'); // escalated without asking Jev
+    assert.equal(state.tasks.T01.attempts, 2);
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('with resultFallback off, a block-less session still nudges and Jev is not consulted', async () => {
+  const { dir, paths, task } = project();
+  blocklessTaskFixture(dir);
+  writeFileSync(join(dir, 'fixtures', 'T01.nudge.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('done', 'reported after nudge'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, jev: { ...DEFAULTS.jev, enabled: true, resultFallback: false } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: throwingFetch };
+  process.env.OPENROUTER_API_KEY = 'sk-or-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.nudged, true); // the nudge ran
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
