@@ -18,6 +18,9 @@ STOP
 symphony.config.json
 fixtures/
 
+# throwaway project created by `npm run mock` (scripts/mock.mjs)
+.mock/
+
 # logs
 npm-debug.log*
 yarn-error.log*

@@ -43,6 +43,7 @@
   "paths": {},
   "taskSets": [],
   "autoApprove": true,
+  "tui": true,
   "nudge": true,
   "timeoutMin": 240,
   "idleTimeoutMin": 20,

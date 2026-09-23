@@ -149,6 +149,33 @@ docs/
 7. **Commits everything** with `git add -A && git commit -m "T01: <title> [<status>]"` (template configurable). Before staging, an ephemeral-file guard keeps secrets and build junk out of the commit by adding them to `.gitignore` — agent-created source files still land. A failed commit is retried once; if it still fails the task is demoted to `failed` rather than recorded `done`, because its work is not in git. Commits also refuse to run if a session switched branches (`HEAD` is checked against the branch the run started on).
 8. **Starts the next task in a new session.** Each session is also instructed to append a `## Txx` section to `PROGRESS.md`, fill the task file's `## Hand-off`, run the named tests in the foreground, and update the design docs/ADRs its work touched.
 
+### The run view (TUI)
+
+When `run` starts with stdout **and** stdin attached to a terminal, it opens a full-screen view instead of scrolling output:
+
+- **Status** (top panel) — the same table as `symphony status`, refreshed from live state: id, phase, title, status, attempts, duration, start/end, cost, provider, model, summary. A task split across sessions or retried lists its per-session rows beneath it.
+- **Live output** (bottom panel) — exactly what `run` streams today: harness `INFO`/`WARN`/`ERROR` lines and the provider's `[think]`/`[text]`/`[tool]`/`[result]` stream, tailing by default.
+- **Status bar** — pipeline progress and duration, the current task and its elapsed time, reported cost, provider/model, and any `PAUSED`/`HALTED`/`blocked` badge, with the key hints beneath.
+
+Each panel scrolls independently, vertically and horizontally. The view turns itself off when output is piped or in CI, with `--no-tui`, or with `"tui": false` in the config; `--tui` forces it.
+
+| key | action |
+|---|---|
+| `q` / `Ctrl-C` | quit — asks for confirmation, then stops the current session (like today's Ctrl-C) |
+| `?` | help overlay (any key closes it) |
+| `Tab` / `Shift-Tab` | move focus between the status and output panels |
+| `↑ ↓` / `PgUp` / `PgDn` / `Home` / `End` / `g` / `G` | scroll the focused panel; scrolling the output up pauses tailing |
+| `← →` / `h` / `l` | pan the focused panel horizontally |
+| `s` | toggle follow (tail) on the focused panel |
+| `n` / `N` | select the next / previous task |
+| `a` | accept the selected blocked/failed task (asks for confirmation) |
+| `c` | clear a halt (asks for confirmation); after a halt the view stays open, so `c` clears it and restarts |
+| `p` | pause / resume by toggling the `.stop` sentinel |
+| `z` | cycle layout: both panels · status only · output only |
+| `[` `]` (or `-` `+`) | adjust the panel split |
+
+On exit the terminal is restored and the last lines are replayed to normal scrollback, so the outcome survives in your history.
+
 ### Mid-run: how the harness keeps going
 
 | event | what happens |
@@ -346,6 +373,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `--budget USD` | per-task budget (Claude only) |
 | `--max-cost USD` | stop the run once reported session cost reaches this (`maxCostUsdPerRun`; 0 = off) |
 | `--clear-halt` | clear a sticky halt and start |
+| `--tui` / `--no-tui` | force / disable the full-screen run view (default: on when stdout and stdin are a terminal, off when piped or in CI; config `tui`) |
 
 ## Providers
 
@@ -462,6 +490,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `paths.state` `.runs` `.log` | under `.symphony/` | where harness state, session logs and the event log live |
 | `taskSets` | `[]` | extra, independent task sets: `[{ "name": "phase-2", "docs": "docs/phase-2" }]`, each with its own roadmap/tasks/progress/design and state under `.symphony/sets/<name>/`; run one with `--set NAME` (see [Multiple task sets](#multiple-task-sets)) |
 | `autoApprove` | `true` | bypass permission prompts (`--safe` sets false for one run) |
+| `tui` | `true` | open the full-screen run view (status table + live output) when stdout and stdin are a terminal; off when piped/CI. `--no-tui` disables, `--tui` forces |
 | `nudge`, `nudgeTimeoutMin` | `true`, `45` | resume once to collect a missing result block |
 | `timeoutMin`, `idleTimeoutMin` | `240`, `20` | max wall clock per session; kill after this long with no output |
 | `prepareTimeoutMin` | `60` | wall clock for the `prepare` session |
@@ -543,6 +572,20 @@ npm test                                          # node --test
 npm run typecheck && npm run build                # tsc → dist/
 node dist/tools/parse-check.js claude session.jsonl [--render]   # replay a provider log through the parser
 ```
+
+### Mock run (no LLM)
+
+`npm run mock` builds a throwaway project under `.mock/` — a four-task roadmap, task files, and `fake`-provider fixtures that write files and report `continue`, `blocked` and `done` — `git init`s it, then launches the real CLI from source against it. The TUI, commits, continuations and the blocked path all run without spending anything, so it is the fastest way to see the run view.
+
+```bash
+npm run mock                 # fresh .mock/ project, then run
+npm run mock -- --only T01   # any `run` flag is forwarded to the run
+npm run mock -- --dry-run    # print the prompts instead of running
+npm run mock -- --keep       # reuse .mock/ (keeps state.json, logs and git history)
+npm run mock:clean           # delete .mock/
+```
+
+`.mock/` is gitignored, so nothing it generates is ever committed. `npm run mock` wipes and recreates it by default (`--keep` preserves it); `npm run mock:clean` removes it when you are done. Set `SYMPHONY_MOCK_DIR` to build the project somewhere else.
 
 The `fake` provider replays Claude-format NDJSON fixtures from `SYMPHONY_FAKE_FIXTURES` (default `.symphony/fixtures`), matched in order `<taskId>.<kind>.jsonl` → `<taskId>.jsonl` → `default.<kind>.jsonl` → `default.jsonl`, where `kind` is `task`, `continue`, `resume` or `nudge` (the `prepare` session uses taskId `prepare`, kind `task`). Control lines the fake agent interprets instead of echoing: `fake_write {path, content}`, `fake_rm {path}`, `fake_run {command}`, `fake_stderr {text}`, `fake_sleep {ms}`, `fake_exit {code}`. That is enough to exercise retries, nudges, continuations, halts, branch switches, and `prepare` without spending anything.
 

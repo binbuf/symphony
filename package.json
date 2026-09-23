@@ -14,6 +14,8 @@
     "build": "tsc -p tsconfig.json && node scripts/copy-prompts.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "node --import tsx src/cli.ts",
+    "mock": "node scripts/mock.mjs",
+    "mock:clean": "node scripts/mock.mjs --clean",
     "test": "node --import tsx --test --test-timeout=60000 test/**/*.test.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },

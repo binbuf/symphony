@@ -111,6 +111,8 @@ export interface Config {
   /** Additional, independent task sets selected with `--set <name>`. The base docs package is the default. */
   taskSets: TaskSetConfig[];
   autoApprove: boolean;
+  /** Full-screen run view (status table + live output) when stdout/stdin is a terminal. `--no-tui` overrides. */
+  tui: boolean;
   nudge: boolean;
   timeoutMin: number;
   idleTimeoutMin: number;
@@ -185,6 +187,7 @@ export const DEFAULTS: Config = {
   paths: {},
   taskSets: [],
   autoApprove: true,
+  tui: true,
   nudge: true,
   timeoutMin: 240,
   idleTimeoutMin: 20,
@@ -400,6 +403,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     paths: pathOverrides(raw.paths, warnings),
     taskSets: taskSetList(raw.taskSets, warnings),
     autoApprove: boolOr(raw.autoApprove, DEFAULTS.autoApprove, 'autoApprove', warnings),
+    tui: boolOr(raw.tui, DEFAULTS.tui, 'tui', warnings),
     nudge: boolOr(raw.nudge, DEFAULTS.nudge, 'nudge', warnings),
     timeoutMin: positiveOr(raw.timeoutMin, DEFAULTS.timeoutMin, 'timeoutMin', warnings),
     idleTimeoutMin: atLeastOr(raw.idleTimeoutMin, DEFAULTS.idleTimeoutMin, 0, 'idleTimeoutMin', warnings),
