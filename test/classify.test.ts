@@ -84,3 +84,35 @@ test('halt categories are configurable', () => {
   const c = classifyFailure({ ...base, resultText: 'Credit balance is too low' }, ['auth']);
   assert.equal(c.category, 'billing'); assert.equal(c.fatal, false);
 });
+
+test('a numeric HTTP status classifies even when the wording is unknown', () => {
+  const r = classifyFailure({ ...base, httpStatus: 429, resultText: 'Provider returned an error.' }, FATAL);
+  assert.equal(r.category, 'rate_limit'); assert.equal(r.transient, true);
+  const s = classifyFailure({ ...base, httpStatus: 503, resultText: 'Provider returned an error.' }, FATAL);
+  assert.equal(s.category, 'server'); assert.equal(s.transient, true);
+  // 408 is mapped by status alone: no RULES pattern names it.
+  const n = classifyFailure({ ...base, httpStatus: 408, resultText: 'Provider returned an error.' }, FATAL);
+  assert.equal(n.category, 'network'); assert.equal(n.transient, true);
+});
+
+test('an unrecognised 4xx stays terminal (a request problem is not transient)', () => {
+  const c = classifyFailure({ ...base, httpStatus: 404, resultText: 'Provider returned an error.' }, FATAL);
+  assert.equal(c.category, 'unknown'); assert.equal(c.transient, false); assert.equal(c.fatal, false);
+});
+
+test('a provider-flagged retryable or a bare error event is transient without a status', () => {
+  const retryable = classifyFailure({ ...base, retryable: true, errorTexts: ['upstream returned a weird blob'] }, FATAL);
+  assert.equal(retryable.category, 'server'); assert.equal(retryable.transient, true);
+  const sawError = classifyFailure({ ...base, sawError: true, errorTexts: ['upstream returned a weird blob'] }, FATAL);
+  assert.equal(sawError.category, 'server'); assert.equal(sawError.transient, true);
+});
+
+test('broadened throttling wording and Retry-After are recognised', () => {
+  for (const text of ['The request was throttled.', 'Too many requests.', 'HTTP 429', 'try again; retry-after: 30']) {
+    const c = classifyFailure({ ...base, resultText: text }, FATAL);
+    assert.equal(c.category, 'rate_limit', text);
+    assert.equal(c.transient, true, text);
+  }
+  const c = classifyFailure({ ...base, httpStatus: 429, retryAfterSec: 42 }, FATAL);
+  assert.equal(c.retryAfterSec, 42);
+});

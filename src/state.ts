@@ -34,6 +34,8 @@ export interface TaskState {
   title: string;
   status: TaskStatus;
   attempts: number;
+  /** Transient (rate limit / 5xx / dropped socket) retries taken on this task; excluded from `attempts`. */
+  transientRetries?: number;
   nudged?: boolean;
   /**
    * Continuation sessions already accounted for on this task. Persisted so that pausing at a

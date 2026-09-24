@@ -221,7 +221,24 @@ export interface Config {
   commitPerSession: boolean;
   /** What to do when a task reports `blocked`: 'stop' for a human, or 'continue' to the next task. */
   onBlocked: 'stop' | 'continue';
-  retry: { maxAttempts: number; backoffSec: number[] };
+  retry: {
+    /** How many transient (rate limit, 5xx, dropped socket) retries a task may take before it fails for good. */
+    maxAttempts: number;
+    /** Fixed backoff schedule in seconds; used when `exponential` is false, index-clamped at the last entry. */
+    backoffSec: number[];
+    /** When true (default), delay with exponential backoff instead of the fixed `backoffSec` schedule. */
+    exponential: boolean;
+    /** First exponential delay, in seconds. */
+    baseSec: number;
+    /** Multiplier applied once per retry. */
+    factor: number;
+    /** Ceiling for any single wait, in seconds. */
+    maxSec: number;
+    /** Fractional randomisation applied to each wait (± this fraction), to avoid a synchronised retry storm. */
+    jitter: number;
+    /** When the provider supplies a Retry-After, wait at least that long. */
+    honorRetryAfter: boolean;
+  };
   halt: { maxConsecutiveFailures: number; maxAttemptsPerTask: number; onCategories: string[] };
   commitMessageTemplate: string;
   /** Shell command the harness runs itself after a task reports `done`; non-zero demotes it to failed. */
@@ -289,7 +306,7 @@ export const DEFAULTS: Config = {
   maxCostUsdPerRun: 0,
   commitPerSession: true,
   onBlocked: 'stop',
-  retry: { maxAttempts: 3, backoffSec: [30, 120, 300] },
+  retry: { maxAttempts: 8, backoffSec: [30, 120, 300], exponential: true, baseSec: 30, factor: 2, maxSec: 900, jitter: 0.2, honorRetryAfter: true },
   halt: {
     maxConsecutiveFailures: 2,
     maxAttemptsPerTask: 3,
@@ -557,6 +574,26 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         warnings.push('retry.backoffSec: expected a non-empty array of numbers; using default');
         return DEFAULTS.retry.backoffSec;
       })(),
+      exponential: boolOr(retryRaw.exponential, DEFAULTS.retry.exponential, 'retry.exponential', warnings),
+      baseSec: positiveOr(retryRaw.baseSec, DEFAULTS.retry.baseSec, 'retry.baseSec', warnings),
+      factor: (() => {
+        const n = numberOr(retryRaw.factor, DEFAULTS.retry.factor, 'retry.factor', warnings);
+        if (!(n > 1)) {
+          warnings.push(`retry.factor: expected a number > 1, got ${JSON.stringify(retryRaw.factor ?? n)}; using ${DEFAULTS.retry.factor}`);
+          return DEFAULTS.retry.factor;
+        }
+        return n;
+      })(),
+      maxSec: positiveOr(retryRaw.maxSec, DEFAULTS.retry.maxSec, 'retry.maxSec', warnings),
+      jitter: (() => {
+        const n = numberOr(retryRaw.jitter, DEFAULTS.retry.jitter, 'retry.jitter', warnings);
+        if (n < 0 || n > 1) {
+          warnings.push(`retry.jitter: expected a number between 0 and 1, got ${JSON.stringify(retryRaw.jitter ?? n)}; using ${DEFAULTS.retry.jitter}`);
+          return DEFAULTS.retry.jitter;
+        }
+        return n;
+      })(),
+      honorRetryAfter: boolOr(retryRaw.honorRetryAfter, DEFAULTS.retry.honorRetryAfter, 'retry.honorRetryAfter', warnings),
     },
     halt: {
       maxConsecutiveFailures: numberOr(haltRaw.maxConsecutiveFailures, DEFAULTS.halt.maxConsecutiveFailures, 'halt.maxConsecutiveFailures', warnings),

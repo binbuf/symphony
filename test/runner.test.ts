@@ -8,7 +8,7 @@ import { DEFAULTS } from '../src/config.js';
 import { currentBranch } from '../src/git.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths } from '../src/paths.js';
-import { haltBanner, runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
+import { haltBanner, retryDelaySec, runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
 import { loadState, newTaskState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
 
@@ -436,6 +436,58 @@ test('a Ctrl-C does not consume the task attempt budget, so it cannot trigger th
   }
 });
 
+test('a transient provider failure is retried without consuming the attempts halt budget', async () => {
+  const { dir, paths, task } = project();
+  // First session dies on a provider 429; the retry (a reserved fixture) succeeds.
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', result: 'API error 429: too many requests, slow down.' }),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.resume.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('done', 'recovered after the throttle'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  // maxAttemptsPerTask: 1 makes the regression sharp: a retry counted as an attempt would halt the run.
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    halt: { ...DEFAULTS.halt, maxAttemptsPerTask: 1 },
+    retry: { ...DEFAULTS.retry, maxAttempts: 3, backoffSec: [0], exponential: false },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.attempts, 1); // the throttle did not inflate the attempt count
+    assert.equal(state.tasks.T01.transientRetries, 1);
+    assert.equal(state.tasks.T01.lastError, undefined);
+
+    // A subsequent run must not halt on the attempts gate: the task is already done.
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    assert.equal(state.halted, undefined);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('retryDelaySec is exponential, capped, jittered, and honours Retry-After', () => {
+  const base = { maxAttempts: 3, backoffSec: [30], exponential: true, baseSec: 30, factor: 2, maxSec: 900, jitter: 0, honorRetryAfter: true };
+  assert.equal(retryDelaySec(base, 1), 30);
+  assert.equal(retryDelaySec(base, 2), 60);
+  assert.equal(retryDelaySec(base, 3), 120);
+  assert.equal(retryDelaySec(base, 99), 900); // capped
+  // A provider Retry-After raises the floor but never exceeds the cap.
+  assert.equal(retryDelaySec(base, 1, 75), 75);
+  assert.equal(retryDelaySec(base, 1, 5000), 900);
+  // The fixed schedule is used verbatim when exponential is off.
+  assert.equal(retryDelaySec({ ...base, exponential: false, backoffSec: [0, 5, 10] }, 2), 5);
+  // Jitter stays within ±fraction of the nominal delay.
+  const j = retryDelaySec({ ...base, jitter: 0.2 }, 1);
+  assert.ok(j >= 24 && j <= 36, `jittered delay ${j} out of range`);
+});
+
 test('the halt banner points at --retry for an attempts halt (clear-halt alone would re-halt)', () => {
   const seen: string[] = [];
   const capture: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner(_title, lines) { seen.push(...lines); } };
@@ -681,7 +733,8 @@ test('an unclassified failure is retried when Jev reads it as transient', async 
   try {
     const out = await runTask(ctx, task);
     assert.equal(out.status, 'done');
-    assert.equal(state.tasks.T01.attempts, 2); // the unknown failure became a retry
+    assert.equal(state.tasks.T01.attempts, 1); // a transient retry is not a task attempt
+    assert.equal(state.tasks.T01.transientRetries, 1); // but it is recorded as a retry
     assert.ok(warnings.some((l) => /Jev reads it as server/.test(l)), warnings.join('\n'));
   } finally {
     delete process.env.OPENROUTER_API_KEY;

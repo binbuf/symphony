@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { resolveSpawn } from '../spawn.js';
-import { isRecord, num, str } from '../util.js';
+import { isRecord, bool, num, str } from '../util.js';
 import { ATTACHED_BOOTSTRAP, hintFromInput, newHints, toText, tryJson } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
 
@@ -48,7 +48,20 @@ export class OpenCodeParser implements LineParser {
       case 'error': {
         const err = isRecord(ev.error) ? ev.error : part;
         const data = isRecord(err.data) ? err.data : {};
-        const text = `${str(err.name) ?? 'error'}: ${str(data.message) ?? toText(err)}`;
+        const status = statusOf(data.statusCode) ?? statusOf(data.status) ?? statusOf(err.statusCode);
+        const retryable = bool(data.isRetryable) ?? bool(err.isRetryable);
+        const retryAfter = retryAfterSecOf(data) ?? retryAfterSecOf(err) ?? retryAfterSecOf(data.responseBody) ?? retryAfterSecOf(err.responseBody);
+        if (status !== undefined) this.h.httpStatus = status;
+        if (retryable !== undefined) this.h.retryable = retryable;
+        if (retryAfter !== undefined && this.h.retryAfterSec === undefined) this.h.retryAfterSec = retryAfter;
+        // Keep the HTTP status and any Retry-After in the text too, so wording the classifier does not
+        // know (new providers phrase throttling many ways) is still recognised from the status alone.
+        const detail = [
+          str(data.message) ?? toText(err),
+          status !== undefined ? `(HTTP ${status})` : '',
+          retryAfter !== undefined ? `(retry after ${retryAfter}s)` : '',
+        ].filter(Boolean).join(' ');
+        const text = `${str(err.name) ?? 'error'}: ${detail}`;
         this.h.errorTexts.push(text);
         out.push({ kind: 'error', text });
         break;
@@ -58,6 +71,43 @@ export class OpenCodeParser implements LineParser {
     }
     return out;
   }
+}
+
+/**
+ * Normalise an HTTP status that a provider error carries as a number or a numeric string
+ * (`429` / `"429"`). Anything else (absent, non-numeric) is undefined.
+ */
+function statusOf(x: unknown): number | undefined {
+  if (typeof x === 'number') return Number.isFinite(x) ? x : undefined;
+  if (typeof x === 'string' && /^\d{3}$/.test(x.trim())) return Number(x.trim());
+  return undefined;
+}
+
+/**
+ * Pull a Retry-After value (seconds) from an error payload. AI-SDK errors expose it under several
+ * spellings, sometimes inside a JSON string `responseBody`; only the first usable value is used.
+ */
+function retryAfterSecOf(x: unknown): number | undefined {
+  if (typeof x === 'string') {
+    const t = x.trim();
+    if (/^\d+(\.\d+)?$/.test(t)) return Number(t);
+    if (t.startsWith('{') || t.startsWith('[')) {
+      try { return retryAfterSecOf(JSON.parse(t)); } catch { return undefined; }
+    }
+    return undefined;
+  }
+  if (!isRecord(x)) return undefined;
+  const direct = num(x.retryAfter) ?? num(x.retryAfterSeconds) ?? num(x.retry_after) ?? num(x['retry-after']);
+  if (direct !== undefined) return direct;
+  const nested = isRecord(x.headers) ? x.headers : undefined;
+  if (nested) {
+    const raw = nested['retry-after'] ?? nested['Retry-After'] ?? nested.retry_after;
+    const n = num(raw);
+    if (n !== undefined) return n;
+    const s = str(raw);
+    if (s !== undefined && /^\d+(\.\d+)?$/.test(s.trim())) return Number(s.trim());
+  }
+  return undefined;
 }
 
 /**

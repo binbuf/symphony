@@ -41,6 +41,22 @@ test('config file merges per provider and unknown keys warn', () => {
   assert.ok(warnings.some((w) => w.includes('bogus')));
 });
 
+test('retry backoff knobs parse, with warnings for out-of-range values', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({ retry: { maxAttempts: 4, exponential: false, baseSec: 10, factor: 3, maxSec: 600, jitter: 0.5, honorRetryAfter: false } }));
+  const ok = loadConfig(paths, {}).config;
+  assert.deepEqual(ok.retry, { maxAttempts: 4, backoffSec: DEFAULTS.retry.backoffSec, exponential: false, baseSec: 10, factor: 3, maxSec: 600, jitter: 0.5, honorRetryAfter: false });
+
+  writeFileSync(paths.config, JSON.stringify({ retry: { factor: 1, jitter: 2 } }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.retry.factor, DEFAULTS.retry.factor);
+  assert.equal(config.retry.jitter, DEFAULTS.retry.jitter);
+  assert.ok(warnings.some((w) => /retry\.factor/.test(w)));
+  assert.ok(warnings.some((w) => /retry\.jitter/.test(w)));
+});
+
 test('keys beginning with "_" are comments: ignored silently at every level', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-comment-'));
   const paths = resolvePaths(dir);

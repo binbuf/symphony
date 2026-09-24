@@ -90,6 +90,24 @@ test('opencode parser: init once, reasoning, tool dedupe, error', () => {
   assert.ok(p.hints().errorTexts[0].includes('invalid api key'));
 });
 
+test('opencode parser: an error event exposes HTTP status, retryable, and Retry-After', () => {
+  const p = new OpenCodeParser();
+  const e = p.parse(j({ type: 'error', sessionID: 'o1', error: { name: 'AI_APICallError', data: { message: 'Provider returned an error', statusCode: 429, isRetryable: true, retryAfter: 30 } } }));
+  const ev = e.find((x) => x.kind === 'error') as { kind: 'error'; text: string };
+  assert.equal(ev.kind, 'error');
+  assert.ok(ev.text.includes('HTTP 429'));
+  assert.ok(ev.text.includes('retry after 30s'));
+  assert.equal(p.hints().httpStatus, 429);
+  assert.equal(p.hints().retryable, true);
+  assert.equal(p.hints().retryAfterSec, 30);
+
+  // A numeric string status and a Retry-After nested in responseBody are both understood.
+  const q = new OpenCodeParser();
+  q.parse(j({ type: 'error', sessionID: 'o2', error: { name: 'AI_APICallError', data: { message: 'busy', status: '503', responseBody: '{"retry_after":15}' } } }));
+  assert.equal(q.hints().httpStatus, 503);
+  assert.equal(q.hints().retryAfterSec, 15);
+});
+
 test('opencode buildCommand: prompt attached via --file, --auto by default, --session on resume', () => {
   const c = opencodeProvider.buildCommand(opts({ model: 'anthropic/x', resumeId: 'sess' }));
   assert.equal(c.args[0], 'run');

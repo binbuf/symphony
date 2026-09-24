@@ -124,7 +124,13 @@
     "maxPerTask": 1
   },
   "retry": {
-    "maxAttempts": 3,
+    "maxAttempts": 8,
+    "exponential": true,
+    "baseSec": 30,
+    "factor": 2,
+    "maxSec": 900,
+    "jitter": 0.2,
+    "honorRetryAfter": true,
     "backoffSec": [
       30,
       120,

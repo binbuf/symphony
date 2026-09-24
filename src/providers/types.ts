@@ -51,6 +51,12 @@ export interface ClassifyHints {
   apiErrorCategories: string[];
   errorTexts: string[];
   costUsd?: number;
+  /** HTTP status parsed from a provider error event (e.g. 429, 503), when the adapter can see it. */
+  httpStatus?: number;
+  /** Provider-declared retryability (`isRetryable`), when an error event carries it. */
+  retryable?: boolean;
+  /** Server-requested delay before the next attempt, in seconds (Retry-After). */
+  retryAfterSec?: number;
 }
 
 export interface LineParser {

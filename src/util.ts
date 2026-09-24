@@ -202,6 +202,10 @@ export function num(x: unknown): number | undefined {
   return typeof x === 'number' && Number.isFinite(x) ? x : undefined;
 }
 
+export function bool(x: unknown): boolean | undefined {
+  return typeof x === 'boolean' ? x : undefined;
+}
+
 /** Error class for expected, user-facing failures (usage, config, preflight). */
 export class UsageError extends Error {
   constructor(message: string, readonly exitCode = 4) {

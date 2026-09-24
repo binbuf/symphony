@@ -3,7 +3,7 @@ export type ErrorCategory =
   | 'rate_limit' | 'overloaded' | 'server' | 'network' | 'stall' | 'crash'  // transient → retry
   | 'timeout' | 'budget' | 'max_turns' | 'task' | 'interrupted' | 'unknown'; // terminal for this task
 
-export interface Classified { category: ErrorCategory; fatal: boolean; transient: boolean; message: string }
+export interface Classified { category: ErrorCategory; fatal: boolean; transient: boolean; message: string; retryAfterSec?: number }
 
 export interface FailureEvidence {
   /** Structured categories from the provider (e.g. Claude `system/api_retry.error`). */
@@ -14,6 +14,14 @@ export interface FailureEvidence {
   resultSubtype?: string;
   resultText?: string;
   sawResult: boolean;
+  /** The provider emitted at least one `error` event (a provider/transport fault, not a task failure). */
+  sawError?: boolean;
+  /** HTTP status parsed from a provider error, when the adapter could see one. */
+  httpStatus?: number;
+  /** Provider-declared retryability, when an error event carried it. */
+  retryable?: boolean;
+  /** Server-requested delay before the next attempt, in seconds. */
+  retryAfterSec?: number;
   exitCode: number | null;
   signal: string | null;
   spawnError?: string;
@@ -28,16 +36,17 @@ const TRANSIENT: ErrorCategory[] = ['rate_limit', 'overloaded', 'server', 'netwo
 const RULES: Array<[ErrorCategory, RegExp]> = [
   ['billing', /credit balance|insufficient (funds|credits|balance)|billing|payment required|\b402\b|out of credits|account (is )?on hold|top up/i],
   // rate_limit must come before usage_limit: "rate limit reached" would otherwise match usage_limit's
-  // "limit reached" and halt the run on what is only a transient throttle.
-  ['rate_limit', /\b429\b|rate[ _-]?limit|too many requests/i],
+  // "limit reached" and halt the run on what is only a transient throttle. New providers phrase a
+  // throttle many ways, so the pattern is deliberately broad (see also the HTTP-status short-circuit).
+  ['rate_limit', /\b429\b|rate[ _-]?limit|too many requests|throttl|requests? per (second|minute|hour|day)|\b(?:rpm|tpm|rps)\b|retry[ _-]?after/i],
   ['usage_limit', /usage limit|hit your limit|plan limit|limit reached|resets at \d/i],
   // "please login" phrases, but not a bare "please run <anything>".
   ['auth', /not (logged|signed) in|unauthori[sz]ed|\b40[13]\b|invalid (api[ _]?key|token|credentials?)|authentication|token (has )?expired|please\s+(?:run\s+|use\s+)?[`"']?\/?(?:log ?in|sign ?in)\b|login required|oauth/i],
   ['model', /model[_ ]not[_ ]found|unknown model|invalid model|model .{1,60}(does not exist|not (found|available|supported))/i],
   ['config', /unknown (option|argument|flag|command)|invalid_request|invalid request|too many arguments|missing required/i],
-  ['overloaded', /overloaded|\b529\b|capacity/i],
-  ['server', /\b50[023]\b|internal server error|service unavailable|bad gateway|upstream/i],
-  ['network', /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|socket hang up|fetch failed|network (error|failure)|connection (reset|closed|refused|lost|error)|disconnected|unable to connect|dns/i],
+  ['overloaded', /overloaded|\b529\b|at capacity|over capacity|capacity exceeded|service (is )?(busy|unavailable)/i],
+  ['server', /\b50[0-9]\b|internal server error|service unavailable|bad gateway|gateway time-?out|upstream/i],
+  ['network', /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|socket hang up|fetch failed|network (error|failure)|connection (reset|closed|refused|lost|error)|disconnected|unable to connect|dns|tls|handshake|proxy/i],
 ];
 
 const STRUCTURED: Record<string, ErrorCategory> = {
@@ -61,7 +70,24 @@ function firstLine(s: string, max = 300): string {
 
 /** The evidence text classifyFailure matches its rules against; reused by the Jev tie-breaker. */
 export function evidenceText(ev: FailureEvidence): string {
-  return [ev.resultSubtype ?? '', ev.resultOk ? '' : ev.resultText ?? '', ...ev.errorTexts, ev.stderrTail].filter(Boolean).join('\n');
+  return [
+    ev.resultSubtype ?? '',
+    ev.resultOk ? '' : ev.resultText ?? '',
+    ...ev.errorTexts,
+    ev.httpStatus !== undefined ? `HTTP ${ev.httpStatus}` : '',
+    ev.stderrTail,
+  ].filter(Boolean).join('\n');
+}
+
+/** Map an HTTP status to a failure category. Unknown 4xx return undefined (a request problem is not transient). */
+function categoryForStatus(status: number): ErrorCategory | undefined {
+  if (status === 429) return 'rate_limit';
+  if (status === 529) return 'overloaded';
+  if (status === 408) return 'network';
+  if (status >= 500 && status <= 599) return 'server';
+  if (status === 401 || status === 403) return 'auth';
+  if (status === 402) return 'billing';
+  return undefined;
 }
 
 /** Build a Classified for a category, deriving fatal/transient from the harness's own rules. */
@@ -70,7 +96,11 @@ export function makeClassified(category: ErrorCategory, message: string, fatalCa
 }
 
 export function classifyFailure(ev: FailureEvidence, fatalCategories: string[]): Classified {
-  const make = (category: ErrorCategory, message: string): Classified => makeClassified(category, message, fatalCategories);
+  const make = (category: ErrorCategory, message: string): Classified => {
+    const c = makeClassified(category, message, fatalCategories);
+    if (ev.retryAfterSec !== undefined) c.retryAfterSec = ev.retryAfterSec;
+    return c;
+  };
 
   if (ev.spawnError) {
     return make('config', /ENOENT/.test(ev.spawnError) ? `provider binary not found (${ev.spawnError})` : `could not start provider: ${ev.spawnError}`);
@@ -99,6 +129,22 @@ export function classifyFailure(ev: FailureEvidence, fatalCategories: string[]):
       const idx = Math.max(0, evidence.lastIndexOf('\n', m.index) + 1);
       const end = evidence.indexOf('\n', m.index);
       return make(cat, evidence.slice(idx, end === -1 ? undefined : end));
+    }
+  }
+
+  // A provider-level error event or an HTTP status is strong evidence of an infrastructure fault even
+  // when the wording is one the rules do not know: new providers phrase throttling many ways, and the
+  // AI SDK often reports a generic message with the real 429/503 in a separate field. Only consulted
+  // when no rule matched and the session did not succeed, so it never overrides a recognised category.
+  if (!ev.resultOk) {
+    if (ev.httpStatus !== undefined) {
+      const byStatus = categoryForStatus(ev.httpStatus);
+      // An unrecognised 4xx is a request problem, not a transient fault: leave it terminal.
+      if (byStatus) return make(byStatus, `HTTP ${ev.httpStatus}: ${firstLine(evidence || 'provider error', 180)}`);
+    } else if (ev.retryable === true) {
+      return make('server', `provider flagged a retryable error: ${firstLine(evidence || 'no detail', 180)}`);
+    } else if (ev.sawError) {
+      return make('server', `provider error: ${firstLine(evidence || 'no detail', 180)}`);
     }
   }
 

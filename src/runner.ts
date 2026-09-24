@@ -222,6 +222,10 @@ export function outcomeEvidence(out: SessionOutcome): FailureEvidence {
     resultSubtype: out.result.errorSubtype,
     resultText: out.result.text,
     sawResult: out.sawResult,
+    sawError: out.sawError,
+    httpStatus: out.hints.httpStatus,
+    retryable: out.hints.retryable,
+    retryAfterSec: out.hints.retryAfterSec,
     exitCode: out.exitCode,
     signal: out.signal,
     spawnError: out.spawnError,
@@ -430,6 +434,24 @@ async function backoff(ctx: RunContext, ms: number): Promise<boolean> {
   return stopPresent(ctx.paths) || ctx.splitRequest !== undefined;
 }
 
+/**
+ * Seconds to wait before a task's Nth transient retry (1-based). Exponential by default
+ * (`baseSec × factor^(n-1)`), capped at `maxSec` and jittered; a provider Retry-After raises the floor.
+ * Falls back to the fixed `backoffSec` schedule when `exponential` is false or unset, so older configs
+ * and tests keep their exact timing.
+ */
+export function retryDelaySec(retry: Config['retry'], retryIndex: number, retryAfterSec?: number): number {
+  const cap = retry.maxSec ?? 15 * 60;
+  let wait = retry.exponential
+    ? (retry.baseSec ?? 30) * Math.pow(retry.factor ?? 2, Math.max(0, retryIndex - 1))
+    : retry.backoffSec[Math.min(retryIndex - 1, retry.backoffSec.length - 1)] ?? 30;
+  wait = Math.min(wait, cap);
+  const jitter = retry.jitter ?? 0;
+  if (jitter > 0) wait *= 1 + (Math.random() * 2 - 1) * jitter;
+  if ((retry.honorRetryAfter ?? true) && retryAfterSec !== undefined && retryAfterSec > 0) wait = Math.max(wait, retryAfterSec);
+  return Math.max(0, Math.round(Math.min(wait, cap)));
+}
+
 /** Commit a `continue` session's work so a crash never loses it. */
 function commitIntermediate(ctx: RunContext, task: Task, st: TaskState): void {
   const { paths, config, log } = ctx;
@@ -541,7 +563,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       break;
     }
     if (lastTransient) {
-      const wait = config.retry.backoffSec[Math.min(retryCount - 1, config.retry.backoffSec.length - 1)] ?? 30;
+      const wait = retryDelaySec(config.retry, retryCount, lastTransient.retryAfterSec);
       log.warn(`${task.id}: ${lastTransient.category}: ${lastTransient.message}. Retry ${retryCount}/${maxAttempts} in ${wait}s ${resumeId ? `resuming session ${resumeId}` : 'with a fresh session'}.`);
       const stopped = await backoff(ctx, wait * 1000);
       if (ctx.splitRequest) { log.warn(`${task.id}: split of ${ctx.splitRequest.id} requested; not retrying.`); return { status: st.status, stopped: true }; }
@@ -704,6 +726,10 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     }
     if (classified.transient && retryCount < maxAttempts) {
       retryCount += 1;
+      // A transient infra fault (rate limit, 5xx, dropped socket) is not a task attempt: give the
+      // attempt back so provider throttling cannot exhaust `halt.maxAttemptsPerTask` and halt the run.
+      st.attempts = Math.max(0, st.attempts - 1);
+      st.transientRetries = (st.transientRetries ?? 0) + 1;
       lastTransient = classified;
       st.status = 'failed';
       st.lastError = lastError;

@@ -188,7 +188,7 @@ On exit the terminal is restored and the last lines are replayed to normal scrol
 | event | what happens |
 |---|---|
 | session ends cleanly but with **no result block** | it is resumed once with a close-out prompt (a "nudge"); `--no-nudge` disables |
-| **transient error** — rate limit, overloaded, 5xx, network drop, stalled output, crash | retried in place with backoff (30 s, 2 min, 5 min), **resuming the same session** when the provider supports it, so work is kept |
+| **transient error** — rate limit, overloaded, 5xx, dropped socket, stalled output, crash | retried in place with exponential backoff (30 s base, doubling, capped at 15 min, jittered, a provider `Retry-After` honoured), **resuming the same session** when the provider supports it, so work is kept. A transient retry does **not** count as a task attempt, so a provider throttle can never trip the attempts halt |
 | **fatal error** — auth, no credits, usage limit, unknown model, bad config, missing binary | the run **halts**: banner, exit `3`, sticky in `state.json`; later `run`s refuse to start |
 | task fails **twice in a row**, or one task fails **3 times** | the run halts (thresholds configurable) |
 | `continue` past `maxContinuations` | treated as failed |
@@ -542,7 +542,7 @@ A session that ended cleanly without a `SYMPHONY_RESULT` block is normally recov
 
 ### `failureTriage`
 
-`classifyFailure` is a set of hand-written regex rules over the provider's error text. When none match, the failure lands in `unknown`, which the harness treats as terminal and does not retry. With this on, that `unknown` is put to a `choice` — `auth`, `billing`, `usage_limit`, `rate_limit`, `overloaded`, `server`, `network`, `model`, `config`, or `task` — and the answer is mapped back through the harness's own fatal/transient rules, so a `server` or `rate_limit` becomes a retry that might have succeeded anyway. The regex stays primary: Jev is consulted only when the rules admit they do not know. Unlike the others, this workflow can halt a run (a Jev-classified `auth` is fatal), so tune `minConfidence` against your own error logs before leaving it unattended.
+`classifyFailure` is a set of hand-written regex rules over the provider's error text, backed by structured signals when the adapter can see them: an HTTP `429`/`5xx`, a provider `isRetryable`, or any provider `error` event becomes a transient retry even when the wording is unrecognised (an unrecognised `4xx` stays terminal, since it is a request problem, not a throttle). When none match and no such signal exists, the failure lands in `unknown`, which the harness treats as terminal and does not retry. With this on, that `unknown` is put to a `choice` — `auth`, `billing`, `usage_limit`, `rate_limit`, `overloaded`, `server`, `network`, `model`, `config`, or `task` — and the answer is mapped back through the harness's own fatal/transient rules, so a `server` or `rate_limit` becomes a retry that might have succeeded anyway. The regex stays primary: Jev is consulted only when the rules admit they do not know. Unlike the others, this workflow can halt a run (a Jev-classified `auth` is fatal), so tune `minConfidence` against your own error logs before leaving it unattended.
 
 ### `escalationDecision`
 
@@ -624,7 +624,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `inferVerify` | `true` | when no verify command is configured, use the project's `package.json` test script (`npm test`) |
 | `hooks.afterTask` `.onBlocked` `.onHalt` `.onRunEnd` | – | shell commands run on lifecycle events (see [Hooks](#hooks)) |
 | `git.autoIgnoreUntracked`, `git.extraIgnore` | `true`, `[]` | before committing, keep untracked ephemeral/secret files out of the commit by adding their patterns to `.gitignore` |
-| `retry.maxAttempts`, `retry.backoffSec` | `3`, `[30,120,300]` | transient-error retries |
+| `retry.maxAttempts`, `retry.exponential`, `retry.baseSec`, `retry.factor`, `retry.maxSec`, `retry.jitter`, `retry.honorRetryAfter`, `retry.backoffSec` | `8`, `true`, `30`, `2`, `900`, `0.2`, `true`, `[30,120,300]` | transient-error retries: exponential by default (`baseSec × factor^n`, capped, jittered, a provider `Retry-After` honoured), or the fixed `backoffSec` schedule when `exponential` is false |
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
 | `escalation.enabled`, `.provider`, `.model`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `openrouter/z-ai/glm-5.3`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
