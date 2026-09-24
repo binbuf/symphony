@@ -46,7 +46,10 @@ const RULES: Array<[ErrorCategory, RegExp]> = [
   ['config', /unknown (option|argument|flag|command)|invalid_request|invalid request|too many arguments|missing required/i],
   ['overloaded', /overloaded|\b529\b|at capacity|over capacity|capacity exceeded|service (is )?(busy|unavailable)/i],
   ['server', /\b50[0-9]\b|internal server error|service unavailable|bad gateway|gateway time-?out|upstream/i],
-  ['network', /ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|socket hang up|fetch failed|network (error|failure)|connection (reset|closed|refused|lost|error)|disconnected|unable to connect|dns|tls|handshake|proxy/i],
+  // A tool/MCP/plugin "session" dropping mid-job (Unity's `get_test_job failed: … plugin session 7 …
+  // dropped`) is a transport fault, not a task failure: the wording is provider-agnostic, so match a
+  // session/MCP/plugin that closed, dropped, timed out or went away rather than failing the task.
+  ['network', /ECONNRESET|ECONNREFUSED|ECONNABORTED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPIPE|socket hang up|fetch failed|network (error|failure)|connection (reset|closed|refused|lost|error|dropped|timed out)|disconnected|unable to connect|dns|tls|handshake|proxy|session\b[^\n]{0,60}?\b(?:was\s+)?(?:dropped|closed|lost|terminated|disconnected|expired|timed out|no longer)|(?:mcp|plugin|tool)\b[^\n]{0,60}?\b(?:server|session|connection)\b[^\n]{0,40}?\b(?:dropped|closed|lost|terminated|disconnected|expired|timed out|unavailable|not running|crashed)|(?:mcp|plugin|tool) (?:server|session|connection|subsystem)\b/i],
 ];
 
 const STRUCTURED: Record<string, ErrorCategory> = {

@@ -24,7 +24,7 @@ import { updatePipelineStatus } from './status.js';
 import { DONE_STATES, SKIP_STATES, acquireLock, haltResumeHint, newTaskState, releaseLock, saveState, startLockHeartbeat, type Halted, type LastError, type LogRef, type State, type TaskState, type TaskStatus } from './state.js';
 import type { Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, squash, stamp } from './util.js';
-import { runVerify } from './verify.js';
+import { runVerify, type VerifyResult } from './verify.js';
 import { startPipelineWatch, type WatchState } from './watch.js';
 
 export interface RunFlags {
@@ -452,6 +452,22 @@ export function retryDelaySec(retry: Config['retry'], retryIndex: number, retryA
   return Math.max(0, Math.round(Math.min(wait, cap)));
 }
 
+/**
+ * Classify a failed verify command. A verify is the harness's own acceptance check, but it can fail
+ * for infrastructure reasons that have nothing to do with the task — a dropped MCP/plugin session, a
+ * reset connection — so the same rules the session classifier uses run over its output. `runTask`
+ * retries only the `network` bucket (verify output is the project's own test text, so a stray status
+ * code in it must not look transient).
+ */
+export function classifyVerifyOutput(res: VerifyResult, fatalCategories: string[]): Classified {
+  const output = res.output ?? '';
+  return classifyFailure({
+    apiErrorCategories: [], errorTexts: [output], resultOk: false, sawResult: true,
+    exitCode: res.code, signal: null, stderrTail: output,
+    timedOut: /verify timed out/i.test(output), stalled: false, interrupted: false,
+  }, fatalCategories);
+}
+
 /** Commit a `continue` session's work so a crash never loses it. */
 function commitIntermediate(ctx: RunContext, task: Task, st: TaskState): void {
   const { paths, config, log } = ctx;
@@ -557,7 +573,32 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     return 'failed';
   };
 
-  for (let attempt = 1; ; attempt++) {
+  /**
+   * Arm a transient retry for a classified infrastructure failure: give back the session's attempt,
+   * record the retry, and let the caller `continue` so the outer loop backs off and resumes. Returns
+   * false when the failure is not transient or the retry budget is spent, so the caller takes the
+   * ordinary failure path. Shared by the session classifier and a `failed` result block that names a
+   * provider/tool hiccup (a dropped MCP/plugin session) rather than a genuine task failure.
+   */
+  const scheduleTransientRetry = (c: Classified, summary: string, sessionId: string | undefined): boolean => {
+    if (!c.transient || retryCount >= maxAttempts) return false;
+    retryCount += 1;
+    // A transient infra fault (rate limit, 5xx, dropped socket) is not a task attempt: give the
+    // attempt back so provider throttling cannot exhaust `halt.maxAttemptsPerTask` and halt the run.
+    st.attempts = Math.max(0, st.attempts - 1);
+    st.transientRetries = (st.transientRetries ?? 0) + 1;
+    lastTransient = c;
+    st.status = 'failed';
+    st.lastError = mkError(c);
+    st.summary = summary;
+    st.finished = nowIso();
+    saveState(paths, state);
+    patchRoadmap(ctx, task.id, 'failed');
+    if (!provider.supportsResume || !sessionId) resumeId = undefined;
+    return true;
+  };
+
+  attempts: for (let attempt = 1; ; attempt++) {
     if (maxIterations > 0 && iterations >= maxIterations) {
       final = { status: 'failed', summary: `stopped after maxIterationsPerTask (${maxIterations}) sessions without finishing`, lastError: { category: 'task', message: 'maxIterationsPerTask reached', transient: false, fatal: false, at: nowIso() } };
       break;
@@ -634,7 +675,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     }
 
     if (outcome.interrupted || ctx.interrupted) {
-      const msg = `interrupted by ${ctx.signalName ?? 'signal'}`;
+      const msg = `interrupted by ${ctx.signalName ?? 'the run view'}`;
       // A human stopping the run is not a task failure: give back the attempt this session consumed
       // so repeated Ctrl-C during testing cannot exhaust `halt.maxAttemptsPerTask` and halt the run.
       // The row is still recorded unfinished and retried next run.
@@ -692,8 +733,36 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         const verify = resolveVerify(config, task, paths.root);
         if (verify) {
           log.info(`${task.id}: running verify: ${verify.command}`);
-          const res = runVerify(paths.root, verify.command, verify.timeoutMin * 60_000);
-          st.verify = { command: verify.command, ok: res.ok, code: res.code ?? undefined, output: res.output.slice(-2000) || undefined, at: nowIso() };
+          let res = runVerify(paths.root, verify.command, verify.timeoutMin * 60_000);
+          const recordVerify = () => {
+            st.verify = { command: verify.command, ok: res.ok, code: res.code ?? undefined, output: res.output.slice(-2000) || undefined, at: nowIso() };
+          };
+          recordVerify();
+          // A verify can die on a transient transport fault — a dropped MCP/plugin/tool session, a
+          // reset connection — which says nothing about the task. Retry those with the same
+          // exponential backoff as a session, without consuming the task's attempt budget, before
+          // treating a `done` as failed. Only `network` faults retry here: verify output is the
+          // project's own test text, so a stray "500" or "rate limit" in it must not look transient.
+          while (!res.ok) {
+            const c = classifyVerifyOutput(res, config.halt.onCategories);
+            if (c.category !== 'network' || retryCount >= maxAttempts) break;
+            retryCount += 1;
+            st.transientRetries = (st.transientRetries ?? 0) + 1;
+            const wait = retryDelaySec(config.retry, retryCount, c.retryAfterSec);
+            log.warn(`${task.id}: verify ${c.category}: ${c.message}. Retry ${retryCount}/${maxAttempts} in ${wait}s.`);
+            saveState(paths, state);
+            const stopped = await backoff(ctx, wait * 1000);
+            if (ctx.splitRequest) { log.warn(`${task.id}: split of ${ctx.splitRequest.id} requested; not retrying verify.`); return { status: st.status, stopped: true }; }
+            if (ctx.interrupted) {
+              st.attempts = Math.max(0, st.attempts - 1);
+              final = { status: 'failed', summary: `interrupted by ${ctx.signalName ?? 'the run view'} during a verify retry`, lastError: { category: 'interrupted', message: 'interrupted during a verify retry', transient: true, fatal: false, at: nowIso() } };
+              break attempts;
+            }
+            if (stopped) { log.warn(`${task.id}: STOP present; not retrying verify. Remove ${paths.stop} and re-run to continue.`); return { status: st.status, stopped: true }; }
+            log.info(`${task.id}: re-running verify: ${verify.command}`);
+            res = runVerify(paths.root, verify.command, verify.timeoutMin * 60_000);
+            recordVerify();
+          }
           if (!res.ok) {
             const msg = `verify failed (exit ${res.code ?? 'timeout'}): ${verify.command} — ${squash(res.output, 240) || 'no output'}`;
             log.error(`${task.id}: ${msg}`);
@@ -707,6 +776,17 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         }
       }
       if (block.status === 'failed') {
+        // A session can report `failed` because the provider or a tool hiccuped — a dropped
+        // MCP/plugin session, a reset connection — rather than because the task is wrong. Run the
+        // deterministic classifier over what it said: a genuine task failure stays terminal, but a
+        // recognised infrastructure fault backs off and retries (resuming the session) instead of
+        // burning the task or escalating it to a stronger model.
+        const c = classifyFailure(
+          { ...outcomeEvidence(outcome), resultOk: false, resultText: block.summary ?? '', errorTexts: outcome.hints.errorTexts },
+          config.halt.onCategories,
+        );
+        const summary = block.summary ? `${block.summary} | ${c.category}: ${c.message}` : `${c.category}: ${c.message}`;
+        if (scheduleTransientRetry(c, summary, outcome.sessionId)) continue;
         const rec = await recover('task', block.summary || 'model reported failed');
         if (rec === 'split') return { status: st.status, split: true };
         if (rec === 'escalated') continue;
@@ -724,22 +804,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       halt = { at: nowIso(), taskId: task.id, category: classified.category, reason: classified.message };
       break;
     }
-    if (classified.transient && retryCount < maxAttempts) {
-      retryCount += 1;
-      // A transient infra fault (rate limit, 5xx, dropped socket) is not a task attempt: give the
-      // attempt back so provider throttling cannot exhaust `halt.maxAttemptsPerTask` and halt the run.
-      st.attempts = Math.max(0, st.attempts - 1);
-      st.transientRetries = (st.transientRetries ?? 0) + 1;
-      lastTransient = classified;
-      st.status = 'failed';
-      st.lastError = lastError;
-      st.summary = summary;
-      st.finished = nowIso();
-      saveState(paths, state);
-      patchRoadmap(ctx, task.id, 'failed');
-      if (!provider.supportsResume || !outcome.sessionId) resumeId = undefined;
-      continue;
-    }
+    if (scheduleTransientRetry(classified, summary, outcome.sessionId)) continue;
     const rec = await recover(classified.category, summary);
     if (rec === 'split') return { status: st.status, split: true };
     if (rec === 'escalated') continue;
@@ -748,7 +813,10 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   }
 
   finalizeTask(ctx, task, st, final ?? { status: 'failed', summary: 'no attempt ran' }, halt);
-  return { status: final?.status ?? 'failed', halt, interrupted: ctx.interrupted };
+  // A session stopped by the run view (TUI quit/split) marks the outcome interrupted without
+  // necessarily setting ctx.interrupted; report that too, so the run loop never counts a manual stop
+  // as a failure against halt.maxConsecutiveFailures.
+  return { status: final?.status ?? 'failed', halt, interrupted: ctx.interrupted || final?.lastError?.category === 'interrupted' };
 }
 
 function selectTasks(ctx: RunContext): Task[] {
@@ -852,9 +920,25 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   log.info(`${selected.length} task${selected.length === 1 ? '' : 's'} selected, ${todo.length} to run: ${todo.map((t) => t.id).join(' ') || '-'}`);
   if (carried.length) log.warn(`carrying forward blocked (human items in their Hand-off, not re-run): ${carried.map((t) => t.id).join(' ')} — \`symphony accept T..\` to sign off, \`symphony run --retry --only T..\` to redo`);
   for (const t of leftRunning) {
-    const cont = state.tasks[t.id]?.continuation;
-    if (cont) log.warn(`${t.id} was paused at continuation ${cont} (${relative(paths.root, paths.stop)} was present); it will resume with the next slice`);
-    else log.warn(`${t.id} was left "running" (previous harness crashed or was killed); it will be retried`);
+    const st = state.tasks[t.id]!;
+    const cont = st.continuation;
+    if (cont) {
+      log.warn(`${t.id} was paused at continuation ${cont} (${relative(paths.root, paths.stop)} was present); it will resume with the next slice`);
+      continue;
+    }
+    // A session stopped mid-flight (TUI quit, terminal closed, SIGKILL, a crash) produced no result:
+    // it says nothing about the task, so it must not feed the rule-based failure gates
+    // (`halt.maxAttemptsPerTask`, `breakdown.rules.afterFailedAttempts`). Give its attempt back and
+    // note it, so an attended stop can never halt a later unattended run.
+    if (!flags.dryRun && st.attempts > 0) {
+      st.attempts -= 1;
+      st.summary = 'interrupted mid-session (previous run stopped); the unfinished session is not counted as an attempt';
+      saveState(paths, state);
+      log.warn(`${t.id} was left "running" (previous harness stopped or crashed); it will be retried and its unfinished session does not count as an attempt`);
+    } else {
+      log.warn(`${t.id} was left "running" (previous harness crashed or was killed); it will be retried`);
+    }
+    delete st.pid;
   }
 
   if (flags.dryRun) {

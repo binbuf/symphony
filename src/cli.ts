@@ -327,6 +327,10 @@ function installSignalHandlers(ctx: RunContext): void {
   };
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
+  // Closing the terminal window (or the TUI) sends SIGHUP. Handle it like the other stops so an
+  // attended close records the task unfinished and gives its attempt back, rather than dying abruptly
+  // and leaving the row "running" with a counted attempt.
+  process.on('SIGHUP', onSignal);
 }
 
 /** True when this module is the process entry point (so tests can import it without running the CLI). */

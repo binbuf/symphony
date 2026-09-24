@@ -188,7 +188,7 @@ On exit the terminal is restored and the last lines are replayed to normal scrol
 | event | what happens |
 |---|---|
 | session ends cleanly but with **no result block** | it is resumed once with a close-out prompt (a "nudge"); `--no-nudge` disables |
-| **transient error** — rate limit, overloaded, 5xx, dropped socket, stalled output, crash | retried in place with exponential backoff (30 s base, doubling, capped at 15 min, jittered, a provider `Retry-After` honoured), **resuming the same session** when the provider supports it, so work is kept. A transient retry does **not** count as a task attempt, so a provider throttle can never trip the attempts halt |
+| **transient error** — rate limit, overloaded, 5xx, dropped socket, stalled output, crash, a dropped MCP/plugin/tool session | retried in place with exponential backoff (30 s base, doubling, capped at 15 min, jittered, a provider `Retry-After` honoured), **resuming the same session** when the provider supports it, so work is kept. A transient retry does **not** count as a task attempt, so a provider throttle can never trip the attempts halt. The same backoff retries a `verify` that dies on a transport fault (a dropped MCP/plugin session, a reset connection) rather than failing a task whose work is already done |
 | **fatal error** — auth, no credits, usage limit, unknown model, bad config, missing binary | the run **halts**: banner, exit `3`, sticky in `state.json`; later `run`s refuse to start |
 | task fails **twice in a row**, or one task fails **3 times** | the run halts (thresholds configurable) |
 | `continue` past `maxContinuations` | treated as failed |
@@ -197,7 +197,7 @@ On exit the terminal is restored and the last lines are replayed to normal scrol
 | `touch .stop` (path configurable) | pauses at the next boundary — before the next task, or after the current slice when a task is split via `continue` — exit `0`; nothing is killed, and a mid-continuation pause resumes the right slice next run. `touch .symphony/STOP` is the legacy alias. In the TUI, `p` toggles the sentinel now and `P` queues a pause at a chosen task, placing the sentinel when the run reaches it |
 | commit fails (pre-commit hook, signing, `index.lock`) or a session switched branches | retried once; if it still fails the task is demoted to `failed` instead of recorded `done`, because its work did not land in git |
 | reported session cost crosses `maxCostUsdPerRun` | halts the run before the next task; `clear-halt` to continue |
-| Ctrl-C | kills the current session, records the task unfinished, exits `130`; press twice to force quit. The interrupted attempt is given back, so repeated stops cannot exhaust `halt.maxAttemptsPerTask` |
+| Ctrl-C, the TUI's `q`, or closing the terminal | kills the current session, records the task unfinished, exits `130`/`143`; press twice to force quit. The interrupted attempt is given back, so a manual stop cannot exhaust `halt.maxAttemptsPerTask` or feed the failure rules — those gates exist for unattended runs. A task found left `running` by a killed process (or a crash) also has its unfinished attempt given back on the next run |
 | another run already active | refuses to start, exit `4` (lock file holds the live pid and a heartbeat) |
 
 ### After the run: review and steer
@@ -225,14 +225,14 @@ Everything that can happen to a task, and what you do about it.
 | 2 | task reports `continue` | commits the slice; starts a fresh session for the next slice (≤ `maxContinuations`) | `[~] ⟵ running` between sessions | – | nothing |
 | 3 | `continue` past the limit | marks the task failed | `[~] ⟵ failed` | 2 | `symphony split T05` to break it down, or raise `maxContinuations` |
 | 4 | task reports `blocked` | stops for a human (default); `onBlocked: "continue"` moves on instead | `[~] ⟵ blocked` | 2 | read the task's Hand-off; `accept T05 --note "…"` or `run --retry --only T05` |
-| 5 | task reports `failed` | stops | `[~] ⟵ failed` | 2 | fix the cause, then `run` (failed tasks are retried) |
-| 6 | `done` but verify fails | demotes to failed; records command, exit code and output tail | `[~] ⟵ failed` | 2 | fix, then `run` |
+| 5 | task reports `failed` | a summary naming a transient infra fault (dropped MCP/plugin session, reset connection, 5xx) is retried with backoff; otherwise stops | `[~] ⟵ failed` | 2 | fix the cause, then `run` (failed tasks are retried) |
+| 6 | `done` but verify fails | a transport fault (dropped MCP/plugin session, reset connection) is retried with backoff; a real failure demotes to failed and records command, exit code and output tail | `[~] ⟵ failed` | 2 | fix, then `run` |
 | 7 | session ends without a result block | resumes it once to close out | `[~] ⟵ running` while nudging | – | nothing (or `--no-nudge` and accept that it fails) |
-| 8 | transient error | retries with backoff, resuming the session | `[~] ⟵ failed` while retrying | – | nothing |
+| 8 | transient error | retries with backoff, resuming the session; the attempt is not counted | `[~] ⟵ failed` while retrying | – | nothing |
 | 9 | fatal error (auth, billing, usage limit, model, config) | halts the whole run; sticky until cleared | halt banner in `status` | 3 | fix the cause, `clear-halt`, `run` |
 | 10 | 2 failures in a row / 3 attempts on one task | halts | halt banner in `status` | 3 | fix, `run --clear-halt --retry --only T05` |
 | 11 | `.stop` sentinel present | pauses at the next boundary (before a task, or after a `continue` slice); a mid-continuation pause is remembered and resumes the next slice | – | 0 | `rm .stop`, `run` |
-| 12 | Ctrl-C | kills the current session; task recorded unfinished (failed), without consuming an attempt | `[~] ⟵ failed` | 130 | `run` retries it |
+| 12 | Ctrl-C / TUI `q` / terminal closed | kills the current session; task recorded unfinished (failed), without consuming an attempt or counting toward the failure rules | `[~] ⟵ failed` | 130/143 | `run` retries it |
 | 13 | second run while one is active | refuses to start | lock file with live pid | 4 | wait, or delete `.symphony/lock` if stale |
 | 14 | `maxIterationsPerTask` / `maxTasksPerRun` / budget hit | task fails gracefully, or the run processes only the first N tasks | task `failed` / rest `pending` | – | raise the limit, or `symphony split` the task |
 | 15 | you tick `[x]` by hand | next load reconciles state to the roadmap tick | `[x]` | – | nothing |

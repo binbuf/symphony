@@ -218,14 +218,15 @@ test('a queued pauseAt stops the run before the chosen task, placing the sentine
   }
 });
 
-test('run retries a task left "running" by a crash (stale pid) instead of losing it', async () => {
+test('run retries a task left "running" by a crash (stale pid) without counting the unfinished attempt', async () => {
   const { dir, paths, task } = project();
   writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
     JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
     claudeResult('done', 'recovered'),
   ].join('\n') + '\n');
   const state: State = loadState(paths);
-  // Simulate a harness crash mid-session: the row is running with a pid that is no longer alive.
+  // Simulate a harness crash or a manual stop mid-session: the row is running with a pid that is no
+  // longer alive and one counted attempt.
   state.tasks.T01 = { ...newTaskState('Do the thing'), status: 'running', attempts: 1, started: new Date().toISOString(), pid: 2147483647, logs: [] };
   const config = { ...DEFAULTS, provider: 'fake' as const };
   const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
@@ -234,7 +235,9 @@ test('run retries a task left "running" by a crash (stale pid) instead of losing
     assert.equal(code, 0);
     assert.equal(state.tasks.T01.status, 'done');
     assert.equal(state.tasks.T01.pid, undefined); // the stale pid is gone
-    assert.equal(state.tasks.T01.attempts, 2);
+    // The unattended rule gates count failures, not manual stops: the unfinished session is given
+    // back, so only the successful retry remains.
+    assert.equal(state.tasks.T01.attempts, 1);
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
@@ -251,6 +254,75 @@ test('a done result is demoted to failed when the harness verify command fails',
     assert.equal(state.tasks.T01.verify?.ok, false);
     assert.match(state.tasks.T01.summary ?? '', /verify failed/);
     assert.match(readFileSync(paths.roadmap, 'utf8'), /\[~\] T01/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a transient verify failure (dropped MCP/plugin session) is retried with backoff, not failed', async () => {
+  const { dir, paths, task } = project();
+  // The verify command drops its MCP/plugin session on the first run and passes on the second — the
+  // Unity `get_test_job failed: … plugin session dropped` hiccup that otherwise fails a finished task.
+  writeFileSync(join(dir, 'verify-retry.cjs'), [
+    "const fs = require('fs');",
+    "const f = 'verify-count.txt';",
+    "const n = fs.existsSync(f) ? Number(fs.readFileSync(f, 'utf8')) : 0;",
+    "fs.writeFileSync(f, String(n + 1));",
+    "if (n < 1) { console.error('get_test_job failed: Unity plugin session 7f3c dropped'); process.exit(1); }",
+    "process.exit(0);",
+  ].join('\n'));
+  // One session that reports done, so the only retry under test is the verify retry.
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    claudeResult('done', 'finished in one session'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    verifyCommand: 'node verify-retry.cjs',
+    retry: { ...DEFAULTS.retry, maxAttempts: 3, exponential: false, backoffSec: [0] },
+  };
+  const warnings: string[] = [];
+  const log: Logger = { info() {}, warn: (m) => warnings.push(m), error() {}, plain() {}, banner() {} };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.status, 'done');
+    assert.equal(state.tasks.T01.verify?.ok, true);
+    assert.equal(state.tasks.T01.transientRetries, 1); // the verify blip was a transient retry...
+    assert.equal(state.tasks.T01.attempts, 1); // ...not a task attempt
+    assert.ok(warnings.some((l) => /verify network:.*Retry 1\/3/.test(l)), warnings.join('\n'));
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a session that reports failed on a dropped MCP/plugin session is retried with backoff', async () => {
+  const { dir, paths, task } = project();
+  // The agent reports `failed`, but its summary names a transient tool drop rather than a task dead
+  // end — the Unity hiccup. It must be retried (resuming the session), not failed or escalated.
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    claudeResult('failed', 'get_test_job failed: Unity plugin session 7f3c dropped'),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.resume.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('done', 'the plugin reconnected and the tests passed'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, retry: { ...DEFAULTS.retry, maxAttempts: 3, exponential: false, backoffSec: [0] } };
+  const warnings: string[] = [];
+  const log: Logger = { info() {}, warn: (m) => warnings.push(m), error() {}, plain() {}, banner() {} };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.status, 'done');
+    assert.equal(state.tasks.T01.transientRetries, 1);
+    assert.equal(state.tasks.T01.attempts, 1); // the reported failure was an infra blip, not an attempt
+    assert.ok(warnings.some((l) => /resuming session s/.test(l)), warnings.join('\n'));
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

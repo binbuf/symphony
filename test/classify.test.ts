@@ -59,6 +59,21 @@ test('network reset → transient', () => {
   assert.equal(c.category, 'network'); assert.equal(c.transient, true);
 });
 
+test('a dropped MCP/plugin/tool session is a transient network fault, not a task failure', () => {
+  const examples = [
+    'get_test_job failed: Unity plugin session 7f3c9 dropped',
+    'MCP server connection closed unexpectedly',
+    'tool session 12 timed out while running the suite',
+    'The plugin session was terminated by the host',
+  ];
+  for (const text of examples) {
+    const c = classifyFailure({ ...base, resultText: text }, FATAL);
+    assert.equal(c.category, 'network', text);
+    assert.equal(c.transient, true, text);
+    assert.equal(c.fatal, false, text);
+  }
+});
+
 test('non-zero exit without result and no other clue → crash, transient', () => {
   const c = classifyFailure({ ...base, sawResult: false, exitCode: 137 }, FATAL);
   assert.equal(c.category, 'crash'); assert.equal(c.transient, true);
