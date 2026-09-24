@@ -246,6 +246,35 @@ test('TuiApp: P queues a pause before the selected task and highlights it', () =
   assert.match(stripAnsi(app.renderLines(100, 20).join('\n')), /T01 is done; it will not run again/);
 });
 
+test('TuiApp: the current task row is forest green while running and red when halted on failure', () => {
+  const GREEN = '\x1b[97;48;2;34;139;34m';
+  const RED = '\x1b[97;48;2;139;0;0m';
+  const tasks = [task('T01', 1), task('T02', 2)];
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: { ...newTaskState('t1'), status: 'running', attempts: 1, durationS: 5, started: new Date().toISOString() },
+      // A failure left over from an earlier run: T01 is the one in flight, so T02 must stay plain.
+      T02: { ...newTaskState('t2'), status: 'failed', attempts: 1, durationS: 5, summary: 'boom' },
+    },
+  };
+  const running = new TuiApp(makeCtx(tasks, state), new AnsiTerminal(() => {})).renderLines(100, 20);
+  assert.ok(running.find((l) => stripAnsi(l).startsWith('T01'))?.startsWith(GREEN), 'the running task row is forest green');
+  assert.ok(!running.find((l) => stripAnsi(l).startsWith('T02'))?.startsWith(RED), 'a stale failure that is not current stays plain');
+
+  // The run halts on T02 after it fails: now T02 is the current task and its row turns red.
+  const halted: State = {
+    version: 1,
+    halted: { at: new Date().toISOString(), taskId: 'T02', category: 'fatal', reason: 'boom' },
+    tasks: {
+      T01: { ...newTaskState('t1'), status: 'done', attempts: 1, durationS: 5, finished: new Date().toISOString() },
+      T02: { ...newTaskState('t2'), status: 'failed', attempts: 1, durationS: 5, summary: 'boom' },
+    },
+  };
+  const lines = new TuiApp(makeCtx(tasks, halted), new AnsiTerminal(() => {})).renderLines(100, 20);
+  assert.ok(lines.find((l) => stripAnsi(l).startsWith('T02'))?.startsWith(RED), 'the failed current task row is red');
+});
+
 test('TuiApp: mouse wheel, tilt-wheel, middle-drag and clicks drive the panels', () => {
   const tasks = [task('T01', 1), task('T02', 2)];
   const term = new AnsiTerminal(() => {});

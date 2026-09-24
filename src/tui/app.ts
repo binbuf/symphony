@@ -12,6 +12,10 @@ import type { WatchState } from '../watch.js';
 const C = {
   reset: '\x1b[0m', dim: '\x1b[2m', bold: '\x1b[1m', inv: '\x1b[7m',
   red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m', cyan: '\x1b[36m', magenta: '\x1b[35m',
+  // Full-row backgrounds for the task the pipeline is on: forest green while it runs, deep red when
+  // it is the task the run halted on after failing. Truecolor, with a bright foreground for contrast.
+  bgRunning: '\x1b[97;48;2;34;139;34m',
+  bgFailed: '\x1b[97;48;2;139;0;0m',
 } as const;
 
 const STREAM_MAX = 5000;
@@ -221,6 +225,19 @@ export class TuiApp {
 
   private selectedTaskId(): string | undefined {
     return this.ctx.tasks[this.selected]?.id;
+  }
+
+  /**
+   * The task the pipeline is "on": the one in flight, or — once a run has halted on a task that
+   * failed — that task. Failed tasks left over from earlier runs (or a continued run that moved
+   * past a failure) are not current and so are not flagged.
+   */
+  private currentTaskId(): string | undefined {
+    const running = this.ctx.tasks.find((t) => this.ctx.state.tasks[t.id]?.status === 'running');
+    if (running) return running.id;
+    const halted = this.ctx.state.halted?.taskId;
+    if (halted && this.ctx.state.tasks[halted]?.status === 'failed') return halted;
+    return undefined;
   }
 
   // ---------------------------------------------------------------- key handling
@@ -695,14 +712,20 @@ export class TuiApp {
       const maxOff = Math.max(0, bodyRows.length - bodyArea);
       const off = this.statusPanel.follow ? maxOff : clamp(this.statusPanel.vOffset, 0, maxOff);
       const selectedId = this.selectedTaskId();
+      const currentId = this.currentTaskId();
       for (let i = 0; i < bodyArea; i++) {
         const idx = off + i;
         if (idx >= bodyRows.length) break;
         let line = this.clip(bodyRows[idx], this.statusPanel.hOffset, cols);
         const rowId = table.rowTask[idx];
-        // The selected row wins; otherwise a queued pause target is highlighted so it is obvious
-        // where the run will stop.
-        if (rowId === selectedId) line = `${C.inv}${line}${C.reset}`;
+        // The task in flight (or the one the run halted on) is background-coloured so its state is
+        // obvious at a glance: forest green while running, red once it has failed. The selected row
+        // is otherwise shown inverted, and a queued pause target in yellow.
+        const isTaskRow = table.taskRow[rowId] === idx;
+        if (rowId === currentId && isTaskRow) {
+          const bg = this.ctx.state.tasks[rowId]?.status === 'failed' ? C.bgFailed : C.bgRunning;
+          line = `${bg}${C.bold}${line}${C.reset}`;
+        } else if (rowId === selectedId) line = `${C.inv}${line}${C.reset}`;
         else if (this.ctx.pauseAt !== undefined && rowId === this.ctx.pauseAt) line = `${C.yellow}${line}${C.reset}`;
         out[y++] = line;
       }

@@ -153,7 +153,7 @@ docs/
 
 When `run` starts with stdout **and** stdin attached to a terminal, it opens a full-screen view instead of scrolling output:
 
-- **Status** (top panel) — the same table as `symphony status`, refreshed from live state: id, phase, title, status, attempts, duration, start/end, cost, provider, model, summary. A task split across sessions or retried lists its per-session rows beneath it.
+- **Status** (top panel) — the same table as `symphony status`, refreshed from live state: id, phase, title, status, attempts, duration, start/end, cost, provider, model, summary. A task split across sessions or retried lists its per-session rows beneath it. The task the pipeline is on is background-filled — forest green while it runs, red when it is the task a run halted on after failing; failed tasks from earlier runs are left plain. The selected row is inverted (press `n`/`N`), and a queued pause target (`P`) is yellow.
 - **Pipeline watch** (strip above the status table, when enabled) — a separate read-only model's latest short summary, refreshed on a timer and whenever a task ends (see [Pipeline watch](#pipeline-watch)). It reads `Waiting for updates` until the first check lands, with the countdown to that check on the right of the title.
 - **Live output** (bottom panel) — exactly what `run` streams today: harness `INFO`/`WARN`/`ERROR` lines and the provider's `[think]`/`[text]`/`[tool]`/`[result]` stream, tailing by default.
 - **Status bar** — pipeline progress and duration, the current task and its elapsed time, reported cost, provider/model, and any `PAUSED`/`HALTED`/`blocked` badge, with the key hints beneath. A transient task-status toast (e.g. `T02 → running`) briefly takes the metrics row; the key-hints row always stays put.
