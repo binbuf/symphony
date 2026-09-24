@@ -171,7 +171,8 @@ Each panel scrolls independently, vertically and horizontally, with the keyboard
 | `n` / `N` | select the next / previous task |
 | `a` | accept the selected blocked/failed task (asks for confirmation) |
 | `c` | clear a halt (asks for confirmation); after a halt the view stays open, so `c` clears it and restarts |
-| `p` | pause / resume by toggling the `.stop` sentinel |
+| `p` | pause / resume now by toggling the `.stop` sentinel (stops at the next boundary) |
+| `P` | queue a pause before the selected task — the run keeps going and the sentinel is placed when the pipeline reaches that task, so it stops exactly there; press `P` again to clear it |
 | `w` | run a pipeline-watch check now |
 | `t` | wrap long lines in the Live output panel (off = clip and pan with `← →`) |
 | `z` | cycle layout: both panels · status only · output only |
@@ -189,7 +190,7 @@ On exit the terminal is restored and the last lines are replayed to normal scrol
 | task fails **twice in a row**, or one task fails **3 times** | the run halts (thresholds configurable) |
 | `continue` past `maxContinuations` | treated as failed |
 | `maxIterationsPerTask` / `maxTasksPerRun` / `--budget` reached | the task fails gracefully, or the run processes only the first N tasks, with a clear summary |
-| `touch .stop` (path configurable) | pauses at the next boundary — before the next task, or after the current slice when a task is split via `continue` — exit `0`; nothing is killed, and a mid-continuation pause resumes the right slice next run. `touch .symphony/STOP` is the legacy alias |
+| `touch .stop` (path configurable) | pauses at the next boundary — before the next task, or after the current slice when a task is split via `continue` — exit `0`; nothing is killed, and a mid-continuation pause resumes the right slice next run. `touch .symphony/STOP` is the legacy alias. In the TUI, `p` toggles the sentinel now and `P` queues a pause at a chosen task, placing the sentinel when the run reaches it |
 | commit fails (pre-commit hook, signing, `index.lock`) or a session switched branches | retried once; if it still fails the task is demoted to `failed` instead of recorded `done`, because its work did not land in git |
 | reported session cost crosses `maxCostUsdPerRun` | halts the run before the next task; `clear-halt` to continue |
 | Ctrl-C | kills the current session, records the task unfinished, exits `130`; press twice to force quit. The interrupted attempt is given back, so repeated stops cannot exhaust `halt.maxAttemptsPerTask` |
@@ -238,7 +239,7 @@ The pipeline stops for a human only when a task itself reports `blocked`, or a f
 
 Sometimes you discover half-way through that the design is wrong. symphony does not re-plan a running task; it pauses at a task boundary, re-plans the docs, commits the pivot, and resumes with fresh context.
 
-1. **Pause cleanly.** `touch .stop` — the current slice finishes and commits, then `run` exits `0` before the next task or the next continuation session. A task split via `continue` remembers which slice it reached and resumes there. (Ctrl-C mid-task also works but records that task `failed`; prefer the sentinel.)
+1. **Pause cleanly.** `touch .stop` — the current slice finishes and commits, then `run` exits `0` before the next task or the next continuation session. A task split via `continue` remembers which slice it reached and resumes there. In the TUI, press `P` on the task you want to stop before and the harness places the sentinel only when the run reaches it, so you pause exactly at that task rather than at the next boundary. (Ctrl-C mid-task also works but records that task `failed`; prefer the sentinel.)
 2. **Write the new direction.** Put it in `docs/REPLAN.md` (or pass `--direction FILE`): what changed, what still stands, what to drop. This is the one input the harness does not own, so keep it outside the docs contract.
 3. **Let the agent re-plan.** `symphony replan` hands the direction, the current roadmap, `PROGRESS.md`, the design docs and the live code state to one session, which rewrites `ROADMAP.md`, the task files and the design docs and records the pivot as a superseding ADR. It re-lints and commits the result as `docs: replan … [replan]`, so the pivot is a normal commit you can review or `git revert`.
 4. **Reconcile state.** `replan` prunes state rows for tasks that no longer exist, and refuses to reuse an id that already ran for different work unless you pass `--allow-id-reuse`. `--reset-state` clears all state instead; `reset --all` does the same on its own.

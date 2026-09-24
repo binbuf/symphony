@@ -170,6 +170,54 @@ test('STOP pauses at a continuation boundary and the next run resumes the next s
   }
 });
 
+test('a queued pauseAt stops the run before the chosen task, placing the sentinel there', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-run-'));
+  execFileSync('git', ['-C', dir, 'init', '-q']);
+  execFileSync('git', ['-C', dir, 'config', 'user.email', 't@t']);
+  execFileSync('git', ['-C', dir, 'config', 'user.name', 't']);
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.tasksDir, { recursive: true });
+  writeFileSync(paths.roadmap, '# R\n\n## Phase 1\n\n- [ ] T01 — One\n- [ ] T02 — Two\n');
+  writeFileSync(paths.progress, '# Progress notes\n');
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  writeFileSync(join(fixtures, 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'fake_write', path: 'one.txt', content: 'one' }),
+    claudeResult('done', 'one done'),
+  ].join('\n') + '\n');
+  writeFileSync(join(fixtures, 'T02.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    JSON.stringify({ type: 'fake_write', path: 'two.txt', content: 'two' }),
+    claudeResult('done', 'two done'),
+  ].join('\n') + '\n');
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+  const tasks: Task[] = [
+    { id: 'T01', num: 1, title: 'One', phase: 'Phase 1', order: 0, meta: { provider: 'fake' } },
+    { id: 'T02', num: 2, title: 'Two', phase: 'Phase 1', order: 1, meta: { provider: 'fake' } },
+  ];
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks, state, interrupted: false, abort: new AbortController(), pauseAt: 'T02' };
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0, 'the run pauses cleanly');
+    assert.equal(state.tasks.T01.status, 'done', 'the task before the target ran');
+    assert.equal(state.tasks.T02, undefined, 'the target task never started');
+    assert.ok(existsSync(paths.stop), 'the sentinel is placed when the pipeline reaches the target');
+    assert.equal(ctx.pauseAt, undefined, 'the target is cleared once it fires');
+
+    // Removing the sentinel and re-running starts at the target task.
+    rmSync(paths.stop, { force: true });
+    const second = await runCommand(ctx);
+    assert.equal(second, 0);
+    assert.equal(state.tasks.T02.status, 'done');
+    assert.ok(readFileSync(join(dir, 'two.txt'), 'utf8').includes('two'));
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
 test('run retries a task left "running" by a crash (stale pid) instead of losing it', async () => {
   const { dir, paths, task } = project();
   writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [

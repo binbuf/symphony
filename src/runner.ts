@@ -9,7 +9,7 @@ import { fireHook } from './hooks.js';
 import { classifyError, classifyEscalation, classifySessionResult, jevProblem } from './jev.js';
 import { createLogger, openRunSinks, type Logger } from './logger.js';
 import { writeTaskLog } from './logs.js';
-import { stopPresent, type Paths } from './paths.js';
+import { placeStop, stopPresent, type Paths } from './paths.js';
 import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import type { Provider, SpawnSpec } from './providers/types.js';
@@ -53,6 +53,12 @@ export interface RunContext {
   startBranch?: string;
   /** Session cost reported during this invocation, for the provider-agnostic run budget. */
   runCostUsd?: number;
+  /**
+   * The task id to pause *before* instead of at the next boundary. Set live from the TUI: the run
+   * keeps going through the tasks ahead of it and the sentinel is placed when the pipeline reaches
+   * it, so the stop lands exactly on the chosen task. Cleared once it fires.
+   */
+  pauseAt?: string;
   /** Live pipeline-watch state shown in the TUI's top panel; undefined when the watcher is off. */
   watch?: WatchState;
   /** Trigger an immediate pipeline-watch check (bound by the watcher). */
@@ -744,6 +750,18 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       if (ctx.interrupted) return ctx.signalName === 'SIGTERM' ? 143 : 130;
       if (stopPresent(paths)) {
         log.warn(`${relative(paths.root, paths.stop)} present: pausing before ${task.id}. Remove it and re-run to continue.`);
+        return 0;
+      }
+      // A queued pause target: the run has reached the task the user chose to stop before, so the
+      // sentinel is placed now (rather than at the next boundary) and the pipeline pauses here.
+      if (ctx.pauseAt === task.id) {
+        delete ctx.pauseAt;
+        try {
+          placeStop(paths);
+          log.warn(`${task.id}: pause target reached; placed ${relative(paths.root, paths.stop)}. Remove it and re-run to continue.`);
+        } catch (e) {
+          log.warn(`${task.id}: pause target reached but could not place ${relative(paths.root, paths.stop)} (${(e as Error).message}); stopping anyway.`);
+        }
         return 0;
       }
       const spend = budgetHalt();

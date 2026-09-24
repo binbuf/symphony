@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 /** Every user-facing location can be overridden from symphony.config.json (`paths` section). */
@@ -113,6 +113,17 @@ export function rel(root: string, p: string): string {
 /** True when either the configured stop sentinel or the legacy `.symphony/STOP` exists. */
 export function stopPresent(paths: Paths): boolean {
   return existsSync(paths.stop) || existsSync(paths.stopLegacy);
+}
+
+/** Create the graceful-pause sentinel (and its parent directory, when configured off the root). */
+export function placeStop(paths: Paths): void {
+  mkdirSync(dirname(paths.stop), { recursive: true });
+  writeFileSync(paths.stop, '');
+}
+
+/** Remove the pause sentinel and its legacy alias, whichever are present. */
+export function clearStop(paths: Paths): void {
+  for (const f of [paths.stop, paths.stopLegacy]) { try { unlinkSync(f); } catch { /* not present */ } }
 }
 
 /** The stop sentinel relative to the root, when it lives inside the project (for .gitignore). */

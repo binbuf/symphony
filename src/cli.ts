@@ -63,11 +63,13 @@ Limits
 
 Controls
   --tui / --no-tui         full-screen run view: a self-updating status table above the live output,
-                           with scrolling, follow, pause, accept and clear-halt keys. Default on when
-                           stdout and stdin are a terminal; off when piped, in CI, or with --no-tui.
-                           Set "tui": false in the config to disable it by default.
+                           with scrolling, follow, pause/pause-at, accept and clear-halt keys. Default
+                           on when stdout and stdin are a terminal; off when piped, in CI, or with
+                           --no-tui. Set "tui": false in the config to disable it by default.
   touch .stop              pause at the next boundary: a task start or a continuation session end
                            (nothing is killed); configurable via paths.stop
+  P (in the TUI)           queue a pause before the selected task: the run continues and the .stop
+                           sentinel is placed when the pipeline reaches that task
   touch .symphony/STOP     legacy alias for the above
   Ctrl-C                   stop the current session, record it as unfinished, exit 130
   pipeline watch           while the run is in flight, a separate read-only model summarizes recent

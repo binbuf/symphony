@@ -202,6 +202,48 @@ test('TuiApp: t toggles live-output wrapping, which reflows a long line instead 
   assert.equal(priv.logLineCount(), 1, 'toggling back returns to one clipped row per line');
 });
 
+test('TuiApp: P queues a pause before the selected task and highlights it', () => {
+  const tasks = [task('T01', 1), task('T02', 2), task('T03', 3)];
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: { ...newTaskState('t1'), status: 'done', attempts: 1, durationS: 10 },
+      T02: { ...newTaskState('t2'), status: 'pending' },
+    },
+  };
+  const ctx = makeCtx(tasks, state);
+  const app = new TuiApp(ctx, new AnsiTerminal(() => {}));
+  const priv = app as unknown as {
+    handleKey(k: Key): void;
+    selected: number;
+    table(): StatusTable;
+    metricsLine(t: StatusTable): string;
+  };
+  const press = (char: string) => priv.handleKey({ type: 'char', char });
+
+  // Select T02 and queue the pause there; the metrics bar names the target.
+  priv.selected = 1;
+  press('P');
+  assert.equal(ctx.pauseAt, 'T02');
+  assert.match(stripAnsi(priv.metricsLine(priv.table())), /pause@T02/);
+  // Move off the target so its highlight (not the selection inverter) is visible.
+  priv.selected = 2;
+  const row = app.renderLines(100, 20).find((l) => stripAnsi(l).startsWith('T02'));
+  assert.ok(row && row.startsWith('\x1b[33m'), 'the pause-target row is highlighted');
+
+  // Pressing P again on the target clears it.
+  priv.selected = 1;
+  press('P');
+  assert.equal(ctx.pauseAt, undefined);
+  assert.doesNotMatch(stripAnsi(priv.metricsLine(priv.table())), /pause@T02/);
+
+  // A done task cannot be a target: P warns instead of queueing.
+  priv.selected = 0;
+  press('P');
+  assert.equal(ctx.pauseAt, undefined, 'no target is queued for a done task');
+  assert.match(stripAnsi(app.renderLines(100, 20).join('\n')), /T01 is done; it will not run again/);
+});
+
 test('TuiApp: mouse wheel, tilt-wheel, middle-drag and clicks drive the panels', () => {
   const tasks = [task('T01', 1), task('T02', 2)];
   const term = new AnsiTerminal(() => {});

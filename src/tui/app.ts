@@ -1,6 +1,5 @@
-import { unlinkSync, writeFileSync } from 'node:fs';
 import { acceptCommand } from '../commands.js';
-import { stopPresent } from '../paths.js';
+import { clearStop, placeStop, stopPresent } from '../paths.js';
 import type { RunContext } from '../runner.js';
 import { saveState } from '../state.js';
 import { buildStatusTable, formatStatusRow, statusColumnWidths, type StatusTable } from '../status.js';
@@ -256,6 +255,7 @@ export class TuiApp {
     if (char === 'a') return this.openAccept();
     if (char === 'c') return this.openClearHalt();
     if (char === 'p') return this.togglePause();
+    if (char === 'P') return this.togglePauseAt();
     if (char === 'w') return this.refreshWatch();
     if (char === 'e') return this.toggleExpand();
     if (char === 't') return this.toggleWrap();
@@ -397,15 +397,48 @@ export class TuiApp {
     const { paths } = this.ctx;
     try {
       if (stopPresent(paths)) {
-        for (const f of [paths.stop, paths.stopLegacy]) { try { unlinkSync(f); } catch { /* not present */ } }
+        clearStop(paths);
         this.toast('resumed: pause sentinel removed');
       } else {
-        writeFileSync(paths.stop, '');
+        placeStop(paths);
         this.toast('pausing at the next task/continuation boundary');
       }
     } catch (e) {
       this.toast(`pause toggle failed: ${(e as Error).message}`);
     }
+    this.render();
+  }
+
+  /**
+   * Queue a pause before the selected task (or clear it when it is already the target). Unlike `p`,
+   * which stops at the next boundary, the run keeps going and the sentinel is placed only when the
+   * pipeline reaches that task, so the stop lands exactly where the user asked.
+   */
+  private togglePauseAt(): void {
+    if (this.layout === 'bottom') return this.toast('status panel hidden (press z)');
+    const id = this.selectedTaskId();
+    if (!id) return this.toast('no task selected');
+    if (this.ctx.pauseAt === id) {
+      delete this.ctx.pauseAt;
+      this.toast(`pause target cleared: ${id}`);
+      this.render();
+      return;
+    }
+    if (stopPresent(this.ctx.paths)) {
+      this.toast('already paused (.stop present); press p to resume first');
+      return this.render();
+    }
+    const status = this.ctx.state.tasks[id]?.status ?? 'pending';
+    if (status === 'done' || status === 'accepted' || status === 'blocked') {
+      this.toast(`${id} is ${status}; it will not run again`);
+      return this.render();
+    }
+    if (status === 'running') {
+      this.toast(`${id} is already running; pause will not apply to it`);
+      return this.render();
+    }
+    this.ctx.pauseAt = id;
+    this.toast(`pause queued: run stops before ${id}`);
     this.render();
   }
 
@@ -615,7 +648,11 @@ export class TuiApp {
         const idx = off + i;
         if (idx >= bodyRows.length) break;
         let line = this.clip(bodyRows[idx], this.statusPanel.hOffset, cols);
-        if (table.rowTask[idx] === selectedId) line = `${C.inv}${line}${C.reset}`;
+        const rowId = table.rowTask[idx];
+        // The selected row wins; otherwise a queued pause target is highlighted so it is obvious
+        // where the run will stop.
+        if (rowId === selectedId) line = `${C.inv}${line}${C.reset}`;
+        else if (this.ctx.pauseAt !== undefined && rowId === this.ctx.pauseAt) line = `${C.yellow}${line}${C.reset}`;
         out[y++] = line;
       }
       y = statusTop + top;
@@ -737,6 +774,7 @@ export class TuiApp {
       `${provider}${model}`,
     ];
     if (s.blocked.length) bits.push(`blocked ${s.blocked.join(',')}`);
+    if (this.ctx.pauseAt) bits.push(`pause@${this.ctx.pauseAt}`);
     if (stopPresent(this.ctx.paths)) bits.push('PAUSED');
     if (this.ctx.state.halted) bits.push(`HALTED ${this.ctx.state.halted.category}`);
     return bits.join('  ·  ');
@@ -744,7 +782,7 @@ export class TuiApp {
 
   private hintsLine(): string {
     if (this.haltMode) return 'c clear halt & retry · q quit · ↑↓ scroll · Tab focus';
-    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · c clear-halt · p pause · w watch · e expand · t wrap · z zoom · [ ] split';
+    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · c clear-halt · p pause · P pause-at · w watch · e expand · t wrap · z zoom · [ ] split';
     return base;
   }
 
@@ -772,7 +810,8 @@ export class TuiApp {
         'n / N        select next / previous task',
         'a            accept the selected blocked/failed task',
         'c            clear a halt (asks for confirmation)',
-        'p            pause / resume (toggles the .stop sentinel)',
+        'p            pause / resume (toggles the .stop sentinel now)',
+        'P            queue a pause before the selected task (placed when the run reaches it)',
         'w            run a pipeline-watch check now',
         'e            expand all status columns (pan the focused panel with ← →)',
         't            wrap long live-output lines (off = clip and pan)',
