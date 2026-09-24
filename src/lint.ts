@@ -3,8 +3,8 @@ import { join } from 'node:path';
 import { PROVIDER_NAMES } from './config.js';
 import { gitToplevel } from './git.js';
 import { rel, type Paths } from './paths.js';
-import { parseRoadmap, type Roadmap } from './roadmap.js';
-import { discoverTasks, parseFrontMatter } from './tasks.js';
+import { parseRoadmap, taskIdOrder, type Roadmap } from './roadmap.js';
+import { TASK_FILE_RE, discoverTasks, parseFrontMatter } from './tasks.js';
 import { squash } from './util.js';
 
 export type LintLevel = 'error' | 'warn' | 'info';
@@ -28,10 +28,9 @@ const REQUIRED_SECTIONS: Array<[string, RegExp]> = [
 const CANDIDATE_FILE = /^(roadmap|plan(s|ning)?|tasks?|todo|backlog|progress|milestones?|architecture|design|specs?|prd|adrs?|decisions?|rfc)([-_ .a-z0-9]*)\.md$/i;
 const CANDIDATE_DIRS = new Set(['docs', 'doc', 'tasks', 'task', 'planning', 'plans', 'plan', 'specs', 'spec', 'design', 'designs', 'adr', 'adrs', 'architecture', 'rfcs', '.harness', 'notes', 'roadmap']);
 const SKIP_DIRS = new Set(['.git', '.symphony', '.docs', 'node_modules', 'dist', 'build', 'vendor', 'target', '.next', '.venv', 'venv']);
-const TASK_FILE_RE = /^T?\d{1,3}(?:[-_. ].*)?\.md$/i;
 /** A line that was probably meant to be a task but did not parse as one. */
-const TASKISH_LINE = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX~]\]\s*)?(?:\*\*|__)?\s*(?:T-?\d{1,3}\b|task\s*#?\d+\b|\d{1,3}\s*[—–:.)-])/i;
-const TASKISH_HEADING = /^#{1,6}\s+(?:\*\*)?\s*(?:T-?\d{1,3}\b|task\s*#?\d+\b)/i;
+const TASKISH_LINE = /^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX~]\]\s*)?(?:\*\*|__)?\s*(?:T-?\d{1,3}[a-z]?\b|task\s*#?\d+\b|\d{1,3}[a-z]?\s*[—–:.)-])/i;
+const TASKISH_HEADING = /^#{1,6}\s+(?:\*\*)?\s*(?:T-?\d{1,3}[a-z]?\b|task\s*#?\d+\b)/i;
 const FENCE_RE = /^[ \t]*(```|~~~)/;
 
 function listMd(dir: string, depth: number, out: string[], root: string): void {
@@ -128,7 +127,7 @@ export function lintDocs(paths: Paths, opts: { design?: boolean; skipDirs?: stri
         }
       });
       for (let i = 1; i < roadmap.bullets.length; i++) {
-        if (roadmap.bullets[i].num <= roadmap.bullets[i - 1].num) {
+        if (taskIdOrder(roadmap.bullets[i], roadmap.bullets[i - 1]) <= 0) {
           add('warn', 'roadmap-order', `task ids are not ascending in file order (${roadmap.bullets[i - 1].id} then ${roadmap.bullets[i].id}); execution follows file order, so renumber to avoid confusion`, d.roadmap);
           break;
         }

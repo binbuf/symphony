@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { canonicalId, parseRoadmap, patchRoadmapFile, patchRoadmapStatus, renderBulletLine, statusFromMarkers } from '../src/roadmap.js';
+import { canonicalId, parseRoadmap, patchRoadmapFile, patchRoadmapStatus, renderBulletLine, statusFromMarkers, taskIdOrder } from '../src/roadmap.js';
 
 const SAMPLE = `# Roadmap
 
@@ -55,10 +55,36 @@ test('statusFromMarkers maps [x]/[~]/tags', () => {
   assert.equal(statusFromMarkers(tilde), 'failed');
 });
 
-test('canonicalId accepts T5, 5, 05, T05', () => {
+test('canonicalId accepts T5, 5, 05, T05 and the split suffixes', () => {
   for (const s of ['T5', '5', '05', 'T05', ' t05 ']) assert.equal(canonicalId(s), 'T05');
   assert.equal(canonicalId('T100'), 'T100');
+  for (const s of ['T5a', '5a', 't05A', ' T05a ']) assert.equal(canonicalId(s), 'T05a');
+  assert.equal(canonicalId('T5a1'), 'T05a1');
+  assert.equal(canonicalId('T5ab'), undefined);
   assert.equal(canonicalId('foo'), undefined);
+});
+
+test('parseRoadmap parses split ids, keeps the numeric base and orders suffixes', () => {
+  const rm = parseRoadmap('- [ ] T10 — Parent\n- [ ] T10a — First child\n- [x] T10b — Second child\n- [ ] T11 — After\n');
+  assert.deepEqual(rm.bullets.map((b) => b.id), ['T10', 'T10a', 'T10b', 'T11']);
+  assert.deepEqual(rm.bullets.map((b) => b.num), [10, 10, 10, 11]);
+  assert.deepEqual(rm.bullets.map((b) => b.suffix), ['', 'a', 'b', '']);
+  assert.equal(rm.bullets[2].check, 'x');
+  assert.equal(taskIdOrder({ num: 10, suffix: '' }, { num: 10, suffix: 'a' }), -1);
+  assert.equal(taskIdOrder({ num: 10, suffix: 'a' }, { num: 10, suffix: 'b' }), -1);
+  assert.equal(taskIdOrder({ num: 11, suffix: '' }, { num: 10, suffix: 'z' }), 1);
+  assert.equal(taskIdOrder({ num: 10, suffix: 'a1' }, { num: 10, suffix: 'a' }), 1);
+  // A letter suffix is not a separator, so a suffixed id is never prose.
+  assert.throws(() => parseRoadmap('- [ ] T10 — A\n- [ ] T10 — B\n'), /T10 appears twice/);
+});
+
+test('patchRoadmapFile and renderBulletLine work on a suffixed id', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-roadmap-'));
+  const path = join(dir, 'ROADMAP.md');
+  writeFileSync(path, '- [ ] T05a — Slice → [tasks/05a-slice.md](tasks/05a-slice.md)\n');
+  assert.equal(patchRoadmapFile(path, 'T05a', 'done'), 'patched');
+  assert.equal(readFileSync(path, 'utf8'), '- [x] T05a — Slice → [tasks/05a-slice.md](tasks/05a-slice.md)\n');
+  assert.equal(patchRoadmapFile(path, 'T05', 'done'), 'missing');
 });
 
 test('duplicate ids throw', () => {

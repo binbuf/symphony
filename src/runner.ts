@@ -34,6 +34,17 @@ export interface RunFlags {
   clearHalt: boolean;
 }
 
+/**
+ * A `symphony split` requested live from the run view: the run stops at the next boundary (or the
+ * session is stopped when the task is the one running), the split session rewrites the task, and the
+ * run resumes on the subtasks. Set by the TUI; never by the CLI, which runs `split` on its own.
+ */
+export interface SplitRequest {
+  id: string;
+  into?: number;
+  note?: string;
+}
+
 export interface RunContext {
   paths: Paths;
   config: Config;
@@ -59,6 +70,8 @@ export interface RunContext {
    * it, so the stop lands exactly on the chosen task. Cleared once it fires.
    */
   pauseAt?: string;
+  /** A split requested live from the TUI; the run stops, `split` runs, then the wrapper resumes it. */
+  splitRequest?: SplitRequest;
   /** Live pipeline-watch state shown in the TUI's top panel; undefined when the watcher is off. */
   watch?: WatchState;
   /** Trigger an immediate pipeline-watch check (bound by the watcher). */
@@ -325,14 +338,14 @@ function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec
   return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, variant: spec.variant, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody };
 }
 
-/** Abortable, STOP-aware backoff. Returns true when a STOP file appeared. */
+/** Abortable, STOP- and split-aware backoff. Returns true when the run should stop waiting. */
 async function backoff(ctx: RunContext, ms: number): Promise<boolean> {
   const deadline = Date.now() + ms;
-  while (Date.now() < deadline && !ctx.interrupted) {
+  while (Date.now() < deadline && !ctx.interrupted && !ctx.splitRequest) {
     if (stopPresent(ctx.paths)) return true;
     await sleep(Math.min(5000, deadline - Date.now()), ctx.abort.signal);
   }
-  return stopPresent(ctx.paths);
+  return stopPresent(ctx.paths) || ctx.splitRequest !== undefined;
 }
 
 /** Commit a `continue` session's work so a crash never loses it. */
@@ -434,6 +447,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       const wait = config.retry.backoffSec[Math.min(retryCount - 1, config.retry.backoffSec.length - 1)] ?? 30;
       log.warn(`${task.id}: ${lastTransient.category}: ${lastTransient.message}. Retry ${retryCount}/${maxAttempts} in ${wait}s ${resumeId ? `resuming session ${resumeId}` : 'with a fresh session'}.`);
       const stopped = await backoff(ctx, wait * 1000);
+      if (ctx.splitRequest) { log.warn(`${task.id}: split of ${ctx.splitRequest.id} requested; not retrying.`); return { status: st.status, stopped: true }; }
       if (ctx.interrupted) { final = { status: 'failed', summary: 'interrupted during retry backoff', lastError: { category: 'interrupted', message: 'interrupted during retry backoff', transient: true, fatal: false, at: nowIso() } }; break; }
       if (stopped) { log.warn(`${task.id}: STOP present; not retrying. Remove ${paths.stop} and re-run to continue.`); return { status: st.status, stopped: true }; }
     }
@@ -520,6 +534,14 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           refreshDerivedDocs(ctx);
           if (config.commitPerSession) commitIntermediate(ctx, task, st);
           saveState(paths, state);
+          // A split requested mid-slice stops here too: the slice above is committed, so the parent's
+          // task can be rewritten into subtasks and the run resumed on them.
+          if (ctx.splitRequest) {
+            st.summary = `${block.summary || 'more work remains'} | paused for a split of ${ctx.splitRequest.id}`;
+            saveState(paths, state);
+            log.warn(`${ctx.splitRequest.id}: split requested; pausing before continuation ${continuation}/${maxContinuations}.`);
+            return { status: st.status, stopped: true };
+          }
           // `.stop` is honoured at the subtask boundary too: once this slice is committed, pause
           // before starting the next continuation. The counter above is persisted so the next run
           // resumes at the right slice instead of restarting the task from scratch.
@@ -748,6 +770,12 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     let consecutiveFailures = 0;
     for (const task of todo) {
       if (ctx.interrupted) return ctx.signalName === 'SIGTERM' ? 143 : 130;
+      // A split requested from the run view: stop here so the wrapper can rewrite the task into
+      // subtasks and resume. Checked before the STOP sentinel because it is an explicit user action.
+      if (ctx.splitRequest) {
+        log.warn(`${ctx.splitRequest.id}: split requested; pausing before ${task.id} to rewrite it into subtasks.`);
+        return 0;
+      }
       if (stopPresent(paths)) {
         log.warn(`${relative(paths.root, paths.stop)} present: pausing before ${task.id}. Remove it and re-run to continue.`);
         return 0;

@@ -253,6 +253,7 @@ export class TuiApp {
     if (char === 'n') return this.selectTask(1);
     if (char === 'N') return this.selectTask(-1);
     if (char === 'a') return this.openAccept();
+    if (char === 'b') return this.openSplit();
     if (char === 'c') return this.openClearHalt();
     if (char === 'p') return this.togglePause();
     if (char === 'P') return this.togglePauseAt();
@@ -369,6 +370,56 @@ export class TuiApp {
         this.tableCache = undefined;
       },
     };
+    this.render();
+  }
+
+  /**
+   * Split the selected task into subtasks (T10 → T10a, T10b, …). The run is stopped at a boundary
+   * first — or the running session is stopped when this task is the one in flight — then the view
+   * hands the request to the wrapper, which runs the split session and resumes the run on the
+   * subtasks. Unlike `P`, which only places a sentinel, this is the only key that rewrites the plan.
+   */
+  private openSplit(): void {
+    const id = this.selectedTaskId();
+    if (!id) return this.toast('no task selected');
+    const status = this.ctx.state.tasks[id]?.status ?? 'pending';
+    if (status === 'done' || status === 'accepted') return this.toast(`${id} is ${status}; nothing to split`);
+    if (this.ctx.splitRequest) {
+      return this.toast(this.ctx.splitRequest.id === id
+        ? `${id} is already queued for a split`
+        : `a split of ${this.ctx.splitRequest.id} is already queued`);
+    }
+    const running = status === 'running';
+    this.dialog = {
+      title: `Split ${id} into subtasks?`,
+      lines: [
+        'The agent rewrites the task into 2–6 smaller task files',
+        `(${id}a, ${id}b, …), replaces its roadmap bullet, then the`,
+        'run resumes automatically on the subtasks. The split is a',
+        'normal git commit; undo it with git or `symphony replan`.',
+        '',
+        running ? 'The session running now is stopped and recorded unfinished.' : 'The run pauses at the next task boundary.',
+        '',
+        'y / Enter  split           n / Esc  cancel',
+      ],
+      confirm: () => {
+        this.ctx.splitRequest = { id };
+        if (running) this.ctx.active?.kill('interrupt');
+        this.toast(running ? `${id}: stopping the session, then splitting…` : `split queued: run stops at the next boundary, then splits ${id}`);
+        // The view is in halt mode (the run loop has already returned): release it so the wrapper
+        // can pick the request up and act on it.
+        if (this.haltMode) this.resolveHalt('quit');
+      },
+    };
+    this.render();
+  }
+
+  /** The plan was rewritten underneath the view (a split): drop caches and re-clamp the selection. */
+  onPlanChanged(): void {
+    this.tableCache = undefined;
+    this.wrapCache = undefined;
+    this.selected = clamp(this.selected, 0, Math.max(0, this.ctx.tasks.length - 1));
+    this.snapshotStatuses();
     this.render();
   }
 
@@ -781,8 +832,8 @@ export class TuiApp {
   }
 
   private hintsLine(): string {
-    if (this.haltMode) return 'c clear halt & retry · q quit · ↑↓ scroll · Tab focus';
-    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · c clear-halt · p pause · P pause-at · w watch · e expand · t wrap · z zoom · [ ] split';
+    if (this.haltMode) return 'c clear halt & retry · b split the halted task · q quit · ↑↓ scroll · Tab focus';
+    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · b split · c clear-halt · p pause · P pause-at · w watch · e expand · t wrap · z zoom · [ ] panels';
     return base;
   }
 
@@ -809,6 +860,7 @@ export class TuiApp {
         's            toggle follow (tail) on the focused panel',
         'n / N        select next / previous task',
         'a            accept the selected blocked/failed task',
+        'b            split the selected task into subtasks (T10 → T10a, T10b, …)',
         'c            clear a halt (asks for confirmation)',
         'p            pause / resume (toggles the .stop sentinel now)',
         'P            queue a pause before the selected task (placed when the run reaches it)',
@@ -816,7 +868,7 @@ export class TuiApp {
         'e            expand all status columns (pan the focused panel with ← →)',
         't            wrap long live-output lines (off = clip and pan)',
         'z            cycle layout: both / status only / output only',
-        '[ ]  or  - + adjust the panel split',
+        '[ ]  or  - + adjust the panel sizes',
         '',
         'Status: header stays put, rows scroll vertically and pan horizontally.',
         'Live output tails by default; scroll up to pause, s to resume following.',

@@ -77,7 +77,7 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
 export function logsCommand(paths: Paths, tasks: Task[], rawId: string | undefined, log: Logger): number {
   if (!rawId) {
     if (!existsSync(paths.logsDir)) { log.info(`no logs yet (${rel(paths.root, paths.logsDir)}/ does not exist)`); return 0; }
-    const files = readdirSync(paths.logsDir).filter((f) => /^T\d+\.md$/i.test(f)).sort();
+    const files = readdirSync(paths.logsDir).filter((f) => /^T\d{1,3}(?:[a-z]\d*)?\.md$/i.test(f)).sort();
     log.plain(files.length ? files.map((f) => rel(paths.root, join(paths.logsDir, f))).join('\n') : '(no per-task logs yet)');
     return 0;
   }

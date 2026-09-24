@@ -6,7 +6,7 @@ symphony lives in `<your target project>/.symphony/` (gitignored) and reads its 
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Pipeline watch](#pipeline-watch) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Pipeline watch](#pipeline-watch) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -160,6 +160,8 @@ When `run` starts with stdout **and** stdin attached to a terminal, it opens a f
 
 Each panel scrolls independently, vertically and horizontally, with the keyboard or a mouse: the wheel scrolls, a horizontal tilt-wheel pans, middle-button drag pans horizontally, left-click selects a task row (or focuses the panel under the pointer), and right-click toggles follow. Because the TUI captures mouse input, use **Shift+drag** for the terminal's native text selection. The view turns itself off when output is piped or in CI, with `--no-tui`, or with `"tui": false` in the config; `--tui` forces it.
 
+Pressing `b` on a selected task is the one key that rewrites the plan: the run pauses at the next boundary (or the session running now is stopped when it is that task), one agent session breaks the task into subtasks — `T10` becomes `T10a`, `T10b`, … — and the run resumes automatically on them. A halted task can be split too: the halt is a symptom of the oversized task, and the split clears it.
+
 | key | action |
 |---|---|
 | `q` / `Ctrl-C` | quit — asks for confirmation, then stops the current session (like today's Ctrl-C) |
@@ -170,6 +172,7 @@ Each panel scrolls independently, vertically and horizontally, with the keyboard
 | `s` | toggle follow (tail) on the focused panel |
 | `n` / `N` | select the next / previous task |
 | `a` | accept the selected blocked/failed task (asks for confirmation) |
+| `b` | break the selected task down into subtasks (T10 → T10a, T10b, …) — stops the run, lets the agent rewrite the task, then resumes on the subtasks |
 | `c` | clear a halt (asks for confirmation); after a halt the view stays open, so `c` clears it and restarts |
 | `p` | pause / resume now by toggling the `.stop` sentinel (stops at the next boundary) |
 | `P` | queue a pause before the selected task — the run keeps going and the sentinel is placed when the pipeline reaches that task, so it stops exactly there; press `P` again to clear it |
@@ -206,6 +209,7 @@ On exit the terminal is restored and the last lines are replayed to normal scrol
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also `git revert`s its `T05:` commits (newest first) |
 | `reset --all` | clear every task's state and the halt, and reset every roadmap marker to `[ ]`, so a replaced or rewritten roadmap starts clean |
 | `replan [--direction FILE] [--allow-id-reuse] [--reset-state] [--dry-run]` | stop-and-pivot: let the agent rewrite the plan (roadmap, task files, design docs, a pivot ADR) for a new direction, reconcile state, and commit it as a docs change |
+| `split T05 [--into N] [--note "…"] [--dry-run]` | break one oversized task into subtasks (`T05` → `T05a`, `T05b`, …): the agent rewrites the task file as a series of smaller ones and replaces its bullet, the harness validates the result, reconciles state and commits; see [Splitting a task](#splitting-a-task) |
 | `clear-halt` | lift a halt so `run` can start again. For an `attempts` halt, add `--retry` (`run --clear-halt --retry --only T05`) or `reset T05`: clearing the halt alone leaves the task's failure counter at the limit, so the next run re-halts |
 
 `status` shows `running?` for a task whose recorded process is gone (harness crashed); the next `run` retries it. A human ticking `[x]` in `ROADMAP.md` is honoured by the next command that loads the project.
@@ -218,7 +222,7 @@ Everything that can happen to a task, and what you do about it.
 |---|---|---|---|---|---|
 | 1 | task reports `done`, verify passes | commits the task; starts the next task in a new session | `[x]` | – | nothing |
 | 2 | task reports `continue` | commits the slice; starts a fresh session for the next slice (≤ `maxContinuations`) | `[~] ⟵ running` between sessions | – | nothing |
-| 3 | `continue` past the limit | marks the task failed | `[~] ⟵ failed` | 2 | split the task file, or raise `maxContinuations` |
+| 3 | `continue` past the limit | marks the task failed | `[~] ⟵ failed` | 2 | `symphony split T05` to break it down, or raise `maxContinuations` |
 | 4 | task reports `blocked` | stops for a human (default); `onBlocked: "continue"` moves on instead | `[~] ⟵ blocked` | 2 | read the task's Hand-off; `accept T05 --note "…"` or `run --retry --only T05` |
 | 5 | task reports `failed` | stops | `[~] ⟵ failed` | 2 | fix the cause, then `run` (failed tasks are retried) |
 | 6 | `done` but verify fails | demotes to failed; records command, exit code and output tail | `[~] ⟵ failed` | 2 | fix, then `run` |
@@ -229,7 +233,7 @@ Everything that can happen to a task, and what you do about it.
 | 11 | `.stop` sentinel present | pauses at the next boundary (before a task, or after a `continue` slice); a mid-continuation pause is remembered and resumes the next slice | – | 0 | `rm .stop`, `run` |
 | 12 | Ctrl-C | kills the current session; task recorded unfinished (failed), without consuming an attempt | `[~] ⟵ failed` | 130 | `run` retries it |
 | 13 | second run while one is active | refuses to start | lock file with live pid | 4 | wait, or delete `.symphony/lock` if stale |
-| 14 | `maxIterationsPerTask` / `maxTasksPerRun` / budget hit | task fails gracefully, or the run processes only the first N tasks | task `failed` / rest `pending` | – | raise the limit, or split the task |
+| 14 | `maxIterationsPerTask` / `maxTasksPerRun` / budget hit | task fails gracefully, or the run processes only the first N tasks | task `failed` / rest `pending` | – | raise the limit, or `symphony split` the task |
 | 15 | you tick `[x]` by hand | next load reconciles state to the roadmap tick | `[x]` | – | nothing |
 | 16 | `reset T05 --revert` | clears state and reverts the task's commits newest-first; on conflict it stops and tells you to resolve | `[ ]` pending | 0 | fix conflicts if any, then `run` |
 
@@ -246,6 +250,23 @@ Sometimes you discover half-way through that the design is wrong. symphony does 
 5. **Resume.** Remove the sentinel (`rm .stop`) and `symphony run`.
 
 Why not re-plan inside a running session? The one-fresh-session-per-task model is the whole point: a session gets its task and nothing else, and a task that changes underneath it is exactly the context rot symphony exists to avoid. Pause, re-plan, commit, resume — the pivot stays auditable in `git log`.
+
+## Splitting a task
+
+A task that keeps reporting `continue`, fails its verify, or halts the run on repeated attempts is usually too big for one session. `symphony split` replaces it with a short series that runs in its place:
+
+```bash
+./.symphony/symphony split T05                 # let the agent decide how many subtasks (2–6)
+./.symphony/symphony split T05 --into 3        # exactly three: T05a, T05b, T05c
+./.symphony/symphony split T05 --note "split by layer: schema, API, UI"
+./.symphony/symphony split T05 --dry-run       # print the prompt; touch nothing
+```
+
+One agent session reads the task file, its state and last failure, the roadmap and the design docs, then rewrites `docs/tasks/05-*.md` into `docs/tasks/05a-*.md`, `05b-*.md`, … — each with the full Goal / Context / Scope / Done when / Hand-off template and at least one automated test — removes the parent file, replaces the single `T05` bullet with `T05a`, `T05b`, … in the same phase and position, and appends a `## Split T05` section to `PROGRESS.md`. The harness then validates the rewrite (parent gone, ids exactly the expected series, bullets sitting where the parent was, every subtask a fresh `[ ]` with a task file), re-lints, clears the parent's state row and any halt on it, and commits the change as `docs: split T05 into T05a, T05b [split]`. A rewrite that fails validation is left on disk but never committed, so you can fix it by hand and run `symphony split T05` again.
+
+Subtasks run like any other task: the next `symphony run` picks them up where the parent would have run. Only unfinished tasks can be split (`pending`, `failed`, `blocked`, or interrupted by Ctrl-C/the TUI); `done` and `accepted` ones stay as history. Splitting goes one level at a time — a subtask can be split again into `T05a1`, `T05a2`, … — and work the parent already committed stays in git history for the children to build on or ignore.
+
+In the run view, press `b` on the selected task: the run pauses at the next boundary (or the session is stopped when that task is the one running), the same split logic runs with its output in the live panel, and the run resumes automatically on the subtasks. A halted task can be split too — the halt is a symptom of the oversized task, and a successful split clears it.
 
 ## Multiple task sets
 
@@ -310,7 +331,7 @@ The harness owns the checkbox and the trailing tag; edit everything else freely.
 - [x] T04 — Auth spike ⟵ accepted           signed off by a human with `accept`
 ```
 
-Ids are `T01`, `T02`, … (`01 —` and `3.` also parse). Task files are matched by the link, else by the `NN` filename prefix. A bullet with no task file still runs; the agent is told to create the file first. A task file may start with front matter to override the provider, model, reasoning variant, timeout or verify command for that task only:
+Ids are `T01`, `T02`, … (`01 —` and `3.` also parse), and a task broken down with `symphony split` keeps its number with a letter suffix: `T10a`, `T10b`, … (splitting a subtask again gives `T10a1`, …). Task files are matched by the link, else by the id's filename prefix (`10-slug.md` for `T10`, `10a-slug.md` for `T10a`). A bullet with no task file still runs; the agent is told to create the file first. A task file may start with front matter to override the provider, model, reasoning variant, timeout or verify command for that task only:
 
 ```markdown
 ---
@@ -351,6 +372,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `lint` | check the project root and docs against the expected layout; no LLM; exit 2 on errors |
 | `prepare [--dry-run]` | lint, then let the configured agent convert/repair the docs in place, re-lint, commit |
 | `replan [--direction FILE] [--allow-id-reuse] [--reset-state] [--dry-run]` | let the configured agent rewrite the plan for a new direction and commit it; see [Pivoting mid-run](#pivoting-mid-run) |
+| `split T05 [--into N] [--note "…"] [--dry-run]` | break one oversized task into subtasks (`T05` → `T05a`, `T05b`, …) with one agent session, then commit the rewritten plan; see [Splitting a task](#splitting-a-task) |
 | `brief` | print a paste-ready prompt so any LLM turns an idea into the docs package in this exact format |
 | `accept T05[,T06…] [--note "…"]` | human sign-off on one or more blocked/failed tasks; counts as done, bullet becomes `[x] ⟵ accepted` |
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also undoes its `T05:` commits (newest first) |
@@ -579,6 +601,7 @@ docs/INDEX.md                                  generated repo map, rewritten bef
 .symphony/runs/T05-20260917T231530.log         rendered [think]/[text]/[tool] stream, longer lines than stdout
 .symphony/runs/T05-20260917T231530.prompt.md   the exact prompt sent
 .symphony/runs/prepare-<stamp>.*               the prepare session, same three files
+.symphony/runs/split-T05-<stamp>.*            the split session for T05, same three files
 .symphony/runs/watch-<stamp>.*                 each pipeline-watch check, same three files
 .symphony/watch.log                            append-only pipeline-watch summaries: one section per check, with its snapshot
 .symphony/symphony.log                         harness events: task start/finish, retries, halts, commits

@@ -1,7 +1,10 @@
-import type { RunContext } from '../runner.js';
-import { saveState } from '../state.js';
+import { loadProject } from '../project.js';
+import type { RunContext, SplitRequest } from '../runner.js';
+import { childIdSequence, retargetFlags, splitCommand } from '../split.js';
+import { saveState, type Halted } from '../state.js';
 import { TuiApp } from './app.js';
 import { AnsiTerminal } from './terminal.js';
+import { UsageError } from '../util.js';
 
 export interface TuiOptions {
   /** The TUI is allowed (config `tui`, or default). */
@@ -37,10 +40,95 @@ function captureStdout(app: TuiApp): () => void {
   return () => { process.stdout.write = original; };
 }
 
+/** How the resume loop talks back to its view; the TUI backs these with toasts and the halt dialog. */
+export interface ResumeHooks {
+  /** Stay open after a halt so the user can clear it (`clear`) or leave (`quit`). */
+  awaitHaltAction(halted: Halted): Promise<'clear' | 'quit'>;
+  /** The user already asked to quit. */
+  quitRequested(): boolean;
+  onSplitStart(request: SplitRequest): void;
+  onSplitFailed(request: SplitRequest, code: number): void;
+  /** The plan was reloaded after a split: refresh the view and report the subtasks. */
+  onPlanReloaded(parentId: string, childIds: string[]): void;
+}
+
+/**
+ * The run loop the full-screen view wraps, in plain code so it is testable without a terminal:
+ * run; if the view queued a split, rewrite the task into subtasks, reload the plan and resume on
+ * them; if the run halted, let the view clear the halt and retry or quit. Returns the exit code.
+ */
+export async function runWithResume(ctx: RunContext, run: () => Promise<number>, hooks: ResumeHooks): Promise<number> {
+  for (;;) {
+    const code = await run();
+
+    // A split requested from the run view: the loop stopped at a boundary (or the session was
+    // stopped), so rewrite the task into subtasks, reload the plan, and carry on.
+    if (ctx.splitRequest) {
+      const request = ctx.splitRequest;
+      delete ctx.splitRequest;
+      ctx.interrupted = false;
+      delete ctx.signalName;
+      hooks.onSplitStart(request);
+      let splitCode: number;
+      try {
+        splitCode = await splitCommand(ctx, { id: request.id, into: request.into, note: request.note, dryRun: false });
+      } catch (e) {
+        ctx.log.error(`split ${request.id}: ${(e as Error).message}`);
+        splitCode = e instanceof UsageError ? e.exitCode : 1;
+      }
+      if (splitCode !== 0) {
+        hooks.onSplitFailed(request, splitCode);
+        return splitCode;
+      }
+      const childIds = reloadPlan(ctx, request.id);
+      retargetFlags(ctx.flags, request.id, childIds);
+      if (ctx.pauseAt && !ctx.tasks.some((t) => t.id === ctx.pauseAt)) delete ctx.pauseAt;
+      hooks.onPlanReloaded(request.id, childIds);
+      continue;
+    }
+
+    // A halt ends the loop but not the session: let the user clear it and try again.
+    if (code === 3 && ctx.state.halted && !hooks.quitRequested()) {
+      const halted = ctx.state.halted;
+      const decision = await hooks.awaitHaltAction(halted);
+      if (ctx.splitRequest) continue;
+      if (decision === 'quit' || hooks.quitRequested()) return code;
+      // An `attempts` halt is re-raised unless the task's counter is bypassed too, so mirror the
+      // documented hint (`run --clear-halt --retry --only Txx`) rather than clearing the flag alone.
+      if (halted.category === 'attempts' && halted.taskId) {
+        ctx.flags.retry = true;
+        ctx.flags.only = [halted.taskId];
+      }
+      delete ctx.state.halted;
+      saveState(ctx.paths, ctx.state);
+      ctx.interrupted = false;
+      continue;
+    }
+    return code;
+  }
+}
+
+/**
+ * Re-read the plan and state after a split rewrote them, in place on the context. Returns the ids
+ * of the subtasks that replaced the split task.
+ */
+export function reloadPlan(ctx: RunContext, parentId: string): string[] {
+  const loaded = loadProject(ctx.paths, ctx.log);
+  loaded.warnings.forEach((w) => ctx.log.warn(w));
+  if (loaded.roadmapError) ctx.log.error(loaded.roadmapError);
+  ctx.roadmap = loaded.roadmap;
+  ctx.tasks = loaded.tasks;
+  ctx.state = loaded.state;
+  const children = new Set(childIdSequence(parentId));
+  return loaded.tasks.map((t) => t.id).filter((id) => children.has(id));
+}
+
 /**
  * Run the main loop inside the TUI when the terminal supports it, else fall back to the plain
  * streaming output unchanged. On a halt the view stays open so the user can clear the halt and
- * retry (`c`) or exit (`q`). When it finishes, the last lines are replayed to normal scrollback.
+ * retry (`c`) or exit (`q`). When a split is requested (`b`), the loop stops, one docs session
+ * rewrites the task into subtasks, the plan is reloaded the same way the CLI loads it, and the run
+ * resumes on the subtasks. When it finishes, the last lines are replayed to normal scrollback.
  */
 export async function runWithTui(ctx: RunContext, run: () => Promise<number>, opts: TuiOptions): Promise<number> {
   const supported = tuiSupported();
@@ -60,24 +148,16 @@ export async function runWithTui(ctx: RunContext, run: () => Promise<number>, op
   let code = 1;
   try {
     app.start();
-    code = await run();
-    // A halt ends the loop but not the session: let the user clear it and try again.
-    while (code === 3 && ctx.state.halted && !app.quitRequested) {
-      const halted = ctx.state.halted;
-      const decision = await app.awaitHaltAction();
-      if (decision === 'quit' || app.quitRequested) break;
-      // An `attempts` halt is re-raised unless the task's counter is bypassed too, so mirror the
-      // documented hint (`run --clear-halt --retry --only Txx`) rather than clearing the flag alone.
-      if (halted.category === 'attempts' && halted.taskId) {
-        ctx.flags.retry = true;
-        ctx.flags.only = [halted.taskId];
-        app.toast(`retrying ${halted.taskId}…`);
-      }
-      delete ctx.state.halted;
-      saveState(ctx.paths, ctx.state);
-      ctx.interrupted = false;
-      code = await run();
-    }
+    code = await runWithResume(ctx, run, {
+      awaitHaltAction: () => app.awaitHaltAction(),
+      quitRequested: () => app.quitRequested,
+      onSplitStart: (request) => app.toast(`splitting ${request.id}: the agent is rewriting the task…`),
+      onSplitFailed: (request, failed) => app.toast(`split ${request.id} did not finish (exit ${failed}); see the live output`),
+      onPlanReloaded: (parentId, childIds) => {
+        app.onPlanChanged();
+        app.toast(`split ${parentId} → ${childIds.join(', ')}; resuming the run`);
+      },
+    });
   } finally {
     process.removeListener('exit', onExit);
     restore();

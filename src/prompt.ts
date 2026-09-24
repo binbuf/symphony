@@ -102,7 +102,7 @@ function docPaths(paths: Paths) {
 }
 
 function defaultTaskFileRel(paths: Paths, task: Task): string {
-  return `${rel(paths.root, paths.tasksDir)}/${String(task.num).padStart(2, '0')}-${slugify(task.title)}.md`;
+  return `${rel(paths.root, paths.tasksDir)}/${String(task.num).padStart(2, '0')}${task.suffix ?? ''}-${slugify(task.title)}.md`;
 }
 
 export function buildTaskPrompt(ctx: PromptCtx): string {

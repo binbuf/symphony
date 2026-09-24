@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULTS } from '../src/config.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths } from '../src/paths.js';
-import type { RunContext } from '../src/runner.js';
+import { loadProject } from '../src/project.js';
+import type { RunContext, RunFlags } from '../src/runner.js';
 import { newTaskState, type State } from '../src/state.js';
 import { buildStatusTable } from '../src/status.js';
 import type { Task } from '../src/tasks.js';
 import { TuiApp } from '../src/tui/app.js';
-import { runWithTui } from '../src/tui/index.js';
+import { runWithResume, runWithTui } from '../src/tui/index.js';
 import { KeyParser, type Key, type MouseButton, type MouseKey } from '../src/tui/keys.js';
 import { AnsiTerminal } from '../src/tui/terminal.js';
 import { displayWidth, fit, padTo, sanitizeLine, sliceColumns, splice, stripAnsi, wrapColumns, wrapText } from '../src/tui/text.js';
@@ -352,6 +354,153 @@ test('runWithTui enters the alternate screen, captures the run stream, and resto
     if (setRawMode === undefined) delete (process.stdin as { setRawMode?: unknown }).setRawMode;
     else (process.stdin as { setRawMode?: unknown }).setRawMode = setRawMode;
   }
+});
+
+test('TuiApp: b asks to split the selected task, refuses finished ones, and stops a running session', () => {
+  const tasks = [task('T01', 1), task('T02', 2), task('T03', 3)];
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: { ...newTaskState('t1'), status: 'done', attempts: 1, durationS: 10 },
+      T02: { ...newTaskState('t2'), status: 'running', attempts: 1, started: new Date().toISOString() },
+      T03: { ...newTaskState('t3'), status: 'failed', attempts: 1 },
+    },
+  };
+  const ctx = makeCtx(tasks, state);
+  let killed = 0;
+  ctx.active = { kill: () => { killed += 1; } } as unknown as RunContext['active'];
+  const app = new TuiApp(ctx, new AnsiTerminal(() => {}));
+  const priv = app as unknown as {
+    handleKey(k: Key): void;
+    handleDialogKey(k: Key): void;
+    selected: number;
+    dialog?: { confirm(): void };
+  };
+  const press = (char: string) => priv.handleKey({ type: 'char', char });
+
+  // A finished task cannot be split: a toast, no dialog.
+  priv.selected = 0;
+  press('b');
+  assert.equal(priv.dialog, undefined);
+  assert.match(stripAnsi(app.renderLines(100, 20).join('\n')), /T01 is done; nothing to split/);
+
+  // A failed task: confirm queues the split and does not touch a session.
+  priv.selected = 2;
+  press('b');
+  assert.ok(priv.dialog, 'a confirmation dialog opens');
+  priv.handleDialogKey({ type: 'char', char: 'y' });
+  assert.deepEqual(ctx.splitRequest, { id: 'T03' });
+  assert.equal(killed, 0);
+
+  // A second split while one is queued is refused until the first is handled.
+  priv.selected = 1;
+  press('b');
+  assert.equal(priv.dialog, undefined);
+  assert.match(stripAnsi(app.renderLines(100, 20).join('\n')), /a split of T03 is already queued/);
+  delete ctx.splitRequest;
+
+  // A running task: confirming stops the session first, then queues the split.
+  priv.selected = 1;
+  press('b');
+  priv.handleDialogKey({ type: 'char', char: 'y' });
+  assert.deepEqual(ctx.splitRequest, { id: 'T02' });
+  assert.equal(killed, 1, 'the running session is interrupted before the split');
+});
+
+test('TuiApp: onPlanChanged drops caches and re-clamps the selection after a split', () => {
+  const tasks = [task('T01', 1), task('T02', 2)];
+  const state: State = { version: 1, tasks: { T01: { ...newTaskState('t1'), status: 'done' } } };
+  const ctx = makeCtx(tasks, state);
+  const app = new TuiApp(ctx, new AnsiTerminal(() => {}));
+  const priv = app as unknown as { selected: number; table(): unknown };
+  priv.selected = 1;
+  assert.ok(priv.table());
+  // The split removed the selected task and added two subtasks.
+  ctx.tasks = [task('T01', 1), { ...task('T02a', 2), suffix: 'a' }, { ...task('T02b', 2), suffix: 'b' }];
+  app.onPlanChanged();
+  assert.equal(priv.selected, 1);
+  assert.equal(app.renderLines(80, 20).length, 20);
+  assert.match(stripAnsi(app.renderLines(80, 20).join('\n')), /T02a/);
+});
+
+test('runWithResume stops the run, splits the task and resumes on the subtasks', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-tui-split-'));
+  execFileSync('git', ['-C', dir, 'init', '-q']);
+  execFileSync('git', ['-C', dir, 'config', 'user.email', 't@t']);
+  execFileSync('git', ['-C', dir, 'config', 'user.name', 't']);
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.tasksDir, { recursive: true });
+  writeFileSync(paths.roadmap, '# Roadmap\n\n- [ ] T01 — One\n- [~] T02 — Big → [tasks/02-big.md](tasks/02-big.md) ⟵ failed\n');
+  writeFileSync(join(paths.tasksDir, '02-big.md'), '# T02 — Big\n\n## Goal\ntoo big\n');
+  writeFileSync(paths.progress, '# Progress notes\n');
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  const newRoadmap = '# Roadmap\n\n- [ ] T01 — One\n- [ ] T02a — Schema → [tasks/02a-schema.md](tasks/02a-schema.md)\n- [ ] T02b — API → [tasks/02b-api.md](tasks/02b-api.md)\n';
+  writeFileSync(join(fixtures, 'split-T02.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'fake_rm', path: 'docs/tasks/02-big.md' }),
+    JSON.stringify({ type: 'fake_write', path: 'docs/tasks/02a-schema.md', content: '# T02a — Schema\n' }),
+    JSON.stringify({ type: 'fake_write', path: 'docs/tasks/02b-api.md', content: '# T02b — API\n' }),
+    JSON.stringify({ type: 'fake_write', path: 'docs/ROADMAP.md', content: newRoadmap }),
+    JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 's1', result: 'SYMPHONY_RESULT\nstatus: done\nsummary: T02 → T02a, T02b\nEND_SYMPHONY_RESULT' }),
+  ].join('\n') + '\n');
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+
+  const log: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner() {} };
+  const loaded = loadProject(paths, log);
+  const flags: RunFlags = { retry: false, continueOnFailure: false, dryRun: false, clearHalt: false };
+  const ctx: RunContext = {
+    paths, config: { ...DEFAULTS, provider: 'fake' }, cli: {}, flags, log,
+    roadmap: loaded.roadmap, tasks: loaded.tasks, state: loaded.state, interrupted: false, abort: new AbortController(),
+  };
+  const reloaded: string[] = [];
+  try {
+    let calls = 0;
+    const code = await runWithResume(ctx, async () => {
+      calls += 1;
+      if (calls === 1) { ctx.splitRequest = { id: 'T02' }; return 0; }
+      return 0;
+    }, {
+      awaitHaltAction: async () => 'quit',
+      quitRequested: () => false,
+      onSplitStart: () => {},
+      onSplitFailed: () => {},
+      onPlanReloaded: (parentId, childIds) => reloaded.push(`${parentId} → ${childIds.join(', ')}`),
+    });
+
+    assert.equal(code, 0);
+    assert.equal(calls, 2, 'the run resumes after the split');
+    assert.deepEqual(ctx.tasks.map((t) => t.id), ['T01', 'T02a', 'T02b']);
+    assert.match(readFileSync(paths.roadmap, 'utf8'), /- \[ \] T02a — Schema/);
+    assert.equal(ctx.state.tasks.T02, undefined, 'the parent state row was pruned');
+    assert.deepEqual(reloaded, ['T02 → T02a, T02b'], 'the view is told about the new subtasks');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('runWithResume lets the view clear a halt (with --retry semantics) and retry', async () => {
+  const tasks = [task('T01', 1)];
+  const state: State = { version: 1, tasks: { T01: { ...newTaskState('t1'), status: 'failed' } } };
+  state.halted = { at: 'x', taskId: 'T01', category: 'attempts', reason: 'failed 3 times' };
+  const ctx = makeCtx(tasks, state);
+  let calls = 0;
+  const code = await runWithResume(ctx, async () => {
+    calls += 1;
+    if (calls === 1) return 3;
+    assert.equal(ctx.state.halted, undefined, 'the halt is cleared before the retry');
+    assert.equal(ctx.flags.retry, true, 'an attempts halt retries the task');
+    assert.deepEqual(ctx.flags.only, ['T01']);
+    return 0;
+  }, {
+    awaitHaltAction: async () => 'clear',
+    quitRequested: () => false,
+    onSplitStart: () => {},
+    onSplitFailed: () => {},
+    onPlanReloaded: () => {},
+  });
+  assert.equal(code, 0);
+  assert.equal(calls, 2);
 });
 
 test('AnsiTerminal turns autowrap off while drawing and always repaints the bottom bar', () => {

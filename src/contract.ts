@@ -13,7 +13,8 @@ Bullet syntax (indented here so these examples are not picked up as tasks):
     - [x] T03 — Title                                                done
 
 Rules
-- One top-level bullet per task. Ids are T01, T02, … (T + number). Phases are "##" headings.
+- One top-level bullet per task. Ids are T01, T02, … (T + number); a task broken down with \`symphony split\`
+  is replaced by letter-suffixed children (T10 becomes T10a, T10b, …). Phases are "##" headings.
 - The harness owns the [ ]/[~]/[x] marker and the trailing "⟵ tag"; edit the rest freely.
 - Task details live in tasks/NN-slug.md (linked from the bullet, or matched by the NN prefix).
 - The harness keeps a pipeline status block (between the "symphony:status" HTML comments) at the end of this

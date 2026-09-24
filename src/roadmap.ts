@@ -5,9 +5,11 @@ export type Tag = 'running' | 'blocked' | 'failed' | 'accepted';
 export type RoadmapStatus = 'pending' | 'running' | 'done' | 'blocked' | 'failed' | 'accepted';
 
 export interface Bullet {
-  /** Canonical id: T + zero-padded number (T01, T12, T100). */
+  /** Canonical id: T + zero-padded number (T01, T12, T100), plus an optional split suffix (T10a, T10a1). */
   id: string;
   num: number;
+  /** Split suffix: '' for a base task, a letter or letter+digits for a subtask of `symphony split`. */
+  suffix: string;
   title: string;
   phase: string;
   lineIndex: number;
@@ -35,21 +37,51 @@ export interface Roadmap {
  *   - [~] T03 — Title ⟵ failed
  *   - 04. Title
  * A bare number (no `T`) needs a punctuation separator so prose like "- 2 servers" is not a task.
+ * Ids may carry a split suffix (`T10a`, `T10b`, …) for the children of a task broken down by
+ * `symphony split`; the suffix is a lowercase letter with optional digits (T10a1).
  */
 const BULLET_RE =
-  /^(?<pre>[-*+][ \t]+)(?:\[(?<check>[ xX~])\][ \t]+)?(?<body>(?<id>T\d{1,3}|\d{1,3})(?<sep>[ \t]*[—–:.)-]+[ \t]*|[ \t]+)(?<rest>.*?))(?:[ \t]*⟵[ \t]*(?<tag>running|blocked|failed|accepted))?[ \t]*$/u;
+  /^(?<pre>[-*+][ \t]+)(?:\[(?<check>[ xX~])\][ \t]+)?(?<body>(?<id>T\d{1,3}(?:[a-z]\d*)?|\d{1,3}(?:[a-z]\d*)?)(?<sep>[ \t]*[—–:.)-]+[ \t]*|[ \t]+)(?<rest>.*?))(?:[ \t]*⟵[ \t]*(?<tag>running|blocked|failed|accepted))?[ \t]*$/u;
 const HEADING_RE = /^##(?!#)[ \t]+(.+?)[ \t]*#*[ \t]*$/;
 const FENCE_RE = /^[ \t]*(```|~~~)/;
 const LINK_RE = /\[([^\]]*)\]\(([^)\s]+)\)/g;
 
-export function canonicalId(input: string): string | undefined {
-  const m = /^\s*T?(\d{1,3})\s*$/i.exec(input);
+export interface TaskId {
+  /** Canonical id. */
+  id: string;
+  /** Numeric base, e.g. 10 for T10a. */
+  num: number;
+  /** '' for a base task, otherwise the lowercase suffix (`a`, `b`, `a1`). */
+  suffix: string;
+}
+
+/** Parse a user- or roadmap-supplied task id (`T10`, `10`, `t10a`, `T10A1`). */
+export function parseTaskId(input: string): TaskId | undefined {
+  const m = /^\s*T?(\d{1,3})([a-z]\d*)?\s*$/i.exec(input);
   if (!m) return undefined;
-  return idFromNum(Number(m[1]));
+  const num = Number(m[1]);
+  const suffix = (m[2] ?? '').toLowerCase();
+  return { id: formatTaskId(num, suffix), num, suffix };
+}
+
+export function formatTaskId(num: number, suffix = ''): string {
+  return `T${String(num).padStart(2, '0')}${suffix}`;
+}
+
+export function canonicalId(input: string): string | undefined {
+  return parseTaskId(input)?.id;
 }
 
 export function idFromNum(n: number): string {
-  return `T${String(n).padStart(2, '0')}`;
+  return formatTaskId(n);
+}
+
+/** Roadmap order: by numeric base, then by suffix ('' before 'a' before 'a1' before 'b'). */
+export function taskIdOrder(a: { num: number; suffix?: string }, b: { num: number; suffix?: string }): number {
+  if (a.num !== b.num) return a.num - b.num;
+  const as = a.suffix ?? '';
+  const bs = b.suffix ?? '';
+  return as < bs ? -1 : as > bs ? 1 : 0;
 }
 
 function cleanTitle(rest: string): { title: string; link?: string } {
@@ -87,8 +119,9 @@ export function parseRoadmap(text: string): Roadmap {
     const g = m.groups;
     const rawId = g.id;
     if (!rawId.startsWith('T') && !/[—–:.)-]/.test(g.sep)) return; // bare number without separator = prose
-    const num = Number(rawId.replace(/^T/, ''));
-    const id = idFromNum(num);
+    const parsed = parseTaskId(rawId);
+    if (!parsed) return;
+    const { id, num, suffix } = parsed;
     const prev = seen.get(id);
     if (prev !== undefined) {
       throw new Error(`ROADMAP.md: task ${id} appears twice (lines ${prev + 1} and ${lineIndex + 1}). One bullet per task id.`);
@@ -98,6 +131,7 @@ export function parseRoadmap(text: string): Roadmap {
     bullets.push({
       id,
       num,
+      suffix,
       title: title || id,
       phase,
       lineIndex,

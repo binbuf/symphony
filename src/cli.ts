@@ -8,16 +8,16 @@ import { DEFAULTS, findTaskSet, loadConfig, resolveSession, type CliOverrides, t
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { formatLint, lintDocs } from './lint.js';
 import { prepareCommand } from './prepare.js';
+import { loadProject } from './project.js';
 import { replanCommand } from './replan.js';
-import { createLogger, type Logger } from './logger.js';
-import { resolvePaths, taskSetOverrides, type PathOverrides, type Paths } from './paths.js';
+import { createLogger } from './logger.js';
+import { resolvePaths, taskSetOverrides, type PathOverrides } from './paths.js';
 import { getProvider, variantSupported } from './providers/index.js';
-import { parseRoadmap, patchRoadmapFile, type Roadmap } from './roadmap.js';
 import { nudgeCommand, runCommand, type RunContext, type RunFlags } from './runner.js';
-import { loadState, reconcile, saveState, type State } from './state.js';
-import { discoverTasks, type Task } from './tasks.js';
+import { saveState } from './state.js';
+import { splitCommand } from './split.js';
 import { runWithTui } from './tui/index.js';
-import { UsageError, fileExists } from './util.js';
+import { UsageError } from './util.js';
 
 const HELP = `symphony — run an LLM coding agent through your roadmap, one fresh session per task
 
@@ -32,6 +32,8 @@ Usage
   symphony prepare [--dry-run]           lint, then let the configured agent convert/repair the docs and commit
   symphony replan  [--direction FILE]    stop-and-pivot: let the agent rewrite the plan for a new direction and commit
                    [--allow-id-reuse] [--reset-state] [--dry-run]
+  symphony split   T05 [--into N]        break one oversized task into subtasks (T05 → T05a, T05b, …): the agent
+                   [--note "..."] [--dry-run]   rewrites the task into subtask files, the harness validates and commits
   symphony init                          scaffold the docs/ package (ROADMAP, PROGRESS, tasks/, design/, adr/) + config + .gitignore
   symphony accept  T05 [--note "..."]    human sign-off on a blocked/failed task (counts as done)
   symphony reset   T05 [--revert]        clear a task's state (and revert its commits with --revert) so it runs again
@@ -81,27 +83,6 @@ Exit codes: 0 ok/paused · 1 unexpected error · 2 stopped on a blocked/failed t
 Every option also applies to the project given by --root DIR (default: the directory containing .symphony/).
 `;
 
-interface Loaded { paths: Paths; roadmap: Roadmap; tasks: Task[]; state: State; warnings: string[]; roadmapError?: string }
-
-function loadProject(paths: Paths, log: Logger): Loaded {
-  const state = loadState(paths);
-  if (!fileExists(paths.roadmap)) return { paths, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [], state, warnings: [], roadmapError: `${paths.roadmap} missing (run: symphony init)` };
-  let roadmap: Roadmap;
-  try { roadmap = parseRoadmap(readFileSync(paths.roadmap, 'utf8')); } catch (e) {
-    return { paths, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [], state, warnings: [], roadmapError: (e as Error).message };
-  }
-  const { tasks, warnings } = discoverTasks(paths, roadmap);
-  const notes = reconcile(state, roadmap);
-  if (notes.length) { notes.forEach((n) => log.info(`reconcile: ${n}`)); saveState(paths, state); }
-  // State is authoritative for terminal statuses: make the roadmap markers agree.
-  for (const t of tasks) {
-    const st = state.tasks[t.id];
-    if (!st) continue;
-    try { if (patchRoadmapFile(paths.roadmap, t.id, st.status) === 'patched') log.info(`roadmap: ${t.id} marker set to ${st.status} from state`); } catch { /* reported by run */ }
-  }
-  return { paths, roadmap, tasks, state, warnings };
-}
-
 /** Version of the harness, read from the package.json beside the build (falls back to 'dev'). */
 export const VERSION: string = (() => {
   try {
@@ -112,7 +93,7 @@ export const VERSION: string = (() => {
   }
 })();
 
-const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'init', 'accept', 'reset', 'nudge', 'clear-halt', 'brief', 'help']);
+const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'split', 'init', 'accept', 'reset', 'nudge', 'clear-halt', 'brief', 'help']);
 
 /**
  * The effective path overrides for this invocation: the base `paths`, or — with `--set NAME` — a
@@ -169,6 +150,7 @@ export async function main(argv: string[]): Promise<number> {
       direction: { type: 'string' },
       'allow-id-reuse': { type: 'boolean' },
       'reset-state': { type: 'boolean' },
+      into: { type: 'string' },
       all: { type: 'boolean' },
       note: { type: 'string' },
       revert: { type: 'boolean' },
@@ -281,6 +263,16 @@ export async function main(argv: string[]): Promise<number> {
         allowIdReuse: v['allow-id-reuse'] === true,
         resetState: v['reset-state'] === true,
       });
+    }
+    case 'split': {
+      const id = positionals[1];
+      if (!id) throw new UsageError('split: give the task to break down, e.g. symphony split T05 [--into 3]');
+      const into = v.into !== undefined ? Number(v.into) : undefined;
+      if (into !== undefined && (!Number.isInteger(into) || into < 2 || into > 26)) throw new UsageError('--into must be a whole number between 2 and 26');
+      const flags: RunFlags = { retry: false, continueOnFailure: false, dryRun: v['dry-run'] === true, clearHalt: false };
+      const ctx: RunContext = { paths, config, cli, flags, log, roadmap: loaded.roadmap, tasks: loaded.tasks, state: loaded.state, interrupted: false, abort: new AbortController() };
+      installSignalHandlers(ctx);
+      return splitCommand(ctx, { id, into, note: v.note, dryRun: v['dry-run'] === true });
     }
     case 'run':
     case 'nudge': {
