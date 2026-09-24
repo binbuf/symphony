@@ -558,7 +558,7 @@ When the [`breakdown` block](#automatic-breakdowns) is enabled and one of its ga
 
 ## Pipeline watch
 
-While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: the harness assembles a self-contained snapshot — the currently running ticket (or the one that just finished), per-phase progress with the current phase flagged, the most recent task outcomes, the recent `PROGRESS.md` context, the pipeline counts and task list, and the halted banner if any — and asks the watcher model to **add interpretation the status table cannot show**. The TUI already shows the running ticket and its elapsed time, the phase, the counts and the cost, so the watcher is told not to restate any of that; it speaks only when it can say something a careful operator would not already know:
+While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: the harness assembles a self-contained snapshot — the currently running ticket (or the one that just finished), per-phase progress with the current phase flagged, **only the task outcomes and `PROGRESS.md` sections that landed since the previous check**, the pipeline counts and a status-only task list, and the halted banner if any — and asks the watcher model to **add interpretation the status table cannot show**. Each check's window starts where the previous one stopped, so a check costs the same whether the run is five minutes or five hours old instead of re-inlining the whole history every interval. The TUI already shows the running ticket and its elapsed time, the phase, the counts and the cost, so the watcher is told not to restate any of that; it speaks only when it can say something a careful operator would not already know:
 
 1. a running task that is long, retrying, or otherwise anomalous against the pipeline's own recent pace, and what that changes about the expected outcome;
 2. work that looks harder or more fragile than the rest, and the specific evidence that would settle it;
@@ -567,7 +567,7 @@ While a run is in flight, a **separate, read-only** LLM session can summarize ho
 
 It is asked for **two to four short sentences**, and told never to narrate status or timing, never to hedge that it is too early to tell, and never to pad. When it has nothing useful to add it replies `NO_UPDATE`; the panel then keeps its previous summary (or stays empty if there was none) instead of filling with filler.
 
-A check runs every `watch.intervalMin`, **and again each time a task ends**, so a summary reflects the ticket that just moved rather than the pipeline as of the last timer tick.
+A check runs every `watch.intervalMin`, **and again each time a task ends**, so a summary reflects the ticket that just moved rather than the pipeline as of the last timer tick. The delta window advances only after a check that actually ran, so a failed or timed-out check's work is folded into the next prompt rather than dropped.
 
 The latest answer is shown in the TUI's **Pipeline watch** strip (above the status table) and every check is appended to `.symphony/watch.log` with the snapshot and a link to the session's raw files. The strip shows `Waiting for updates` until the first check returns, with the countdown to the first check on the right of the title; press `w` to run one immediately. A check with nothing to add leaves the previous summary in place and just refreshes the count and update time in the title.
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -9,7 +9,7 @@ import { resolvePaths } from '../src/paths.js';
 import type { RunContext } from '../src/runner.js';
 import { newTaskState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
-import { buildWatchPrompt, pipelineSnapshot, startPipelineWatch, watchLogPath } from '../src/watch.js';
+import { buildWatchPrompt, pipelineSnapshot, progressSectionCount, startPipelineWatch, watchLogPath } from '../src/watch.js';
 
 const silent: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner() {} };
 
@@ -65,6 +65,108 @@ test('buildWatchPrompt and pipelineSnapshot describe the pipeline from live stat
   assert.match(prompt, /Never say it is too early to tell/);
   assert.match(prompt, /reply with exactly NO_UPDATE/);
   assert.doesNotMatch(prompt, /what it has accomplished so far and what is left/);
+});
+
+test('buildWatchPrompt inlines only outcomes that finished inside the window', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-delta-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.docs, { recursive: true });
+  const tasks = [task('T01', 1), task('T02', 2), task('T03', 3)];
+  const old = new Date(Date.now() - 2 * 3600_000).toISOString();
+  const fresh = new Date(Date.now() - 10 * 60_000).toISOString();
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: { ...newTaskState('one'), status: 'done', attempts: 1, finished: old, summary: 'alpha landed long ago' },
+      T02: { ...newTaskState('two'), status: 'done', attempts: 1, finished: fresh, summary: 'beta just landed' },
+      T03: { ...newTaskState('three'), status: 'running', attempts: 1, started: new Date().toISOString() },
+    },
+  };
+  const ctx = makeCtx(dir, tasks, state);
+  const prompt = buildWatchPrompt(ctx, { sinceMs: Date.now() - 30 * 60_000 });
+  assert.match(prompt, /finished since/);
+  // Only the recent outcome carries its summary; the older one is not repeated.
+  assert.match(prompt, /beta just landed/);
+  assert.doesNotMatch(prompt, /alpha landed long ago/);
+  // The status-only task list still shows every task.
+  assert.match(prompt, /T01 \[done\] Task 1/);
+  assert.match(prompt, /T03 \[running\] Task 3/);
+});
+
+test('buildWatchPrompt inlines only PROGRESS.md sections newer than progressFrom', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-progress-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.docs, { recursive: true });
+  writeFileSync(paths.progress, ['# Progress', '', '## alpha', '- a', '', '## beta', '- b', '', '## gamma', '- c', '', '## delta', '- d', '', '## epsilon', '- e', ''].join('\n'));
+  assert.equal(progressSectionCount(paths.progress), 5);
+
+  const ctx = makeCtx(dir, [task('T01', 1)], { version: 1, tasks: {} });
+  // First check with no offset seeds the newest few sections, not the whole history.
+  const bootstrap = buildWatchPrompt(ctx, {});
+  assert.match(bootstrap, /## gamma/);
+  assert.match(bootstrap, /## epsilon/);
+  assert.doesNotMatch(bootstrap, /## alpha/);
+
+  // An explicit offset resumes exactly where the previous check stopped.
+  const delta = buildWatchPrompt(ctx, { sinceMs: Date.now(), progressFrom: 3 });
+  assert.match(delta, /## delta/);
+  assert.match(delta, /## epsilon/);
+  assert.doesNotMatch(delta, /## alpha|## beta|## gamma/);
+});
+
+test('each check feeds only the changes since the previous check into the next prompt', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-window-'));
+  const paths = resolvePaths(dir);
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  writeFileSync(join(fixtures, 'watch.jsonl'), `${JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, session_id: 'w1', result: 'ok',
+  })}\n`);
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+  mkdirSync(paths.docs, { recursive: true });
+  writeFileSync(paths.progress, '# Progress\n\n## one\n\n- a\n');
+
+  const tasks = [task('T01', 1), task('T02', 2)];
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: { ...newTaskState('one'), status: 'running', attempts: 1, started: new Date().toISOString() },
+      T02: { ...newTaskState('two'), status: 'running', attempts: 1, started: new Date().toISOString() },
+    },
+  };
+  const ctx = makeCtx(dir, tasks, state);
+  ctx.config = { ...DEFAULTS, watch: { ...DEFAULTS.watch, provider: 'fake', model: '' } };
+
+  try {
+    const watcher = startPipelineWatch(ctx);
+    // T01 finished strictly after the watcher started (its window), so the first check includes it.
+    await new Promise((r) => setTimeout(r, 20));
+    state.tasks.T01 = { ...state.tasks.T01, status: 'done', finished: new Date().toISOString(), summary: 'OLDSUMM-alpha' };
+    await watcher!.checkNow();
+
+    // Between checks a second task finishes and a new progress note is appended.
+    const bumped = new Date(Date.now() + 1500).toISOString();
+    state.tasks.T02 = { ...state.tasks.T02, status: 'done', finished: bumped, summary: 'FRESHSUMM-beta' };
+    writeFileSync(paths.progress, '# Progress\n\n## one\n\n- a\n\n## two\n\n- b\n');
+    await new Promise((r) => setTimeout(r, 1100)); // a distinct run stamp for the second prompt file
+    await watcher!.checkNow();
+    watcher!.stop();
+
+    const prompts = readdirSync(paths.runs).filter((f) => /^watch-.*\.prompt\.md$/.test(f)).sort();
+    assert.ok(prompts.length >= 2, `both checks wrote a prompt: ${prompts.join(', ')}`);
+    const first = readFileSync(join(paths.runs, prompts[0]), 'utf8');
+    const second = readFileSync(join(paths.runs, prompts[prompts.length - 1]), 'utf8');
+
+    assert.match(first, /OLDSUMM-alpha/);
+    assert.match(first, /## one/);
+    // The second check carries the new work and does not repeat the first window's logs.
+    assert.match(second, /FRESHSUMM-beta/);
+    assert.match(second, /## two/);
+    assert.doesNotMatch(second, /OLDSUMM-alpha/);
+    assert.doesNotMatch(second, /## one/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
 });
 
 test('startPipelineWatch waits one interval, then a fake check updates the panel and the watch log', async () => {
