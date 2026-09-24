@@ -1,6 +1,6 @@
-import { loadProject } from '../project.js';
+import { applyPlan, loadProject, retargetFlags } from '../project.js';
 import type { RunContext, SplitRequest } from '../runner.js';
-import { childIdSequence, retargetFlags, splitCommand } from '../split.js';
+import { childIdSequence, splitCommand } from '../split.js';
 import { saveState, type Halted } from '../state.js';
 import { TuiApp } from './app.js';
 import { AnsiTerminal } from './terminal.js';
@@ -116,9 +116,7 @@ export function reloadPlan(ctx: RunContext, parentId: string): string[] {
   const loaded = loadProject(ctx.paths, ctx.log);
   loaded.warnings.forEach((w) => ctx.log.warn(w));
   if (loaded.roadmapError) ctx.log.error(loaded.roadmapError);
-  ctx.roadmap = loaded.roadmap;
-  ctx.tasks = loaded.tasks;
-  ctx.state = loaded.state;
+  applyPlan(ctx, loaded);
   const children = new Set(childIdSequence(parentId));
   return loaded.tasks.map((t) => t.id).filter((id) => children.has(id));
 }
@@ -148,6 +146,11 @@ export async function runWithTui(ctx: RunContext, run: () => Promise<number>, op
   let code = 1;
   try {
     app.start();
+    // An automatic breakdown inside the run rewrites the plan too: refresh the view when it does.
+    ctx.onPlanChanged = (parentId, childIds) => {
+      app.onPlanChanged();
+      app.toast(`broke ${parentId} into ${childIds.join(', ')}; resuming`);
+    };
     code = await runWithResume(ctx, run, {
       awaitHaltAction: () => app.awaitHaltAction(),
       quitRequested: () => app.quitRequested,

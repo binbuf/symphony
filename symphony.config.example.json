@@ -85,6 +85,7 @@
     "resultFallback": true,
     "failureTriage": true,
     "escalationDecision": true,
+    "breakdownDecision": true,
     "provider": "openrouter",
     "model": "jev-latest",
     "apiKeyEnv": "OPENROUTER_API_KEY",
@@ -101,6 +102,26 @@
     "provider": "opencode",
     "model": "openrouter/deepseek/deepseek-v4.1-flash",
     "timeoutMin": 5
+  },
+  "breakdown": {
+    "enabled": false,
+    "onStart": false,
+    "onContinue": true,
+    "onFailure": true,
+    "rules": {
+      "minTaskBytes": 16384,
+      "afterContinuations": 1,
+      "afterFailedAttempts": 1,
+      "onCategories": [
+        "task",
+        "verify"
+      ]
+    },
+    "decision": "auto",
+    "model": "",
+    "timeoutMin": 5,
+    "preferOverEscalation": true,
+    "maxPerTask": 1
   },
   "retry": {
     "maxAttempts": 3,

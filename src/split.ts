@@ -10,7 +10,7 @@ import { lintCommand, runDocsSession } from './prepare.js';
 import { taskFileBody } from './prompt.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { canonicalId, formatTaskId, parseTaskId, parseRoadmap, patchRoadmapFile, statusFromMarkers, type Roadmap } from './roadmap.js';
-import { haltBanner, preflight, type RunContext, type RunFlags } from './runner.js';
+import { haltBanner, preflight, type RunContext } from './runner.js';
 import { acquireLock, DONE_STATES, releaseLock, saveState, startLockHeartbeat, type State } from './state.js';
 import { updatePipelineStatus } from './status.js';
 import { discoverTasks, type Task } from './tasks.js';
@@ -28,6 +28,21 @@ export interface SplitOptions {
   /** Extra guidance handed to the splitting session. */
   note?: string;
   dryRun: boolean;
+  /**
+   * The caller already holds the run's lock and branch (an automatic breakdown inside `run`), so the
+   * split must not acquire or release it: releasing it would let a second `run` start concurrently.
+   */
+  keepLock?: boolean;
+}
+
+export interface SplitResult {
+  code: number;
+  /** The task that was split (or would have been, in a dry run). */
+  parentId: string;
+  /** The subtask ids, in execution order, when the split succeeded. */
+  children: string[];
+  /** One-line detail when `code` is non-zero. */
+  error?: string;
 }
 
 /** The child ids a split of `parent` may use, in execution order, skipping ids already in the roadmap. */
@@ -140,15 +155,6 @@ export function applySplitState(paths: Paths, state: State, parentId: string, lo
   saveState(paths, state);
 }
 
-/** Point a run's task selection at the subtasks that replaced the split parent. */
-export function retargetFlags(flags: RunFlags, parentId: string, childIds: string[]): void {
-  if (flags.only?.length) {
-    flags.only = flags.only.flatMap((raw) => (canonicalId(raw) === parentId ? childIds : [raw]));
-  }
-  if (flags.from && canonicalId(flags.from) === parentId && childIds.length) flags.from = childIds[0];
-  if (flags.to && canonicalId(flags.to) === parentId && childIds.length) flags.to = childIds[childIds.length - 1];
-}
-
 function parentStatusLine(task: Task, ctx: RunContext): string {
   const st = ctx.state.tasks[task.id];
   if (!st) return 'pending (never run)';
@@ -212,11 +218,13 @@ export function buildSplitPrompt(ctx: RunContext, parent: Task, opts: { sequence
 /**
  * Break one task into subtasks: lint, hand the task file and the roadmap to one agent session that
  * rewrites the plan, validate the rewrite, reconcile the parent's state away, and commit the docs
- * change. The subtasks then run in the parent's place like any other task.
+ * change. The subtasks then run in the parent's place like any other task. Shared by the `split`
+ * command, the run view's `b` key and the automatic breakdowns inside a run.
  */
-export async function splitCommand(ctx: RunContext, opts: SplitOptions): Promise<number> {
+export async function splitTask(ctx: RunContext, opts: SplitOptions): Promise<SplitResult> {
   const { paths, config, log, state } = ctx;
   const docsRel = rel(paths.root, paths.docs);
+  const fail = (code: number, parentId: string, error: string): SplitResult => ({ code, parentId, children: [], error });
   const id = canonicalId(opts.id);
   const parent = id ? ctx.tasks.find((t) => t.id === id) : undefined;
   if (!parent) throw new UsageError(`split ${opts.id}: no such task in ROADMAP.md`);
@@ -245,7 +253,7 @@ export async function splitCommand(ctx: RunContext, opts: SplitOptions): Promise
   formatLint(before).forEach((l) => log.plain(l));
 
   // A halt anywhere else is a real blocker; a halt on this task is exactly what a split remedies.
-  if (state.halted && state.halted.taskId !== parent.id) { haltBanner(ctx, state.halted); return 3; }
+  if (state.halted && state.halted.taskId !== parent.id) { haltBanner(ctx, state.halted); return fail(3, parent.id, `halted on ${state.halted.taskId ?? '?'} (${state.halted.category})`); }
 
   const { spec, warnings } = resolveSession(config, undefined, ctx.cli, process.env, (p) => getProvider(p).supportsBudget, variantSupported);
   warnings.forEach((w) => log.warn(w));
@@ -257,11 +265,16 @@ export async function splitCommand(ctx: RunContext, opts: SplitOptions): Promise
     log.plain(`\nprovider: ${spec.providerName} [${spec.sources.provider}] · model: ${spec.model ?? 'provider default'} [${spec.sources.model}]${spec.variant ? ` · variant: ${spec.variant} [${spec.sources.variant}]` : ''} · timeout ${config.prepareTimeoutMin} min`);
     log.plain(`parent: ${parent.id} — ${parent.title} [${status}] → ${(expected ?? sequence.slice(0, 3)).join(', ')}${expected ? '' : ', …'}`);
     log.plain(`--- split prompt (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);
-    return 0;
+    return { code: 0, parentId: parent.id, children: expected ?? [] };
   }
   // The halt on this task (if any) is about to be cleared by the split, so preflight must not
-  // refuse the run because of it; a halt anywhere else returned above.
-  if (!preflight(ctx, spec, provider, { ignoreHalt: state.halted?.taskId === parent.id })) { log.error('preflight failed; fix the ✗ items above'); return 4; }
+  // refuse the run because of it; a halt anywhere else returned above. An automatic breakdown runs
+  // inside a run that already passed preflight with this provider, so only the standalone command
+  // (and the run view's `b`) preflights here.
+  if (!opts.keepLock && !preflight(ctx, spec, provider, { ignoreHalt: state.halted?.taskId === parent.id })) {
+    log.error('preflight failed; fix the ✗ items above');
+    return fail(4, parent.id, 'preflight failed');
+  }
 
   // Deterministic skeleton first, so the session always has tasks/ and design/ to write into, and a
   // PROGRESS.md to append to.
@@ -274,16 +287,21 @@ export async function splitCommand(ctx: RunContext, opts: SplitOptions): Promise
   if (created.length || added.length) findings = lintDocs(paths, { design: config.designDocs });
   const prompt = buildSplitPrompt(ctx, parent, { ...plan, findings });
 
-  acquireLock(paths);
-  ctx.startBranch = currentBranch(paths.root);
-  const stopHeartbeat = startLockHeartbeat(paths);
+  // An automatic breakdown runs inside a live run: the caller owns the lock and the branch, and
+  // releasing either here would break the run.
+  const ownsLock = opts.keepLock !== true;
+  if (ownsLock) {
+    acquireLock(paths);
+    ctx.startBranch = currentBranch(paths.root);
+  }
+  const stopHeartbeat = ownsLock ? startLockHeartbeat(paths) : undefined;
   try {
     const childNote = expected ? expected.join(', ') : `${sequence[0]}…`;
     const label = `split: breaking ${parent.id} — ${parent.title} into ${childNote}`;
     const { outcome, early } = await runDocsSession(ctx, spec, provider, {
       prompt, runName: `split-${parent.id}`, taskId: `split-${parent.id}`, label, timeoutMin: config.prepareTimeoutMin,
     });
-    if (early !== undefined) return early;
+    if (early !== undefined) return fail(early, parent.id, `split session ended early (exit ${early})`);
 
     // The agent rewrote the plan on disk: reload it and check it against the rules before committing.
     const text = readFileSync(paths.roadmap, 'utf8');
@@ -296,20 +314,20 @@ export async function splitCommand(ctx: RunContext, opts: SplitOptions): Promise
       discovered.warnings.forEach((w) => log.warn(w));
     } catch (e) {
       log.error(`split: the rewritten plan does not parse (${(e as Error).message}); refusing to commit. Fix it by hand or run \`symphony split\` again.`);
-      return 2;
+      return fail(2, parent.id, 'the rewritten plan does not parse');
     }
     const check = checkSplit({ parent, before: ctx.tasks, after, roadmap, sequence, expected, paths });
     if (!check.ok) {
       check.errors.forEach((e) => log.error(`split: ${e}`));
       log.error(`split: refusing to commit. Nothing was recorded; fix ${rel(paths.root, paths.roadmap)} by hand or run \`symphony split ${parent.id}\` again.`);
-      return 2;
+      return fail(2, parent.id, check.errors[0] ?? 'the rewrite failed validation');
     }
     const afterLint = lintDocs(paths, { design: config.designDocs });
     log.plain('--- lint (after)');
     formatLint(afterLint).forEach((l) => log.plain(l));
     if (!afterLint.ok) {
       log.error(`${docsRel}/ is still not in the expected format after the split; fix the ✗ items by hand or run \`symphony split ${parent.id}\` again`);
-      return 2;
+      return fail(2, parent.id, `${docsRel}/ is still not in the expected format after the split`);
     }
 
     applySplitState(paths, state, parent.id, log);
@@ -321,9 +339,14 @@ export async function splitCommand(ctx: RunContext, opts: SplitOptions): Promise
     const commit = commitAll(paths.root, `docs: split ${parent.id} into ${childIds.join(', ')} [split]`, (m) => log.warn(m), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore, expectedBranch: ctx.startBranch });
     log.info(`split: git ${describeCommit(commit)}${outcome.costUsd !== undefined ? ` · $${outcome.costUsd.toFixed(2)}` : ''}`);
     log.info(`split: ${parent.id} — ${parent.title} → ${childIds.join(', ')}; next: \`symphony run\``);
-    return 0;
+    return { code: 0, parentId: parent.id, children: childIds };
   } finally {
-    stopHeartbeat();
-    releaseLock(paths);
+    stopHeartbeat?.();
+    if (ownsLock) releaseLock(paths);
   }
+}
+
+/** The `split` command: the exit code of {@link splitTask}. */
+export async function splitCommand(ctx: RunContext, opts: SplitOptions): Promise<number> {
+  return (await splitTask(ctx, opts)).code;
 }

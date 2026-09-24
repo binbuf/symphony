@@ -81,6 +81,28 @@ test('doctor fails on a lock held by a live process and on a sticky halt', async
   }
 });
 
+test('doctor reports the breakdown block: stages, decision chain and rules', () => {
+  const { paths, state } = project();
+  const off = runDoctor({ paths, config: { ...DEFAULTS, provider: 'fake' }, state });
+  assert.equal(off.find((c) => c.name === 'breakdown'), undefined, 'silent while the block is off');
+
+  const config = {
+    ...DEFAULTS, provider: 'fake' as const,
+    breakdown: { ...DEFAULTS.breakdown, enabled: true, onStart: true, decision: 'auto' as const },
+  };
+  const checks = runDoctor({ paths, config, state });
+  const line = checks.find((c) => c.name === 'breakdown');
+  assert.equal(line?.level, 'ok');
+  assert.match(line?.detail ?? '', /on start\/continue\/failure/);
+  assert.match(line?.detail ?? '', /decision auto \(jev → opencode · openrouter\/deepseek\/deepseek-v4\.1-flash → rules\)/);
+  assert.match(line?.detail ?? '', /max 1 per task/);
+
+  // Enabled but no stage on is a warning, not a failure.
+  const noStage = runDoctor({ paths, config: { ...config, breakdown: { ...config.breakdown, onStart: false, onContinue: false, onFailure: false } }, state });
+  assert.equal(noStage.find((c) => c.name === 'breakdown')?.level, 'warn');
+  assert.match(noStage.find((c) => c.name === 'breakdown')?.detail ?? '', /nothing will trigger/);
+});
+
 test('doctor halt advice names --retry for an attempts halt, clear-halt otherwise', () => {
   const { paths, state } = project();
   const config = { ...DEFAULTS, provider: 'fake' as const };

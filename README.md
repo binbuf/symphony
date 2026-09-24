@@ -6,7 +6,7 @@ symphony lives in `<your target project>/.symphony/` (gitignored) and reads its 
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Pipeline watch](#pipeline-watch) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Pipeline watch](#pipeline-watch) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -192,6 +192,7 @@ On exit the terminal is restored and the last lines are replayed to normal scrol
 | **fatal error** — auth, no credits, usage limit, unknown model, bad config, missing binary | the run **halts**: banner, exit `3`, sticky in `state.json`; later `run`s refuse to start |
 | task fails **twice in a row**, or one task fails **3 times** | the run halts (thresholds configurable) |
 | `continue` past `maxContinuations` | treated as failed |
+| a `breakdown` stage fires (task starts too big, `continue` boundary, failure) | one decision — Jev → fallback LLM → rules — answers split / carry on / escalate / stop; a split rewrites the task into subtasks and the run continues on the children in the same invocation |
 | `maxIterationsPerTask` / `maxTasksPerRun` / `--budget` reached | the task fails gracefully, or the run processes only the first N tasks, with a clear summary |
 | `touch .stop` (path configurable) | pauses at the next boundary — before the next task, or after the current slice when a task is split via `continue` — exit `0`; nothing is killed, and a mid-continuation pause resumes the right slice next run. `touch .symphony/STOP` is the legacy alias. In the TUI, `p` toggles the sentinel now and `P` queues a pause at a chosen task, placing the sentinel when the run reaches it |
 | commit fails (pre-commit hook, signing, `index.lock`) or a session switched branches | retried once; if it still fails the task is demoted to `failed` instead of recorded `done`, because its work did not land in git |
@@ -236,6 +237,7 @@ Everything that can happen to a task, and what you do about it.
 | 14 | `maxIterationsPerTask` / `maxTasksPerRun` / budget hit | task fails gracefully, or the run processes only the first N tasks | task `failed` / rest `pending` | – | raise the limit, or `symphony split` the task |
 | 15 | you tick `[x]` by hand | next load reconciles state to the roadmap tick | `[x]` | – | nothing |
 | 16 | `reset T05 --revert` | clears state and reverts the task's commits newest-first; on conflict it stops and tells you to resolve | `[ ]` pending | 0 | fix conflicts if any, then `run` |
+| 17 | `breakdown.enabled` and a task looks too big (at its start, after a `continue` slice, or where it would escalate/fail) | one decision (Jev → fallback LLM → rules) answers split / carry on / escalate / stop; a split runs the split session, commits the rewritten plan and continues the run on the subtasks | `T10` → `T10a`, `T10b` (parent state pruned) | – | nothing; `breakdown.decision: "rules"` keeps it offline and free |
 
 The pipeline stops for a human only when a task itself reports `blocked`, or a fatal provider/config problem halts the run. Everything else — transient errors, large tasks, missing result blocks — is handled by retry, continuation and nudge.
 
@@ -266,7 +268,53 @@ One agent session reads the task file, its state and last failure, the roadmap a
 
 Subtasks run like any other task: the next `symphony run` picks them up where the parent would have run. Only unfinished tasks can be split (`pending`, `failed`, `blocked`, or interrupted by Ctrl-C/the TUI); `done` and `accepted` ones stay as history. Splitting goes one level at a time — a subtask can be split again into `T05a1`, `T05a2`, … — and work the parent already committed stays in git history for the children to build on or ignore.
 
-In the run view, press `b` on the selected task: the run pauses at the next boundary (or the session is stopped when that task is the one running), the same split logic runs with its output in the live panel, and the run resumes automatically on the subtasks. A halted task can be split too — the halt is a symptom of the oversized task, and a successful split clears it.
+In the run view, press `b` on the selected task: the run pauses at the next boundary (or the session is stopped when that task is the one running), the same split logic runs with its output in the live panel, and the run resumes automatically on the subtasks. A halted task can be split too — the halt is a symptom of the oversized task, and a successful split clears it. Prefer the harness to notice by itself? [Automatic breakdowns](#automatic-breakdowns) trigger the same move at a task's start, at a `continue` boundary, or instead of an escalation.
+
+## Automatic breakdowns
+
+`symphony split` is manual; the `breakdown` block makes the same move automatic. When a task looks too big — before it starts, at a `continue` boundary, or where the harness would otherwise escalate a failure — one decision answers *split*, *carry on*, *escalate* or *stop*. A *split* runs the same session as `symphony split`, commits the rewritten plan, and the run reloads `ROADMAP.md` and carries on with the subtasks in the same invocation.
+
+```json
+"breakdown": {
+  "enabled": true,
+  "onStart": true,
+  "onContinue": true,
+  "onFailure": true,
+  "rules": {
+    "minTaskBytes": 16384,
+    "afterContinuations": 1,
+    "afterFailedAttempts": 1,
+    "onCategories": ["task", "verify"]
+  },
+  "decision": "auto",
+  "model": "openrouter/deepseek/deepseek-v4.1-flash",
+  "timeoutMin": 5,
+  "preferOverEscalation": true,
+  "maxPerTask": 1
+}
+```
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | master switch |
+| `onStart` | `false` | decide before a task runs; the rules open it when the task file body is at least `rules.minTaskBytes` |
+| `onContinue` | `true` | decide at a `continue` boundary instead of starting another slice (`rules.afterContinuations`) |
+| `onFailure` | `true` | decide where the harness would escalate or fail (`rules.afterFailedAttempts`, `rules.onCategories`) |
+| `rules.minTaskBytes` | `16384` | `onStart` trigger: task file body size that opens the decision (0 = every task) |
+| `rules.afterContinuations` | `1` | `onContinue` trigger: continuation sessions already run before the decision opens (0 = after the very first slice) |
+| `rules.afterFailedAttempts` | `1` | `onFailure` trigger: sessions already run before the decision opens |
+| `rules.onCategories` | `[task, verify]` | `onFailure` categories that open the decision; infrastructure failures (auth, rate limits, timeouts) never do |
+| `decision` | `auto` | who answers: `auto` (Jev → fallback LLM → rules), `jev`, `llm`, or `rules` |
+| `provider` `.model` `.variant` | the `watch` block's | where the fallback LLM runs (OpenCode `provider/model`, e.g. `openrouter/deepseek/deepseek-v4.1-flash`) |
+| `timeoutMin` | `5` | hard cap on one fallback-LLM decision |
+| `preferOverEscalation` | `true` | with `decision: rules` (and as the last resort), split rather than escalate when both are possible |
+| `maxPerTask` | `1` | automatic breakdowns one task may take in a run (0 = unlimited) |
+
+The decision chain is **Jev** (`jev.breakdownDecision`, one typed call, discarded below `jev.minConfidence`) → **fallback LLM** (one read-only session with a self-contained snapshot, `autoApprove: false`, its own `provider`/`model` so it can be cheap) → **deterministic rules**. A source that is off, unavailable, slow or unsure falls through to the next, so the rules always answer — `decision: "rules"` makes the whole thing free, offline and fully predictable. Both model sources report their cost, and it counts against `maxCostUsdPerRun` like a session's.
+
+The answer means: **split** break the task down now, **run**/**continue** carry on as the harness would, **escalate** hand it to the escalation model immediately (skipping the separate `escalationDecision` gate, since this call just decided), **stop** fail the task without escalating. Every answer is logged, e.g. `T05: continue breakdown (rules): continuation 1 (>= breakdown.rules.afterContinuations 1); split instead of another slice`, and a split in the TUI toasts `broke T05 into T05a, T05b; resuming` after the view refreshes.
+
+Breakdowns are bounded on purpose: `maxPerTask` caps how often one task is split in a run, the id grammar caps depth (`T10` → `T10a`…, a subtask → `T10a1`…, a twice-split task not at all), `maxTasksPerRun` still counts tasks the run has started (a breakdown cannot buy more), and `maxContinuations` still caps the slices. A rewrite that fails validation leaves the task exactly as it was, and the run falls back to its ordinary behaviour — escalate, fail or continue — so a breakdown can only ever help.
 
 ## Multiple task sets
 
@@ -461,6 +509,7 @@ It runs up to three independent **workflows**, each behind its own flag:
   "resultFallback": true,
   "failureTriage": true,
   "escalationDecision": true,
+  "breakdownDecision": true,
   "provider": "openrouter",
   "model": "jev-latest",
   "apiKeyEnv": "OPENROUTER_API_KEY",
@@ -476,6 +525,7 @@ It runs up to three independent **workflows**, each behind its own flag:
 | `resultFallback` | `true` | settle a session that omitted its `SYMPHONY_RESULT` block |
 | `failureTriage` | `true` | place a failure the regex classifier could not |
 | `escalationDecision` | `true` | decide whether a failed task is worth escalating |
+| `breakdownDecision` | `true` | decide split / carry on / escalate / stop for an open [automatic breakdown](#automatic-breakdowns) |
 | `provider` | `openrouter` | where the System One call goes; `baseUrl` overrides it |
 | `baseUrl` | – | override the provider's base URL (e.g. a self-hosted gateway) |
 | `model` | `jev-latest` | System One model id; `jev-latest` tracks the newest Jev release |
@@ -499,6 +549,10 @@ A session that ended cleanly without a `SYMPHONY_RESULT` block is normally recov
 When [escalation](#escalation) is enabled and a task fails on an `onCategories` trigger, Jev reads the **task** (title and body) plus the failure and answers a `choice`: would a more capable model plausibly complete this from the same context, or is the task stuck on missing context or a human decision a stronger model cannot supply either? If Jev confidently says a stronger model would not help, the harness skips the escalation session and fails the task as it otherwise would.
 
 This is a gate, not a router: `onCategories` is still the trigger, infrastructure failures still never escalate, and any Jev problem escalates as configured. Jev can only *decline* an escalation — it never adds one.
+
+### `breakdownDecision`
+
+When the [`breakdown` block](#automatic-breakdowns) is enabled and one of its gates opens — a task starts and its file is large, a slice ends with `continue`, or a task fails — Jev reads the task (title and body), the stage and the evidence (the failure, or the continuation count and last slice summary), and answers a `choice`: `split` (smaller subtasks are more likely to succeed than a stronger model), `escalate` (a more capable model would plausibly finish it from the same context), `stop` (neither helps), or `proceed` (let the harness take its ordinary path). A confident `split` runs the same session as `symphony split`, then the run continues on the subtasks; a confident `escalate` goes straight to the escalation model without asking `escalationDecision` a second time. Below `minConfidence`, or with no key, the chain moves on to the fallback LLM and then the rules — so `breakdownDecision` can only *choose* among the options, never block a run.
 
 `symphony doctor` reports which workflows are armed and whether the key is present; a missing key halts the next `run` (exit `3`) until it is set or `jev.enabled` is turned off.
 
@@ -571,8 +625,9 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `retry.maxAttempts`, `retry.backoffSec` | `3`, `[30,120,300]` | transient-error retries |
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
 | `escalation.enabled`, `.provider`, `.model`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `openrouter/z-ai/glm-5.3`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
-| `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
+| `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `openrouter/deepseek/deepseek-v4.1-flash`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
+| `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.rules.*`, `.decision`, `.provider`, `.model`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `16384`/`1`/`1`/`[task, verify]`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
 
 ## Hooks

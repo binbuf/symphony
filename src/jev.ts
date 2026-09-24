@@ -242,6 +242,94 @@ export function parseEscalationDecision(json: unknown): JevEscalationDecision | 
   return { escalate: choice.choice === 'escalate', confidence: choice.confidence, probabilities: choice.probabilities, model: choice.model, costUsd: choice.costUsd };
 }
 
+/** What the harness may do with a task an automatic-breakdown decision is asked about. */
+export const BREAKDOWN_ACTIONS = ['split', 'proceed', 'escalate', 'stop'] as const;
+export type JevBreakdownAction = (typeof BREAKDOWN_ACTIONS)[number];
+
+/** The stage a breakdown decision is made at: before a task starts, at a `continue` boundary, or on failure. */
+export type BreakdownStage = 'start' | 'continue' | 'failure';
+
+export interface JevBreakdownDecision {
+  action: JevBreakdownAction;
+  confidence: number;
+  probabilities?: Record<string, number>;
+  model?: string;
+  costUsd?: number;
+}
+
+export interface JevBreakdownInput {
+  stage: BreakdownStage;
+  taskTitle: string;
+  taskBody?: string;
+  /** The task's recorded status at the decision point. */
+  status: string;
+  /** Sessions this task has used so far. */
+  attempts: number;
+  /** Continuation sessions used so far (stage `continue`). */
+  continuations: number;
+  /** The continuation summary or failure message that opened the decision. */
+  reason?: string;
+}
+
+/**
+ * The options Jev may pick per stage. `proceed` means "carry on as the harness otherwise would"
+ * (run the task, start the next slice, or take the ordinary failure path including escalation);
+ * `escalate` skips the ordinary escalation gate because this call already decided it; `stop` fails
+ * the task without escalating. Only the failure stage offers escalate/stop.
+ */
+const BREAKDOWN_QUESTIONS: Record<BreakdownStage, { instructions: string; criteria: Record<string, string> }> = {
+  start: {
+    instructions: 'A coding agent is about to start this task in one unattended session. Is the task sized for that, or is it really several pieces of work that should be split into smaller subtasks first?',
+    criteria: {
+      run: 'The task is one coherent piece of work that a single session can plausibly finish; run it as it is.',
+      split: 'The task mixes several independent pieces of work, or is clearly larger than one session; split it into smaller subtasks first.',
+    },
+  },
+  continue: {
+    instructions: 'A coding agent has already used one or more sessions on this task, each ending with "continue" (unfinished). Another slice is about to start. Should it keep going, or is the task too large for this approach?',
+    criteria: {
+      continue: 'The work is progressing and one or a few more slices will plausibly finish it; keep going.',
+      split: 'The task keeps producing slices without converging, or is too large to finish this way; split it into smaller subtasks.',
+    },
+  },
+  failure: {
+    instructions: 'A coding agent failed to finish this task. Should the harness break the task into smaller subtasks, retry it on a more capable model, or give up?',
+    criteria: {
+      split: 'The task is too large or mixes several jobs; smaller subtasks are more likely to succeed than a stronger model.',
+      escalate: 'The task is the right size and a more capable model would plausibly finish it from the same context.',
+      stop: 'Neither would help: the task needs missing context or a human decision, or it is a dead end.',
+      proceed: 'Unclear; let the harness take its ordinary failure path.',
+    },
+  },
+};
+
+/**
+ * Ask Jev what to do with a task an automatic breakdown is being considered for. The task body is
+ * the main input: the question is whether the work is too large (split), sized for a stronger model
+ * (escalate), or stuck on something neither can supply (stop).
+ */
+export async function classifyBreakdown(config: JevConfig, input: JevBreakdownInput, deps: JevDeps = {}): Promise<JevBreakdownDecision | undefined> {
+  const question = BREAKDOWN_QUESTIONS[input.stage];
+  const json = await callSystemOne(
+    config,
+    {
+      task: { title: input.taskTitle, body: input.taskBody ? tail(input.taskBody, 8000) : null },
+      harness: { stage: input.stage, status: input.status, sessions: input.attempts, continuations: input.continuations },
+      evidence: input.reason ? tail(input.reason, 2000) : null,
+    },
+    { decision: { type: 'choice', instructions: question.instructions, criteria: question.criteria } },
+    deps,
+  );
+  return parseBreakdownDecision(json);
+}
+
+/** Read the `decision` choice of a breakdown call. Exported for tests. */
+export function parseBreakdownDecision(json: unknown): JevBreakdownDecision | undefined {
+  const choice = readChoice(json, 'decision');
+  if (!choice || !(BREAKDOWN_ACTIONS as readonly string[]).includes(choice.choice)) return undefined;
+  return { action: choice.choice as JevBreakdownAction, confidence: choice.confidence, probabilities: choice.probabilities, model: choice.model, costUsd: choice.costUsd };
+}
+
 /** Read the `disposition` choice out of a System One response. Exported for tests. */
 export function parseDecision(json: unknown): JevDecision | undefined {
   const choice = readChoice(json, 'disposition');

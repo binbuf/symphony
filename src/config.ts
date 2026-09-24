@@ -77,6 +77,8 @@ export interface JevConfig {
   failureTriage: boolean;
   /** Workflow: read the task + failure and decide whether escalating to the escalation model is worth it. */
   escalationDecision: boolean;
+  /** Workflow: read the task and its progress and answer split / proceed / escalate / stop for an automatic breakdown. */
+  breakdownDecision: boolean;
   provider: JevProviderName;
   /** Overrides the provider's base URL (e.g. a self-hosted gateway). */
   baseUrl?: string;
@@ -113,6 +115,53 @@ export interface WatchConfig {
   variant?: string;
   /** Hard wall clock for one check; on timeout the check is abandoned. */
   timeoutMin: number;
+}
+
+/** The deterministic triggers that open a breakdown decision, per stage. */
+export interface BreakdownRules {
+  /** `onStart` trigger: only ask when the task file body is at least this many bytes (0 = every task). */
+  minTaskBytes: number;
+  /** `onContinue` trigger: ask once this many continuation sessions have already run (0 = after the first slice). */
+  afterContinuations: number;
+  /** `onFailure` trigger: ask once the task has failed at least this many sessions. */
+  afterFailedAttempts: number;
+  /** `onFailure` trigger: failure categories that open the decision. */
+  onCategories: string[];
+}
+
+/**
+ * Automatic task breakdown: when a task looks too big (before it starts, after a `continue` slice,
+ * or instead of escalating a failure), one decision — Jev, a fallback LLM, or the deterministic
+ * rules — breaks it into subtasks with the same machinery as `symphony split`, and the run resumes
+ * on the children. Off by default; the rules are the always-available last resort in the chain.
+ */
+export interface BreakdownConfig {
+  /** Master switch for every stage below. */
+  enabled: boolean;
+  /** Ask before running a task whether it should be broken down first. */
+  onStart: boolean;
+  /** Ask at each `continue` boundary whether to run the next slice or break the task down. */
+  onContinue: boolean;
+  /** Ask when a task fails / its verify rejects a `done` / continuations run out, instead of escalating first. */
+  onFailure: boolean;
+  rules: BreakdownRules;
+  /**
+   * Which decision source answers: `auto` tries Jev, then the fallback LLM, then the rules; the other
+   * values pin one source (each still falls back to the rules when it has no usable answer).
+   */
+  decision: 'auto' | 'jev' | 'llm' | 'rules';
+  /** Provider the fallback LLM decision runs on (defaults to the watch block's provider). */
+  provider?: ProviderName;
+  /** Model the fallback LLM runs (defaults to the watch block's model). */
+  model: string;
+  /** Optional reasoning-effort override for the fallback LLM. Unset = the provider's default. */
+  variant?: string;
+  /** Hard wall clock for one fallback-LLM decision; on timeout the rules answer. */
+  timeoutMin: number;
+  /** With `decision: rules`, break the task down rather than escalating when both are possible. */
+  preferOverEscalation: boolean;
+  /** How many automatic breakdowns one task may take in a single run (0 = unlimited). */
+  maxPerTask: number;
 }
 
 /**
@@ -188,6 +237,8 @@ export interface Config {
   jev: JevConfig;
   /** Periodic read-only progress/health summary in the TUI. See WatchConfig. */
   watch: WatchConfig;
+  /** Automatic task breakdown at task start, at a `continue` boundary, or instead of escalating. See BreakdownConfig. */
+  breakdown: BreakdownConfig;
 }
 
 export interface CliOverrides {
@@ -261,6 +312,7 @@ export const DEFAULTS: Config = {
     resultFallback: true,
     failureTriage: true,
     escalationDecision: true,
+    breakdownDecision: true,
     provider: 'openrouter',
     model: 'jev-latest',
     apiKeyEnv: 'OPENROUTER_API_KEY',
@@ -274,6 +326,24 @@ export const DEFAULTS: Config = {
     provider: 'opencode',
     model: 'openrouter/deepseek/deepseek-v4.1-flash',
     timeoutMin: 5,
+  },
+  breakdown: {
+    enabled: false,
+    onStart: false,
+    onContinue: true,
+    onFailure: true,
+    rules: {
+      minTaskBytes: 16384,
+      afterContinuations: 1,
+      afterFailedAttempts: 1,
+      onCategories: ['task', 'verify'],
+    },
+    decision: 'auto',
+    provider: undefined,
+    model: '',
+    timeoutMin: 5,
+    preferOverEscalation: true,
+    maxPerTask: 1,
   },
 };
 
@@ -435,6 +505,8 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const escRaw = isRecord(raw.escalation) ? raw.escalation : {};
   const jevRaw = isRecord(raw.jev) ? raw.jev : {};
   const watchRaw = isRecord(raw.watch) ? raw.watch : {};
+  const breakRaw = isRecord(raw.breakdown) ? raw.breakdown : {};
+  const breakRulesRaw = isRecord(breakRaw.rules) ? breakRaw.rules : {};
 
   const config: Config = {
     provider: raw.provider === undefined ? DEFAULTS.provider : asProviderName(raw.provider, 'symphony.config.json provider'),
@@ -546,6 +618,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         resultFallback: boolOr(jevRaw.resultFallback, DEFAULTS.jev.resultFallback, 'jev.resultFallback', warnings),
         failureTriage: boolOr(jevRaw.failureTriage, DEFAULTS.jev.failureTriage, 'jev.failureTriage', warnings),
         escalationDecision: boolOr(jevRaw.escalationDecision, DEFAULTS.jev.escalationDecision, 'jev.escalationDecision', warnings),
+        breakdownDecision: boolOr(jevRaw.breakdownDecision, DEFAULTS.jev.breakdownDecision, 'jev.breakdownDecision', warnings),
         provider,
         baseUrl: typeof jevRaw.baseUrl === 'string' && jevRaw.baseUrl.trim() ? jevRaw.baseUrl.trim() : undefined,
         model,
@@ -590,6 +663,48 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
           return undefined;
         })(),
         timeoutMin: positiveOr(watchRaw.timeoutMin, DEFAULTS.watch.timeoutMin, 'watch.timeoutMin', warnings),
+      };
+    })(),
+    breakdown: (() => {
+      let provider: ProviderName | undefined;
+      if (breakRaw.provider !== undefined && breakRaw.provider !== null) {
+        if (typeof breakRaw.provider === 'string' && (PROVIDER_NAMES as string[]).includes(breakRaw.provider)) {
+          provider = breakRaw.provider as ProviderName;
+        } else {
+          warnings.push(`breakdown.provider: expected one of ${PROVIDER_NAMES.join(', ')}, got ${JSON.stringify(breakRaw.provider)}; using the watch provider`);
+        }
+      }
+      const decision = (() => {
+        const v = breakRaw.decision;
+        if (v === undefined || v === null) return DEFAULTS.breakdown.decision;
+        if (v === 'auto' || v === 'jev' || v === 'llm' || v === 'rules') return v;
+        warnings.push(`breakdown.decision: expected "auto", "jev", "llm" or "rules", got ${JSON.stringify(v)}; using ${DEFAULTS.breakdown.decision}`);
+        return DEFAULTS.breakdown.decision;
+      })();
+      return {
+        enabled: boolOr(breakRaw.enabled, DEFAULTS.breakdown.enabled, 'breakdown.enabled', warnings),
+        onStart: boolOr(breakRaw.onStart, DEFAULTS.breakdown.onStart, 'breakdown.onStart', warnings),
+        onContinue: boolOr(breakRaw.onContinue, DEFAULTS.breakdown.onContinue, 'breakdown.onContinue', warnings),
+        onFailure: boolOr(breakRaw.onFailure, DEFAULTS.breakdown.onFailure, 'breakdown.onFailure', warnings),
+        rules: {
+          minTaskBytes: Math.max(0, numberOr(breakRulesRaw.minTaskBytes, DEFAULTS.breakdown.rules.minTaskBytes, 'breakdown.rules.minTaskBytes', warnings)),
+          afterContinuations: Math.max(0, numberOr(breakRulesRaw.afterContinuations, DEFAULTS.breakdown.rules.afterContinuations, 'breakdown.rules.afterContinuations', warnings)),
+          afterFailedAttempts: Math.max(0, numberOr(breakRulesRaw.afterFailedAttempts, DEFAULTS.breakdown.rules.afterFailedAttempts, 'breakdown.rules.afterFailedAttempts', warnings)),
+          onCategories: stringArray(breakRulesRaw.onCategories, DEFAULTS.breakdown.rules.onCategories, 'breakdown.rules.onCategories', warnings),
+        },
+        decision,
+        provider,
+        model: typeof breakRaw.model === 'string' ? breakRaw.model.trim() : DEFAULTS.breakdown.model,
+        variant: (() => {
+          const v = breakRaw.variant;
+          if (v === undefined || v === null) return undefined;
+          if (typeof v === 'string') return v.trim() || undefined;
+          warnings.push(`breakdown.variant: expected a string, got ${JSON.stringify(v)}; using provider default`);
+          return undefined;
+        })(),
+        timeoutMin: positiveOr(breakRaw.timeoutMin, DEFAULTS.breakdown.timeoutMin, 'breakdown.timeoutMin', warnings),
+        preferOverEscalation: boolOr(breakRaw.preferOverEscalation, DEFAULTS.breakdown.preferOverEscalation, 'breakdown.preferOverEscalation', warnings),
+        maxPerTask: Math.max(0, numberOr(breakRaw.maxPerTask, DEFAULTS.breakdown.maxPerTask, 'breakdown.maxPerTask', warnings)),
       };
     })(),
   };
@@ -735,6 +850,45 @@ export function resolveVerify(config: Config, task: Task | undefined, root?: str
     if (inferred) return { command: inferred, timeoutMin: config.verifyTimeoutMin, source: 'package.json' };
   }
   return undefined;
+}
+
+/**
+ * The read-only fallback-LLM decision spec for automatic breakdowns. Like the watcher it ignores CLI
+ * flags, env and front matter: `breakdown.provider`/`.model` win and fall back to the `watch` block,
+ * so a cheap model can answer the split-or-not question. Pinned to `autoApprove: false`.
+ */
+export function resolveBreakdown(
+  config: Config,
+  variantSupport: (p: ProviderName, bin: string, model: string | undefined, variant: string) => boolean = () => false,
+): { spec: SessionSpec; warnings: string[] } {
+  const b = config.breakdown;
+  const warnings: string[] = [];
+  const providerName = b.provider ?? config.watch.provider;
+  const pc = config.providers[providerName];
+  const model = b.model.trim() || config.watch.model.trim() || pc.model;
+  let variant = b.variant ?? config.watch.variant;
+  if (variant && !variantSupport(providerName, pc.bin, model, variant)) {
+    warnings.push(`${providerName}${model ? ` model ${model}` : ''} does not support variant "${variant}" (breakdown.variant); using provider default`);
+    variant = undefined;
+  }
+  if (providerName === 'opencode' && model && !model.includes('/')) {
+    warnings.push(`opencode models are "provider/model" (e.g. openrouter/deepseek/deepseek-v4.1-flash); breakdown.model got "${model}"`);
+  }
+  return {
+    spec: {
+      providerName,
+      bin: pc.bin,
+      model: model || undefined,
+      variant,
+      extraArgs: pc.extraArgs,
+      budgetUsd: undefined,
+      timeoutMin: b.timeoutMin,
+      idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
+      autoApprove: false,
+      sources: { provider: b.provider ? 'breakdown' : 'watch', model: b.model ? 'breakdown' : 'watch', variant: b.variant ? 'breakdown' : variant ? 'watch' : 'provider default' },
+    },
+    warnings,
+  };
 }
 
 /**

@@ -15,7 +15,7 @@ import { resolvePaths, taskSetOverrides, type PathOverrides } from './paths.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { nudgeCommand, runCommand, type RunContext, type RunFlags } from './runner.js';
 import { saveState } from './state.js';
-import { splitCommand } from './split.js';
+import { splitCommand, splitTask } from './split.js';
 import { runWithTui } from './tui/index.js';
 import { UsageError } from './util.js';
 
@@ -78,6 +78,11 @@ Controls
                            progress and pipeline health into the TUI's top strip and
                            .symphony/watch.log every watch.intervalMin (default 5 min, on by default;
                            press w in the TUI to check now). Configure via the "watch" config block.
+  automatic breakdowns     with "breakdown": {"enabled": true} in the config, one decision (Jev, then
+                           a fallback LLM, then deterministic rules) can break an oversized task into
+                           subtasks at its start, at a "continue" boundary, or instead of escalating a
+                           failure; the run reloads the plan and resumes on the subtasks. Configure via
+                           the "breakdown" block (see the README).
 
 Exit codes: 0 ok/paused · 1 unexpected error · 2 stopped on a blocked/failed task · 3 halted · 4 usage/preflight · 130/143 interrupted
 Every option also applies to the project given by --root DIR (default: the directory containing .symphony/).
@@ -288,6 +293,9 @@ export async function main(argv: string[]): Promise<number> {
         if (!id) throw new UsageError('nudge: give a task id, e.g. symphony nudge T05');
         return nudgeCommand(ctx, id, v.note);
       }
+      // Automatic breakdowns (config `breakdown`) run the `split` machinery from inside the run,
+      // sharing this run's lock and branch instead of acquiring its own.
+      ctx.performSplit = (taskId) => splitTask(ctx, { id: taskId, dryRun: false, keepLock: true });
       // The full-screen view is the default on a real terminal; --no-tui (or config tui:false, CI, a
       // pipe) falls back to the plain stream. --tui forces it and warns when that is not possible.
       // --dry-run prints prompts meant to be read or piped, so it always stays plain.

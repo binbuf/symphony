@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import type { Logger } from './logger.js';
 import type { Paths } from './paths.js';
-import { parseRoadmap, patchRoadmapFile, type Roadmap } from './roadmap.js';
+import { canonicalId, parseRoadmap, patchRoadmapFile, type Roadmap } from './roadmap.js';
+import type { RunContext, RunFlags } from './runner.js';
 import { loadState, reconcile, saveState, type State } from './state.js';
 import { discoverTasks, type Task } from './tasks.js';
 import { fileExists } from './util.js';
@@ -40,4 +41,28 @@ export function loadProject(paths: Paths, log: Logger): Loaded {
     try { if (patchRoadmapFile(paths.roadmap, t.id, st.status) === 'patched') log.info(`roadmap: ${t.id} marker set to ${st.status} from state`); } catch { /* reported by run */ }
   }
   return { paths, roadmap, tasks, state, warnings };
+}
+
+/**
+ * Point a run's task selection at the subtasks that replaced a split parent, so `--only`/`--from`/
+ * `--to` keep meaning the same work after an automatic breakdown rewrote the plan mid-run.
+ */
+export function retargetFlags(flags: RunFlags, parentId: string, childIds: string[]): void {
+  if (flags.only?.length) {
+    flags.only = flags.only.flatMap((raw) => (canonicalId(raw) === parentId ? childIds : [raw]));
+  }
+  if (flags.from && canonicalId(flags.from) === parentId && childIds.length) flags.from = childIds[0];
+  if (flags.to && canonicalId(flags.to) === parentId && childIds.length) flags.to = childIds[childIds.length - 1];
+}
+
+/**
+ * Adopt a freshly loaded plan on a live run context. The state's `tasks`/`halted` are updated in
+ * place, so closures that already hold the state object (the run loop, the run view) keep seeing the
+ * live rows instead of a stale snapshot.
+ */
+export function applyPlan(ctx: RunContext, loaded: Loaded): void {
+  ctx.roadmap = loaded.roadmap;
+  ctx.tasks = loaded.tasks;
+  ctx.state.tasks = loaded.state.tasks;
+  ctx.state.halted = loaded.state.halted;
 }

@@ -126,10 +126,21 @@ export function runDoctor(i: DoctorInput): Check[] {
 
   if (i.config.jev.enabled) {
     const j = i.config.jev;
-    const workflows = [j.resultFallback ? 'resultFallback' : undefined, j.failureTriage ? 'failureTriage' : undefined, j.escalationDecision ? 'escalationDecision' : undefined].filter(Boolean);
+    const workflows = [j.resultFallback ? 'resultFallback' : undefined, j.failureTriage ? 'failureTriage' : undefined, j.escalationDecision ? 'escalationDecision' : undefined, j.breakdownDecision ? 'breakdownDecision' : undefined].filter(Boolean);
     const problem = jevProblem(j, process.env);
     const detail = `Jev [${workflows.join(', ') || 'no workflows'}] via ${j.provider} · ${j.model} (key from ${j.apiKeyEnv})`;
     add('jev', problem ? 'warn' : 'ok', problem ? `Jev is on but ${problem}; run halts until this is fixed (set ${j.apiKeyEnv}, or jev.enabled=false). ${detail}` : detail);
+  }
+
+  const bd = i.config.breakdown;
+  if (bd.enabled) {
+    const stages = [bd.onStart && 'start', bd.onContinue && 'continue', bd.onFailure && 'failure'].filter(Boolean).join('/');
+    const model = bd.model || i.config.watch.model;
+    const decision = bd.decision === 'rules' ? 'rules' : `${bd.decision} (jev → ${bd.provider ?? i.config.watch.provider}${model ? ` · ${model}` : ''} → rules)`;
+    const rules = `minTaskBytes=${bd.rules.minTaskBytes}, afterContinuations=${bd.rules.afterContinuations}, afterFailedAttempts=${bd.rules.afterFailedAttempts}, onCategories=${bd.rules.onCategories.join('/') || 'none'}`;
+    add('breakdown', stages ? 'ok' : 'warn', stages
+      ? `on ${stages} · decision ${decision} · rules ${rules} · max ${bd.maxPerTask || '∞'} per task`
+      : `breakdown.enabled is true but onStart/onContinue/onFailure are all false; nothing will trigger`);
   }
 
   if (stopPresent(i.paths)) add('stop', 'warn', `${rel(i.paths.root, i.paths.stop)} present; run pauses until it is removed`);

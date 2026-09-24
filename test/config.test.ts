@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { DEFAULTS, findTaskSet, loadConfig, resolveEscalation, resolveSession, resolveVerify, resolveWatch } from '../src/config.js';
+import { DEFAULTS, findTaskSet, loadConfig, resolveBreakdown, resolveEscalation, resolveSession, resolveVerify, resolveWatch } from '../src/config.js';
 import { resolvePaths, taskSetOverrides } from '../src/paths.js';
 import type { Task } from '../src/tasks.js';
 
@@ -471,4 +471,57 @@ test('watch config is on by default every 5 min on OpenCode, parses overrides, a
   const dropped = resolveWatch({ ...DEFAULTS, watch: { ...DEFAULTS.watch, provider: 'fake', model: '', variant: 'high' } }, () => false);
   assert.equal(dropped.spec.variant, undefined);
   assert.ok(dropped.warnings.some((w) => /does not support variant/.test(w)));
+});
+
+test('breakdown config is off by default, parses overrides, and validates keys', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-breakdowncfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+
+  assert.equal(DEFAULTS.breakdown.enabled, false);
+  assert.equal(DEFAULTS.breakdown.decision, 'auto');
+  assert.equal(DEFAULTS.breakdown.onStart, false);
+  assert.equal(DEFAULTS.breakdown.onContinue, true);
+  assert.equal(DEFAULTS.breakdown.onFailure, true);
+  assert.deepEqual(DEFAULTS.breakdown.rules, { minTaskBytes: 16384, afterContinuations: 1, afterFailedAttempts: 1, onCategories: ['task', 'verify'] });
+  assert.equal(loadConfig(paths, {}).config.breakdown.enabled, false);
+
+  writeFileSync(paths.config, JSON.stringify({
+    breakdown: {
+      enabled: true, onStart: true, onContinue: false, onFailure: false, decision: 'rules', preferOverEscalation: false, maxPerTask: 3,
+      rules: { minTaskBytes: 0, afterContinuations: 0, afterFailedAttempts: 2, onCategories: ['verify'] },
+    },
+  }));
+  const config = loadConfig(paths, {}).config;
+  assert.equal(config.breakdown.enabled, true);
+  assert.equal(config.breakdown.onStart, true);
+  assert.equal(config.breakdown.onContinue, false);
+  assert.equal(config.breakdown.onFailure, false);
+  assert.equal(config.breakdown.decision, 'rules');
+  assert.equal(config.breakdown.preferOverEscalation, false);
+  assert.equal(config.breakdown.maxPerTask, 3);
+  assert.deepEqual(config.breakdown.rules, { minTaskBytes: 0, afterContinuations: 0, afterFailedAttempts: 2, onCategories: ['verify'] });
+
+  writeFileSync(paths.config, JSON.stringify({ breakdown: { provider: 'nope', decision: 'maybe', maxPerTask: -1 } }));
+  const bad = loadConfig(paths, {});
+  assert.equal(bad.config.breakdown.provider, undefined);
+  assert.equal(bad.config.breakdown.decision, DEFAULTS.breakdown.decision);
+  assert.equal(bad.config.breakdown.maxPerTask, 0);
+  assert.ok(bad.warnings.some((w) => /breakdown\.provider/.test(w)));
+  assert.ok(bad.warnings.some((w) => /breakdown\.decision/.test(w)));
+
+  // resolveBreakdown builds a read-only spec, defaulting to the watch block's provider/model.
+  writeFileSync(paths.config, JSON.stringify({ breakdown: { enabled: true, decision: 'llm', model: '' }, watch: { provider: 'fake', model: 'watch-model' } }));
+  const cfg = loadConfig(paths, {}).config;
+  const rb = resolveBreakdown(cfg);
+  assert.equal(rb.spec.providerName, 'fake');
+  assert.equal(rb.spec.model, 'watch-model');
+  assert.equal(rb.spec.autoApprove, false);
+  assert.equal(rb.spec.sources.provider, 'watch');
+  assert.equal(rb.spec.sources.model, 'watch');
+
+  const own = resolveBreakdown({ ...cfg, breakdown: { ...cfg.breakdown, provider: 'fake', model: 'own-model' } });
+  assert.equal(own.spec.model, 'own-model');
+  assert.equal(own.spec.sources.model, 'breakdown');
+  assert.equal(own.spec.autoApprove, false);
 });

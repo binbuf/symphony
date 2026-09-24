@@ -873,6 +873,8 @@ export class TuiApp {
         'Status: header stays put, rows scroll vertically and pan horizontally.',
         'Live output tails by default; scroll up to pause, s to resume following.',
         'Pipeline watch (top strip): a separate read-only model summarizes progress and health.',
+        'Automatic breakdowns (config "breakdown") can rewrite a task into subtasks mid-run; the',
+        'view refreshes and toasts when one lands. b does the same on the selected task.',
         '',
         'Mouse: wheel scrolls, tilt-wheel pans, middle-drag pans horizontally,',
         'left-click selects a task, right-click toggles follow. Shift+drag selects text.',

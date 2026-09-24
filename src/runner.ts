@@ -1,5 +1,6 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { relative } from 'node:path';
+import { decideBreakdown, type BreakdownEvidence, type BreakdownStage, type BreakdownVerdict } from './breakdown.js';
 import { classifyFailure, evidenceText, makeClassified, type Classified, type FailureEvidence } from './classify.js';
 import { resolveEscalation, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
 import { writeProgressDigest } from './context.js';
@@ -11,12 +12,14 @@ import { createLogger, openRunSinks, type Logger } from './logger.js';
 import { writeTaskLog } from './logs.js';
 import { placeStop, stopPresent, type Paths } from './paths.js';
 import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
+import { applyPlan, loadProject, retargetFlags } from './project.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import type { Provider, SpawnSpec } from './providers/types.js';
 import { generateIndex, writeIndex } from './repomap.js';
 import { parseResultBlock, type ResultBlock } from './result.js';
 import { canonicalId, patchRoadmapFile, type Roadmap } from './roadmap.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
+import type { SplitResult } from './split.js';
 import { updatePipelineStatus } from './status.js';
 import { DONE_STATES, SKIP_STATES, acquireLock, haltResumeHint, newTaskState, releaseLock, saveState, startLockHeartbeat, type Halted, type LastError, type LogRef, type State, type TaskState, type TaskStatus } from './state.js';
 import type { Task } from './tasks.js';
@@ -45,6 +48,12 @@ export interface SplitRequest {
   note?: string;
 }
 
+/**
+ * A breakdown performed by the runner itself (an automatic split). Wired by the CLI to the `split`
+ * machinery with the run's lock shared; absent in unit tests, where no automatic split is possible.
+ */
+export type PerformSplit = (taskId: string) => Promise<SplitResult>;
+
 export interface RunContext {
   paths: Paths;
   config: Config;
@@ -72,6 +81,12 @@ export interface RunContext {
   pauseAt?: string;
   /** A split requested live from the TUI; the run stops, `split` runs, then the wrapper resumes it. */
   splitRequest?: SplitRequest;
+  /** Run an automatic breakdown for a task; the CLI wires this to `split` with the run's lock shared. */
+  performSplit?: PerformSplit;
+  /** Automatic breakdowns attempted per task id in this run; bounds a task that keeps failing. */
+  autoSplits?: Map<string, number>;
+  /** Called when the run itself rewrote the plan (an automatic breakdown), so a live view can refresh. */
+  onPlanChanged?: (parentId: string, childIds: string[]) => void;
   /** Live pipeline-watch state shown in the TUI's top panel; undefined when the watcher is off. */
   watch?: WatchState;
   /** Trigger an immediate pipeline-watch check (bound by the watcher). */
@@ -79,7 +94,7 @@ export interface RunContext {
 }
 
 interface Final { status: TaskStatus; summary: string; lastError?: LastError }
-interface TaskOutcome { status: TaskStatus; halt?: Halted; stopped?: boolean; interrupted?: boolean }
+interface TaskOutcome { status: TaskStatus; halt?: Halted; stopped?: boolean; interrupted?: boolean; split?: boolean }
 
 const LIVE_MAX = 400;
 const LOG_MAX = 4000;
@@ -114,6 +129,73 @@ function refreshDerivedDocs(ctx: RunContext): void {
   if (config.repoMap) {
     try { writeIndex(paths); } catch (e) { log.warn(`could not write ${relative(paths.root, paths.index)}: ${(e as Error).message}`); }
   }
+}
+
+/** One automatic-breakdown attempt: the verdict, when the gate was open, and whether it split. */
+interface AutoBreakdown { verdict?: BreakdownVerdict; split: boolean }
+
+/** The evidence a breakdown decision reads: the task, its recorded state, and the stage's reason. */
+function breakdownEvidence(ctx: RunContext, task: Task, stage: BreakdownStage, extra: { category?: string; reason?: string; continuations?: number } = {}): BreakdownEvidence {
+  const st = ctx.state.tasks[task.id];
+  const body = taskFileBody(task, ctx.config.maxTaskBytes);
+  return {
+    stage,
+    task,
+    taskBody: body,
+    taskBytes: body !== undefined ? Buffer.byteLength(body, 'utf8') : 0,
+    status: st?.status ?? 'pending',
+    attempts: st?.attempts ?? 0,
+    continuations: extra.continuations ?? st?.continuation ?? 0,
+    category: extra.category,
+    reason: extra.reason ?? st?.lastError?.message ?? st?.summary,
+  };
+}
+
+/** Charge a decision's reported cost to the task and to this run, like a session's cost. */
+function addDecisionCost(ctx: RunContext, task: Task, costUsd: number | undefined): void {
+  if (costUsd === undefined) return;
+  ctx.runCostUsd = (ctx.runCostUsd ?? 0) + costUsd;
+  const st = ctx.state.tasks[task.id];
+  if (st) st.costUsd = (st.costUsd ?? 0) + costUsd;
+}
+
+/**
+ * Ask for a breakdown decision at this stage and, when the answer is `split`, run the split session.
+ * The caller reloads the plan when `split` is true. Without a wired `performSplit` (unit tests) or
+ * once `maxPerTask` has been spent, no decision is asked and the run behaves exactly as before.
+ */
+async function autoBreakdown(ctx: RunContext, task: Task, ev: BreakdownEvidence): Promise<AutoBreakdown> {
+  if (!ctx.performSplit || ctx.interrupted) return { split: false };
+  const max = Math.max(0, ctx.config.breakdown.maxPerTask);
+  const used = ctx.autoSplits?.get(task.id) ?? 0;
+  if (ctx.autoSplits && max > 0 && used >= max) return { split: false };
+  const verdict = await decideBreakdown(ctx.config, ev, { log: ctx.log, paths: ctx.paths, abort: ctx.abort.signal, fetchImpl: ctx.fetchImpl });
+  if (!verdict) return { split: false };
+  addDecisionCost(ctx, task, verdict.costUsd);
+  if (verdict.action !== 'split') {
+    ctx.log.info(`${task.id}: ${ev.stage} breakdown check: ${verdict.action} — ${verdict.reason}`);
+    return { verdict, split: false };
+  }
+  const pct = verdict.confidence !== undefined ? ` ${Math.round(verdict.confidence * 100)}%` : '';
+  ctx.log.warn(`${task.id}: ${ev.stage} breakdown (${verdict.source}${pct}): ${verdict.reason}`);
+  ctx.autoSplits?.set(task.id, used + 1);
+  const result = await ctx.performSplit(task.id);
+  if (result.code !== 0) {
+    ctx.log.warn(`${task.id}: breakdown did not complete (exit ${result.code}${result.error ? `: ${result.error}` : ''}); carrying on with the task as it is`);
+    return { verdict, split: false };
+  }
+  ctx.log.info(`${task.id}: broken down into ${result.children.join(', ')}; continuing with the subtasks`);
+  retargetFlags(ctx.flags, task.id, result.children);
+  ctx.onPlanChanged?.(task.id, result.children);
+  return { verdict, split: true };
+}
+
+/** Re-read the plan and its state after an automatic split rewrote them, in place on the context. */
+function reloadAfterSplit(ctx: RunContext): void {
+  const loaded = loadProject(ctx.paths, ctx.log);
+  loaded.warnings.forEach((w) => ctx.log.warn(w));
+  if (loaded.roadmapError) ctx.log.error(loaded.roadmapError);
+  applyPlan(ctx, loaded);
 }
 
 function mkError(c: Classified): LastError {
@@ -396,11 +478,12 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
    * `escalationDecision` workflow is on, Jev reads the task and the failure first and may decline —
    * a stronger model is not worth a session when the task is stuck on missing context or a human
    * decision. Any Jev problem (off, no key, timeout, low confidence) escalates as configured.
+   * `skipDecision` is set when a breakdown decision already chose escalation, so Jev is not asked twice.
    */
-  const tryEscalate = async (category: string, reason: string): Promise<boolean> => {
+  const tryEscalate = async (category: string, reason: string, opts: { skipDecision?: boolean } = {}): Promise<boolean> => {
     if (!escalation || escalations >= maxEscalations) return false;
     if (!escalationCategories.has(category)) return false;
-    if (config.jev.enabled && config.jev.escalationDecision) {
+    if (!opts.skipDecision && config.jev.enabled && config.jev.escalationDecision) {
       const problem = jevProblem(config.jev, process.env);
       if (problem) {
         log.warn(`${task.id}: [jev] escalation check unavailable (${problem}); escalating on ${category} as configured`);
@@ -436,6 +519,20 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     delete st.continuation;
     log.warn(`${task.id}: ${category} — ${reason}. Escalating to ${spec.providerName}${spec.model ? ` · ${spec.model}` : ''}${spec.variant ? ` · variant ${spec.variant}` : ''} (escalation ${escalations}/${maxEscalations}).`);
     return true;
+  };
+
+  /**
+   * Recovery for a failure: an automatic breakdown decision first — the preferred path — then the
+   * ordinary escalation route. `split` means the task was replaced by subtasks and the run must
+   * reload; `escalated` means a fresh attempt is starting; `failed` means give up on this task.
+   */
+  const recover = async (category: string, reason: string): Promise<'split' | 'escalated' | 'failed'> => {
+    const attempt = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'failure', { category, reason, continuations: continuation }));
+    if (attempt.split) return 'split';
+    if (attempt.verdict?.action === 'stop') return 'failed';
+    // A breakdown verdict of `escalate` already weighed the stronger model, so Jev is not asked again.
+    if (await tryEscalate(category, reason, { skipDecision: attempt.verdict?.action === 'escalate' })) return 'escalated';
+    return 'failed';
   };
 
   for (let attempt = 1; ; attempt++) {
@@ -529,6 +626,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         st.summary = block.summary || 'continuing in a fresh session';
         saveState(paths, state);
         if (continuation < maxContinuations) {
+          const slicesUsed = continuation;
           continuation += 1;
           st.continuation = continuation;
           refreshDerivedDocs(ctx);
@@ -551,13 +649,20 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
             log.warn(`${task.id}: ${relative(paths.root, paths.stop)} present: pausing before continuation ${continuation}/${maxContinuations}. Remove it and re-run to continue.`);
             return { status: st.status, stopped: true };
           }
+          // The preferred alternative to yet another slice: ask whether the task should be broken
+          // down now (the slice above is committed, so a split's commit stays docs-only).
+          if ((await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'continue', { reason: block.summary, continuations: slicesUsed }))).split) {
+            return { status: st.status, split: true };
+          }
           log.info(`${task.id}: session reported continue (${continuation}/${maxContinuations}); starting a fresh session for the next slice`);
           resumeId = undefined;
           lastTransient = undefined;
           continue;
         }
         const contSummary = `${block.summary || 'more work remains'} | gave up after ${maxContinuations} continuation sessions (maxContinuations)`;
-        if (await tryEscalate('task', `continuation limit (${maxContinuations}) reached`)) continue;
+        const rec = await recover('task', `continuation limit (${maxContinuations}) reached`);
+        if (rec === 'split') return { status: st.status, split: true };
+        if (rec === 'escalated') continue;
         final = { status: 'failed', summary: contSummary, lastError: { category: 'task', message: 'continuation limit reached', transient: false, fatal: false, at: nowIso() } };
         break;
       }
@@ -570,14 +675,20 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           if (!res.ok) {
             const msg = `verify failed (exit ${res.code ?? 'timeout'}): ${verify.command} — ${squash(res.output, 240) || 'no output'}`;
             log.error(`${task.id}: ${msg}`);
-            if (await tryEscalate('verify', msg)) continue;
+            const rec = await recover('verify', msg);
+            if (rec === 'split') return { status: st.status, split: true };
+            if (rec === 'escalated') continue;
             final = { status: 'failed', summary: msg, lastError: { category: 'verify', message: msg, transient: false, fatal: false, at: nowIso() } };
             break;
           }
           log.info(`${task.id}: verify passed`);
         }
       }
-      if (block.status === 'failed' && (await tryEscalate('task', block.summary || 'model reported failed'))) continue;
+      if (block.status === 'failed') {
+        const rec = await recover('task', block.summary || 'model reported failed');
+        if (rec === 'split') return { status: st.status, split: true };
+        if (rec === 'escalated') continue;
+      }
       final = { status: block.status, summary: block.summary || block.status };
       if (block.status !== 'done') final.lastError = { category: 'task', message: block.summary || `model reported ${block.status}`, transient: false, fatal: false, at: nowIso() };
       break;
@@ -603,7 +714,9 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       if (!provider.supportsResume || !outcome.sessionId) resumeId = undefined;
       continue;
     }
-    if (await tryEscalate(classified.category, summary)) continue;
+    const rec = await recover(classified.category, summary);
+    if (rec === 'split') return { status: st.status, split: true };
+    if (rec === 'escalated') continue;
     final = { status: 'failed', summary: classified.transient ? `${summary} (gave up after ${retryCount} retries)` : summary, lastError };
     break;
   }
@@ -734,6 +847,12 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       log.plain(`provider: ${rs.spec.providerName} [${rs.spec.sources.provider}] · model: ${rs.spec.model ?? 'provider default'} [${rs.spec.sources.model}]${rs.spec.variant ? ` · variant: ${rs.spec.variant} [${rs.spec.sources.variant}]` : ''} · timeout ${rs.spec.timeoutMin} min · idle ${rs.spec.idleTimeoutMin} min · auto-approve ${rs.spec.autoApprove}`);
       const esc = resolveEscalation(config, rs.spec, (p) => getProvider(p).supportsBudget, variantSupported);
       if (esc) log.plain(`escalation: ${esc.spec.providerName} · ${esc.spec.model}${esc.spec.variant ? ` · variant ${esc.spec.variant}` : ''} if the task fails (${config.escalation.onCategories.join(', ')}; max ${config.escalation.maxAttempts} session${config.escalation.maxAttempts === 1 ? '' : 's'})`);
+      const bd = config.breakdown;
+      if (bd.enabled) {
+        const stages = [bd.onStart && 'start', bd.onContinue && 'continue', bd.onFailure && 'failure'].filter(Boolean).join(', ') || '(no stage on)';
+        const fallback = bd.decision === 'rules' ? '' : ` → ${bd.provider ?? config.watch.provider}${(bd.model || config.watch.model) ? ` · ${bd.model || config.watch.model}` : ''}`;
+        log.plain(`breakdown: ${stages} · decision ${bd.decision}${fallback} → rules at ${bd.rules.minTaskBytes} B / continuation ${bd.rules.afterContinuations} / attempt ${bd.rules.afterFailedAttempts} (${bd.rules.onCategories.join(', ')})`);
+      }
       log.plain(`command: ${describeCmd(cmd)}`);
       log.plain(`--- prompt for ${t.id} (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);
     }
@@ -758,6 +877,9 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   }
 
   const runCost = (): number => ctx.runCostUsd ?? 0;
+  // Automatic breakdowns attempted per task id this run: a task that keeps failing should not be
+  // split again and again. (A successful split consumes the parent, so this mostly bounds failures.)
+  ctx.autoSplits ??= new Map();
   const budgetHalt = (): number | undefined => {
     if (config.maxCostUsdPerRun <= 0 || runCost() < config.maxCostUsdPerRun) return undefined;
     return setHalt(ctx, {
@@ -768,7 +890,23 @@ export async function runCommand(ctx: RunContext): Promise<number> {
 
   const runLoop = async (): Promise<number> => {
     let consecutiveFailures = 0;
-    for (const task of todo) {
+    const attempted = new Set<string>();
+    // The queue is re-selected from the live task list whenever a breakdown rewrites the plan.
+    let queue: Task[] = todo.slice();
+    const rebuild = (): void => {
+      const selected = selectTasks(ctx).filter((t) => !attempted.has(t.id) && (flags.retry || !SKIP_STATES.includes(state.tasks[t.id]?.status ?? 'pending')));
+      // `maxTasksPerRun` counts tasks this invocation has *started*, so a breakdown cannot buy more.
+      const room = config.maxTasksPerRun > 0 ? Math.max(0, config.maxTasksPerRun - attempted.size) : selected.length;
+      queue = selected.slice(0, room);
+    };
+    const afterSplit = (): void => {
+      reloadAfterSplit(ctx);
+      if (ctx.pauseAt && !ctx.tasks.some((t) => t.id === ctx.pauseAt)) delete ctx.pauseAt;
+      consecutiveFailures = 0;
+      rebuild();
+    };
+    while (queue.length) {
+      const task = queue.shift()!;
       if (ctx.interrupted) return ctx.signalName === 'SIGTERM' ? 143 : 130;
       // A split requested from the run view: stop here so the wrapper can rewrite the task into
       // subtasks and resume. Checked before the STOP sentinel because it is an explicit user action.
@@ -799,7 +937,16 @@ export async function runCommand(ctx: RunContext): Promise<number> {
         return setHalt(ctx, { at: nowIso(), taskId: task.id, category: 'attempts', reason: `${task.id} has failed ${st.attempts} times (halt.maxAttemptsPerTask = ${config.halt.maxAttemptsPerTask}); last: ${st.lastError?.message ?? st.summary ?? '?'}. Fix the cause, then \`symphony run --clear-halt --retry --only ${task.id}\`` });
       }
 
+      // Before the task starts: the preferred moment to notice it is too big. A successful split
+      // replaces the task with subtasks, so the queue is re-selected and this task never runs.
+      if ((await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'start'))).split) {
+        afterSplit();
+        continue;
+      }
+
+      attempted.add(task.id);
       const out = await runTask(ctx, task);
+      if (out.split) { afterSplit(); continue; }
       if (out.stopped) return 0;
       if (out.halt) return setHalt(ctx, out.halt);
       if (out.interrupted) return ctx.signalName === 'SIGTERM' ? 143 : 130;
