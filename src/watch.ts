@@ -16,10 +16,12 @@ import { ensureDir, fmtCost, fmtDuration, nowIso, resolveBinary, resolveExecutab
 /**
  * Pipeline watch: a separate, read-only LLM session the harness runs on a timer while `run` is in
  * flight. It reads a self-contained snapshot of the pipeline (current task, phase progress, task
- * outcomes, PROGRESS.md, counts) and answers in a few short sentences: the current ticket first,
- * then the phase/gate, then only-if-warranted concerns and early signals. The latest answer is shown
- * in the TUI's top panel and every check is appended to a dedicated watch log. It is advisory: an
- * unavailable provider or a failed check only updates the panel, never the run.
+ * outcomes, PROGRESS.md, counts) and adds the interpretation the TUI's live status table cannot show
+ * — what the snapshot means for the run, where it looks fragile, what to expect next — rather than
+ * restating the visible status. When it has nothing useful to add it replies `NO_UPDATE` and the
+ * panel keeps its previous summary. The latest answer is shown in the TUI's top panel and every
+ * check is appended to a dedicated watch log. It is advisory: an unavailable provider or a failed
+ * check only updates the panel, never the run.
  */
 
 export type WatchStatus = 'waiting' | 'running' | 'ready' | 'error';
@@ -50,6 +52,8 @@ export interface WatchLogEntry {
   model?: string;
   /** `ready` when the check produced a summary, else `error`. */
   status: 'ready' | 'error';
+  /** True when the watcher deliberately had nothing to add (`NO_UPDATE`). */
+  silent?: boolean;
   pipeline: string;
   summary?: string;
   error?: string;
@@ -61,6 +65,8 @@ export interface WatchLogEntry {
 }
 
 const WATCH_TASK_ID = 'watch';
+/** The token the watcher replies with when it has nothing useful to add (keeps the panel quiet). */
+const WATCH_NO_UPDATE = 'NO_UPDATE';
 
 /** The dedicated append-only log beside the harness log (`.symphony/watch.log`, or the set's dir). */
 export function watchLogPath(paths: Paths): string {
@@ -90,9 +96,9 @@ export function pipelineSnapshot(ctx: RunContext): string {
 
 /**
  * The watcher prompt: a fully self-contained snapshot so the model can answer without tools (and so
- * the watcher never needs write access). It leads with the current ticket and its phase, then recent
- * outcomes and progress, and only then the overall counts. The instructions ask for a short, ordered
- * read — current task, then phase/gate, then (only when warranted) concerns and early signals.
+ * the watcher never needs write access). The snapshot still leads with the current ticket, its phase,
+ * recent outcomes and progress — but the instructions frame all of it as context the operator can
+ * already see, and ask only for interpretation the status table cannot show, or `NO_UPDATE`.
  */
 export function buildWatchPrompt(ctx: RunContext): string {
   const { paths, tasks, state } = ctx;
@@ -146,28 +152,43 @@ export function buildWatchPrompt(ctx: RunContext): string {
   const progress = readProgressContext(paths.progress, rel(paths.root, paths.progress), { maxBytes: 8000, recentSections: 3 });
 
   return [
-    'You are a read-only observer of an autonomous coding pipeline ("symphony"). The harness runs one',
-    'fresh AI session per task in ROADMAP.md and commits after each. A human is watching the run live,',
-    'and your answer is rendered verbatim in a small terminal panel.',
+    'You are a read-only analyst of a live autonomous coding pipeline ("symphony"). The harness runs',
+    'one fresh AI session per task in ROADMAP.md and commits after each. The operator is watching the',
+    'run in a terminal that already shows, updating live: the task in flight and its elapsed time, the',
+    'current phase and its progress, the done/total counts, the cost, and the full task list. Your',
+    'answer is rendered verbatim in a small strip above that table.',
     '',
-    'Rules:',
-    '- Do NOT call tools and do NOT modify any files. Everything you need is below.',
-    '- Answer in 3 to 5 short sentences of plain prose: no headings, no bullet lists, no code fences.',
-    '- Cover only what is relevant, in this order, and skip a point entirely when you have nothing',
-    '  useful to say about it:',
-    '  1. The current task: what it has accomplished so far and what is left. If it is running long or',
-    '     looks unhealthy, say whether you still expect it to finish as intended.',
-    '  2. This phase / milestone / gate: how you think the work is going here.',
-    '  3. Overall progress: only if you have a real concern. If you have no concerns, say nothing.',
-    '  4. Early signals: only if you see high-confidence signs the pipeline will or will not complete',
-    '     successfully. If it is too early to tell, say nothing.',
-    '- Ground every sentence in the snapshot below; never invent progress that is not there.',
-    '- If almost nothing has happened yet, say so in one sentence and stop.',
+    'Your value is interpretation, not narration. Restating what the operator can already see — that a',
+    'task is running, how long it has been running, which phase we are in, how many tasks are done —',
+    'adds nothing. Add only what the table cannot show at a glance: what the snapshot means for whether',
+    'this run will finish, where it looks fragile, and what to expect next.',
     '',
-    '=== CURRENT TASK (running now, or most recently finished) ===',
+    'Decide what is genuinely worth saying from where the run is:',
+    "- A task running long or retrying: is that anomalous against this pipeline's own recent pace, and",
+    '  does it change your expectation of the outcome? Say what you now expect, and why.',
+    '- Work that looks harder or more fragile than the rest (repeated retries, a summary that',
+    '  contradicts its task, a phase that keeps circling, a gate that will not open): name the specific',
+    '  concern and what evidence would settle it.',
+    '- The final stretch: what still stands between here and completion beyond the task in flight, and',
+    '  whether finishing is realistically in reach.',
+    '- A real pattern across the recent outcomes that the counts alone do not reveal.',
+    '',
+    'Hard rules:',
+    '- Never narrate status or timing ("task N is running", "X minutes in", "just started", "N of M',
+    '  done", "still early"). The operator already has that line.',
+    '- Never say it is too early to tell, that there is not enough information, or otherwise hedge',
+    '  about what you can know.',
+    '- Never pad to fill the panel and never manufacture concern. If the snapshot holds no real insight,',
+    '  reply with exactly NO_UPDATE and nothing else.',
+    '- Ground every claim in the snapshot; invent nothing. Do not call tools and do not change files.',
+    '',
+    'When you do have something: 2 to 4 short sentences of plain prose — the observation, what it means',
+    'for the run, and what you expect next. No headings, no bullet lists, no code fences.',
+    '',
+    '=== CURRENTLY RUNNING (or, if idle, most recently finished) — already visible to the operator ===',
     currentLine ?? '- (nothing running and nothing finished yet)',
     '',
-    '=== CURRENT PHASE / GATE (▶ marks the phase of the current task) ===',
+    '=== PHASES / GATES (▶ marks the phase of the current task) ===',
     phaseLines.join('\n') || '- (no tasks)',
     '',
     '=== RECENT TASK OUTCOMES (newest first) ===',
@@ -198,11 +219,11 @@ export function appendWatchLog(paths: Paths, entry: WatchLogEntry): void {
     lines.push('');
     lines.push(`- provider: ${entry.provider}${entry.model ? ` · ${entry.model}` : ''}`);
     lines.push(`- pipeline: ${entry.pipeline}`);
-    lines.push(`- result: ${entry.status}${entry.durationS !== undefined ? ` · ${fmtDuration(entry.durationS)}` : ''}${entry.costUsd !== undefined ? ` · ${fmtCost(entry.costUsd)}` : ''}`);
+    lines.push(`- result: ${entry.status}${entry.silent ? ' (no update)' : ''}${entry.durationS !== undefined ? ` · ${fmtDuration(entry.durationS)}` : ''}${entry.costUsd !== undefined ? ` · ${fmtCost(entry.costUsd)}` : ''}`);
     if (entry.error) lines.push(`- error: ${entry.error}`);
     lines.push(`- session: ${entry.sessionLog} · raw: ${entry.sessionJsonl} · prompt: ${entry.sessionPrompt}`);
     lines.push('');
-    lines.push(entry.summary?.trim() || '_(no summary produced)_');
+    lines.push(entry.silent ? '_(no update — nothing worth adding)_' : entry.summary?.trim() || '_(no summary produced)_');
     lines.push('');
     appendFileSync(file, `${lines.join('\n')}\n`);
   } catch {
@@ -212,6 +233,8 @@ export function appendWatchLog(paths: Paths, entry: WatchLogEntry): void {
 
 interface CheckResult {
   status: 'ready' | 'error';
+  /** True when the watcher had nothing useful to add (`NO_UPDATE`). */
+  silent?: boolean;
   summary?: string;
   error?: string;
   costUsd?: number;
@@ -251,15 +274,19 @@ async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider):
     await sinks.close();
   }
   const durationS = Math.round(outcome.durationMs / 1000);
-  // Room for the requested 3–5 sentences; the panel and log both cap their own display.
-  const summary = squash(outcome.result.text || outcome.allText, 1200);
+  const raw = (outcome.result.text || outcome.allText).trim();
   const failed = !outcome.result.ok || outcome.interrupted || outcome.timedOut || outcome.stalled || !!outcome.spawnError;
-  if (failed && !summary) {
-    const error = outcome.spawnError ?? outcome.result.errorSubtype ?? (outcome.timedOut ? 'timeout' : outcome.stalled ? 'stalled' : 'no answer');
+  // A deliberate, successful "nothing to add" keeps the panel quiet instead of filling it with filler.
+  const silent = !failed && new RegExp(`^${WATCH_NO_UPDATE}\\b`, 'i').test(raw);
+  if (silent) return { status: 'ready', silent: true, durationS, costUsd: outcome.costUsd, ...paths };
+  if (!raw) {
+    const error = failed
+      ? outcome.spawnError ?? outcome.result.errorSubtype ?? (outcome.timedOut ? 'timeout' : outcome.stalled ? 'stalled' : 'no answer')
+      : 'session produced no answer';
     return { status: 'error', error, durationS, costUsd: outcome.costUsd, ...paths };
   }
-  if (!summary) return { status: 'error', error: 'session produced no answer', durationS, costUsd: outcome.costUsd, ...paths };
-  return { status: 'ready', summary, durationS, costUsd: outcome.costUsd, ...paths };
+  // Room for the requested 2–4 sentences; the panel and log both cap their own display.
+  return { status: 'ready', summary: squash(raw, 1200), durationS, costUsd: outcome.costUsd, ...paths };
 }
 
 /**
@@ -324,7 +351,7 @@ export class PipelineWatcher {
     const state = this.ctx.watch;
     const entry: WatchLogEntry = {
       at: nowIso(), check: this.checks, provider: this.spec.providerName, model: this.spec.model,
-      status: result.status, pipeline: pipelineSnapshot(this.ctx), summary: result.summary, error: result.error,
+      status: result.status, silent: result.silent, pipeline: pipelineSnapshot(this.ctx), summary: result.summary, error: result.error,
       durationS: result.durationS, costUsd: result.costUsd,
       sessionLog: result.sessionLog, sessionJsonl: result.sessionJsonl, sessionPrompt: result.sessionPrompt,
     };
@@ -333,7 +360,9 @@ export class PipelineWatcher {
       state.checks = this.checks;
       if (result.status === 'ready') {
         state.status = 'ready';
-        state.summary = result.summary;
+        // A silent check keeps the previous summary; the timestamp marks the refresh so the operator
+        // can tell the watcher looked and had nothing new to add.
+        if (result.summary) state.summary = result.summary;
         state.updatedAt = entry.at;
         delete state.error;
       } else {
@@ -342,7 +371,7 @@ export class PipelineWatcher {
         // Keep the last good summary visible alongside the error.
       }
     }
-    this.ctx.log.info(`watch #${this.checks}: ${result.status}${result.summary ? ` · ${squash(result.summary, 160)}` : result.error ? ` · ${result.error}` : ''}`);
+    this.ctx.log.info(`watch #${this.checks}: ${result.status}${result.silent ? ' · no update' : result.summary ? ` · ${squash(result.summary, 160)}` : result.error ? ` · ${result.error}` : ''}`);
     if (!this.stopped) this.arm(this.intervalMs);
   }
 }

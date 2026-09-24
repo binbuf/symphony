@@ -96,8 +96,9 @@ export interface JevConfig {
 
 /**
  * Optional "pipeline watch": a separate, read-only LLM session the harness runs on a timer while a
- * run is in flight. It summarizes recent progress and the overall health of the pipeline into the
- * TUI's top panel and a dedicated log. On by default; a failure never affects the run itself.
+ * run is in flight. It adds interpretation the TUI's live status table cannot show — how the run is
+ * trending, where it looks fragile, what to expect — into the TUI's top panel and a dedicated log.
+ * On by default; a failure never affects the run itself.
  */
 export interface WatchConfig {
   /** Master switch. */

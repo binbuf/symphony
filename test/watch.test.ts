@@ -46,23 +46,25 @@ test('buildWatchPrompt and pipelineSnapshot describe the pipeline from live stat
   assert.match(prompt, /T02 \[running\]/);
   assert.match(prompt, /RECENT TASK OUTCOMES/);
   assert.match(prompt, /landed the thing/);
-  assert.match(prompt, /Do NOT call tools/);
-  // Recent progress leads: the current ticket and its phase are called out, and the snapshot sections
-  // put recent activity ahead of the overall pipeline counts.
-  assert.match(prompt, /CURRENT TASK/);
+  assert.match(prompt, /Do not call tools/);
+  // The snapshot still leads with the current ticket and its phase, but frames them as context the
+  // operator can already see.
+  assert.match(prompt, /CURRENTLY RUNNING/);
+  assert.match(prompt, /already visible to the operator/);
   assert.match(prompt, /T02 .*running/);
-  assert.match(prompt, /CURRENT PHASE \/ GATE/);
+  assert.match(prompt, /PHASES \/ GATES/);
   assert.match(prompt, /▶ Phase 1: 1\/2 done/);
-  assert.ok(prompt.indexOf('CURRENT TASK') < prompt.indexOf('CURRENT PHASE / GATE'), 'current ticket precedes its phase');
-  assert.ok(prompt.indexOf('CURRENT PHASE / GATE') < prompt.indexOf('RECENT TASK OUTCOMES'), 'phase precedes recent outcomes');
+  assert.ok(prompt.indexOf('CURRENTLY RUNNING') < prompt.indexOf('PHASES / GATES'), 'current ticket precedes its phase');
+  assert.ok(prompt.indexOf('PHASES / GATES') < prompt.indexOf('RECENT TASK OUTCOMES'), 'phase precedes recent outcomes');
   assert.ok(prompt.indexOf('RECENT TASK OUTCOMES') < prompt.indexOf('PIPELINE SNAPSHOT'), 'recent outcomes precede the overall snapshot');
-  // The instructions ask for an ordered 3-5 sentence read: current task, phase/gate, then only-if-relevant
-  // concerns and early signals.
-  assert.match(prompt, /3 to 5 short sentences/);
-  assert.match(prompt, /what it has accomplished so far and what is left/);
-  assert.match(prompt, /phase \/ milestone \/ gate/);
-  assert.match(prompt, /If you have no concerns, say nothing/);
-  assert.match(prompt, /If it is too early to tell, say nothing/);
+  // The instructions ask for interpretation, forbid narrating the visible status, and allow a silent
+  // reply instead of hedging.
+  assert.match(prompt, /interpretation, not narration/);
+  assert.match(prompt, /2 to 4 short sentences/);
+  assert.match(prompt, /Never narrate status or timing/);
+  assert.match(prompt, /Never say it is too early to tell/);
+  assert.match(prompt, /reply with exactly NO_UPDATE/);
+  assert.doesNotMatch(prompt, /what it has accomplished so far and what is left/);
 });
 
 test('startPipelineWatch waits one interval, then a fake check updates the panel and the watch log', async () => {
@@ -99,6 +101,38 @@ test('startPipelineWatch waits one interval, then a fake check updates the panel
     assert.match(log, /check #1/);
     assert.match(log, /On track/);
     assert.match(log, /result: ready/);
+    watcher!.stop();
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a watcher NO_UPDATE reply keeps the panel quiet and is logged as no update', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-silent-'));
+  const paths = resolvePaths(dir);
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  writeFileSync(join(fixtures, 'watch.jsonl'), `${JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, session_id: 'w2', result: 'NO_UPDATE',
+  })}\n`);
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+
+  const tasks = [task('T01', 1)];
+  const state: State = { version: 1, tasks: { T01: { ...newTaskState('one'), status: 'running', attempts: 1, started: new Date().toISOString() } } };
+  const ctx = makeCtx(dir, tasks, state);
+  ctx.config = { ...DEFAULTS, watch: { ...DEFAULTS.watch, provider: 'fake', model: '' } };
+
+  try {
+    const watcher = startPipelineWatch(ctx);
+    assert.ok(watcher, 'watcher starts with a usable provider');
+    await watcher!.checkNow();
+    assert.equal(ctx.watch?.status, 'ready');
+    assert.equal(ctx.watch?.summary, undefined, 'nothing is shown when the watcher has nothing to add');
+    assert.ok(ctx.watch?.updatedAt, 'the refresh still stamps the panel');
+
+    const log = readFileSync(watchLogPath(paths), 'utf8');
+    assert.match(log, /result: ready \(no update\)/);
+    assert.match(log, /no update — nothing worth adding/);
     watcher!.stop();
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;

@@ -558,16 +558,18 @@ When the [`breakdown` block](#automatic-breakdowns) is enabled and one of its ga
 
 ## Pipeline watch
 
-While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: the harness assembles a self-contained snapshot — the currently running ticket (or the one that just finished), per-phase progress with the current phase flagged, the most recent task outcomes, the recent `PROGRESS.md` context, the pipeline counts and task list, and the halted banner if any — and asks the watcher model for **three to five short sentences**, in this order and covering only what is relevant:
+While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: the harness assembles a self-contained snapshot — the currently running ticket (or the one that just finished), per-phase progress with the current phase flagged, the most recent task outcomes, the recent `PROGRESS.md` context, the pipeline counts and task list, and the halted banner if any — and asks the watcher model to **add interpretation the status table cannot show**. The TUI already shows the running ticket and its elapsed time, the phase, the counts and the cost, so the watcher is told not to restate any of that; it speaks only when it can say something a careful operator would not already know:
 
-1. the current task: what it has accomplished so far and what is left, plus whether it is still on track if it is running long or looks unhealthy;
-2. the phase / milestone / gate the run is in and how that work is going;
-3. overall progress, but only when the model has a real concern (silence otherwise);
-4. early signals that the pipeline will or will not complete successfully, but only when they are high-confidence (silence when it is too early to tell).
+1. a running task that is long, retrying, or otherwise anomalous against the pipeline's own recent pace, and what that changes about the expected outcome;
+2. work that looks harder or more fragile than the rest, and the specific evidence that would settle it;
+3. the final stretch — what still stands between here and completion, and whether finishing is realistically in reach;
+4. a real pattern across the recent outcomes that the counts alone do not reveal.
 
-A check runs every `watch.intervalMin`, **and again each time a task ends**, so the summary leads with the ticket that just moved rather than the pipeline's overall health (which only becomes the useful headline once the pipeline has progressed).
+It is asked for **two to four short sentences**, and told never to narrate status or timing, never to hedge that it is too early to tell, and never to pad. When it has nothing useful to add it replies `NO_UPDATE`; the panel then keeps its previous summary (or stays empty if there was none) instead of filling with filler.
 
-The latest answer is shown in the TUI's **Pipeline watch** strip (above the status table) and every check is appended to `.symphony/watch.log` with the snapshot and a link to the session's raw files. The strip shows `Waiting for updates` until the first check returns, with the countdown to the first check on the right of the title; press `w` to run one immediately.
+A check runs every `watch.intervalMin`, **and again each time a task ends**, so a summary reflects the ticket that just moved rather than the pipeline as of the last timer tick.
+
+The latest answer is shown in the TUI's **Pipeline watch** strip (above the status table) and every check is appended to `.symphony/watch.log` with the snapshot and a link to the session's raw files. The strip shows `Waiting for updates` until the first check returns, with the countdown to the first check on the right of the title; press `w` to run one immediately. A check with nothing to add leaves the previous summary in place and just refreshes the count and update time in the title.
 
 The watcher is *advisory only*: it never edits the tree (the harness pins `autoApprove: false` and inlines everything the model needs so it does not have to read files), a failed or timed-out check just updates the panel, and a missing watcher binary disables it with a warning — the run is never blocked or halted by it.
 
