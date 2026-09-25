@@ -7,6 +7,7 @@ import { rel, type Paths } from './paths.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import type { Provider } from './providers/types.js';
 import type { RunContext } from './runner.js';
+import { notifyTaskSlack, slackEventEnabled, slackProject } from './slack.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
 import { buildStatusTable } from './status.js';
 import { DONE_STATES, type State } from './state.js';
@@ -506,6 +507,32 @@ export class PipelineWatcher {
         state.status = 'error';
         state.error = result.error ?? 'check failed';
         // Keep the last good summary visible alongside the error.
+      }
+    }
+    // An in-progress Slack update for the task in flight, threaded under that task's taskStart
+    // message. Feature-flagged (`slack.events.watch`, off by default) and only on a real summary, so
+    // a NO_UPDATE reply or an idle pipeline stays quiet. Fire-and-forget: Slack must never delay the
+    // next watch check.
+    if (!this.stopped && result.status === 'ready' && result.summary && slackEventEnabled(this.ctx.config.slack, 'watch')) {
+      const running = this.ctx.tasks.find((t) => (this.ctx.state.tasks[t.id]?.status ?? 'pending') === 'running');
+      if (running) {
+        void notifyTaskSlack(
+          this.ctx.config.slack,
+          (this.ctx.slackThreads ??= new Map()),
+          {
+            event: 'watch',
+            project: slackProject(this.ctx.config.slack, this.ctx.paths.root),
+            taskId: running.id,
+            title: `${running.id} in progress — ${running.title}`,
+            lines: [
+              `watch #${this.checks} · ${this.spec.providerName}${this.spec.model ? ` · ${this.spec.model}` : ''}`,
+              result.summary,
+              entry.pipeline,
+            ],
+          },
+          { fetchImpl: this.ctx.fetchImpl, signal: this.ctx.abort.signal },
+          (m) => this.ctx.log.warn(m),
+        );
       }
     }
     this.ctx.log.info(`watch #${this.checks}: ${result.status}${result.silent ? ' · no update' : result.summary ? ` · ${squash(result.summary, 160)}` : result.error ? ` · ${result.error}` : ''}`);

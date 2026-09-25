@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULTS, type SlackConfig } from '../src/config.js';
-import { formatSlackMessage, notifySlack, sendSlackMessage, slackBaseUrl, slackEventEnabled, slackProblem } from '../src/slack.js';
+import { formatSlackMessage, notifySlack, notifyTaskSlack, sendSlackMessage, slackBaseUrl, slackEventEnabled, slackProblem } from '../src/slack.js';
 
 const cfg = (over: Partial<SlackConfig> = {}): SlackConfig => ({ ...DEFAULTS.slack, enabled: true, ...over });
 
@@ -39,6 +39,7 @@ test('formatSlackMessage renders an emoji, an optional [project] tag, a bold tit
   assert.equal(formatSlackMessage({ event: 'taskDone', title: 'T01 DONE — ship it' }), ':white_check_mark: *T01 DONE — ship it*');
   assert.equal(formatSlackMessage({ event: 'taskDone', project: 'symphony', title: 'T01 DONE — ship it' }), ':white_check_mark: *[symphony] T01 DONE — ship it*');
   assert.equal(formatSlackMessage({ event: 'taskFailed', title: 'x', lines: ['a', '', '   ', 'b'] }), ':x: *x*\na\nb');
+  assert.equal(formatSlackMessage({ event: 'watch', title: 'T01 in progress' }), ':eyes: *T01 in progress*');
 });
 
 test('sendSlackMessage posts to a channel id with the bearer token', async () => {
@@ -75,6 +76,38 @@ test('sendSlackMessage mentions a user id when posting to a channel', async () =
 
   await sendSlackMessage(cfg({ channel: 'C123ABC', user: 'U123ABC', mention: false }), 'quiet', { fetchImpl, env: ENV });
   assert.equal(new URLSearchParams(bodies[1]).get('text'), 'quiet');
+});
+
+test('sendSlackMessage replies in a thread and does not re-mention on a reply', async () => {
+  const bodies: string[] = [];
+  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+    bodies.push(String(init?.body));
+    return jsonResponse({ ok: true, ts: '9' });
+  }) as unknown as typeof fetch;
+
+  await sendSlackMessage(cfg({ channel: 'C123ABC', user: 'U123ABC', mention: true }), 'reply', { fetchImpl, env: ENV, threadTs: '1700.1' });
+  const params = new URLSearchParams(bodies[0]);
+  assert.equal(params.get('channel'), 'C123ABC');
+  assert.equal(params.get('thread_ts'), '1700.1');
+  assert.equal(params.get('text'), 'reply');
+});
+
+test('notifyTaskSlack roots the first task message, threads the rest, and leaves run events unthreaded', async () => {
+  const params: URLSearchParams[] = [];
+  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+    params.push(new URLSearchParams(String(init?.body)));
+    return jsonResponse({ ok: true, ts: `ts-${params.length}` });
+  }) as unknown as typeof fetch;
+  const threads = new Map<string, string>();
+
+  await notifyTaskSlack(cfg({ channel: 'C123ABC' }), threads, { event: 'taskStart', taskId: 'T01', title: 'started' }, { fetchImpl, env: ENV });
+  await notifyTaskSlack(cfg({ channel: 'C123ABC' }), threads, { event: 'taskDone', taskId: 'T01', title: 'done' }, { fetchImpl, env: ENV });
+  await notifyTaskSlack(cfg({ channel: 'C123ABC' }), threads, { event: 'runEnd', title: 'run over' }, { fetchImpl, env: ENV });
+
+  assert.equal(threads.get('T01'), 'ts-1');
+  assert.equal(params[0].get('thread_ts'), null, 'the first task message is the thread root');
+  assert.equal(params[1].get('thread_ts'), 'ts-1', 'a later task message replies in the thread');
+  assert.equal(params[2].get('thread_ts'), null, 'a run-level event is never threaded');
 });
 
 test('sendSlackMessage DMs a user id directly (no mention prefix)', async () => {

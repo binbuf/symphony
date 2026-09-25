@@ -260,6 +260,61 @@ test('startPipelineWatch waits one interval, then a fake check updates the panel
   }
 });
 
+test('a ready watch check posts an in-progress message threaded under the running task, when the feature flag is on', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-slack-'));
+  const paths = resolvePaths(dir);
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  writeFileSync(join(fixtures, 'watch.jsonl'), `${JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, session_id: 'w1',
+    result: 'T02 is healthy and should finish shortly.',
+  })}\n`);
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+  process.env.SLACK_BOT_TOKEN = 'xoxb-test';
+
+  const tasks = [task('T01', 1), task('T02', 2)];
+  const state: State = { version: 1, tasks: { T01: { ...newTaskState('one'), status: 'done', attempts: 1 }, T02: { ...newTaskState('two'), status: 'running', attempts: 1, started: new Date().toISOString() } } };
+  const ctx = makeCtx(dir, tasks, state);
+  ctx.config = {
+    ...DEFAULTS,
+    watch: { ...DEFAULTS.watch, provider: 'fake', model: '' },
+    slack: { ...DEFAULTS.slack, enabled: true, channel: 'C123ABC', events: { ...DEFAULTS.slack.events, watch: true } },
+  };
+  const posts: URLSearchParams[] = [];
+  ctx.fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+    posts.push(new URLSearchParams(String(init?.body)));
+    return new Response(JSON.stringify({ ok: true, ts: 'watch-ts' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+  // The running task already has a thread root from its taskStart message.
+  ctx.slackThreads = new Map([['T02', 'root-1']]);
+
+  try {
+    const watcher = startPipelineWatch(ctx);
+    await watcher!.checkNow();
+    for (let i = 0; i < 50 && posts.length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(posts.length, 1, 'one in-progress update is posted');
+    assert.equal(posts[0].get('channel'), 'C123ABC');
+    assert.equal(posts[0].get('thread_ts'), 'root-1', 'it replies in the running task thread');
+    assert.match(posts[0].get('text') ?? '', /T02 in progress — Task 2/);
+    assert.match(posts[0].get('text') ?? '', /T02 is healthy and should finish shortly\./);
+    watcher!.stop();
+
+    // With the feature flag off, the same ready check posts nothing.
+    posts.length = 0;
+    const off = makeCtx(dir, tasks, state);
+    off.config = { ...ctx.config, slack: { ...ctx.config.slack, events: { ...ctx.config.slack.events, watch: false } } };
+    off.fetchImpl = ctx.fetchImpl;
+    const offWatcher = startPipelineWatch(off);
+    await offWatcher!.checkNow();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(posts.length, 0, 'the watch event is feature-flagged off by default');
+    offWatcher!.stop();
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+    delete process.env.SLACK_BOT_TOKEN;
+  }
+});
+
 test('a watcher NO_UPDATE reply keeps the panel quiet and is logged as no update', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-silent-'));
   const paths = resolvePaths(dir);

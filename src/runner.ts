@@ -1,5 +1,5 @@
 import { existsSync, writeFileSync } from 'node:fs';
-import { basename, relative } from 'node:path';
+import { relative } from 'node:path';
 import { decideBreakdown, type BreakdownEvidence, type BreakdownStage, type BreakdownVerdict } from './breakdown.js';
 import { classifyFailure, evidenceText, makeClassified, type Classified, type FailureEvidence } from './classify.js';
 import { resolveEscalation, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
@@ -26,7 +26,7 @@ import type { Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, squash, stamp } from './util.js';
 import { runVerify, type VerifyResult } from './verify.js';
 import { visionPromptNote } from './vision.js';
-import { notifySlack, slackEventEnabled, type SlackEvent } from './slack.js';
+import { notifyTaskSlack, slackProject, type SlackEvent } from './slack.js';
 import { startPipelineWatch, type WatchState } from './watch.js';
 
 /**
@@ -94,6 +94,8 @@ export interface RunContext {
   performSplit?: PerformSplit;
   /** Automatic breakdowns attempted per task id in this run; bounds a task that keeps failing. */
   autoSplits?: Map<string, number>;
+  /** Slack thread roots per task id (task id → root message `ts`), so later events reply in-thread. */
+  slackThreads?: Map<string, string>;
   /** Called when the run itself rewrote the plan (an automatic breakdown), so a live view can refresh. */
   onPlanChanged?: (parentId: string, childIds: string[]) => void;
   /** Live pipeline-watch state shown in the TUI's top panel; undefined when the watcher is off. */
@@ -202,7 +204,7 @@ async function autoBreakdown(ctx: RunContext, task: Task, ev: BreakdownEvidence)
       result.children.length ? `into ${result.children.join(', ')}` : '',
       `${ev.stage} breakdown${verdict.source ? ` (${verdict.source})` : ''}: ${verdict.reason}`,
     ],
-  });
+  }, task.id);
   return { verdict, split: true };
 }
 
@@ -370,11 +372,15 @@ function sessionLabel(p: { providerName?: string; provider?: string; model?: str
   return `${name}${p.model ? ` · ${p.model}` : ''}${p.variant ? ` · variant ${p.variant}` : ''}`;
 }
 
-/** Post a lifecycle notification when Slack is on and this event is armed. Never throws. */
-async function slackNotify(ctx: RunContext, event: SlackEvent, n: { title: string; lines?: string[] }): Promise<void> {
-  if (!slackEventEnabled(ctx.config.slack, event)) return;
-  const project = ctx.config.slack.project || basename(ctx.paths.root) || undefined;
-  await notifySlack(ctx.config.slack, { event, project, ...n }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal }, (m) => ctx.log.warn(m));
+/**
+ * Post a lifecycle notification when Slack is on and this event is armed. Never throws. A `taskId`
+ * makes the event part of that task's thread: the first message for the task is the channel root and
+ * every later one replies under it. Run-level events omit it and always post as their own message.
+ */
+async function slackNotify(ctx: RunContext, event: SlackEvent, n: { title: string; lines?: string[] }, taskId?: string): Promise<void> {
+  const project = slackProject(ctx.config.slack, ctx.paths.root);
+  const threads = (ctx.slackThreads ??= new Map());
+  await notifyTaskSlack(ctx.config.slack, threads, { event, project, taskId, ...n }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal }, (m) => ctx.log.warn(m));
 }
 
 async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, halt?: Halted): Promise<void> {
@@ -456,7 +462,7 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
       final.summary,
       st.commitSha ? `commit ${st.commitSha.slice(0, 8)}` : '',
     ],
-  });
+  }, task.id);
   log.info(`=== ${task.id} -> ${final.status.toUpperCase()} · ${fmtDuration(st.durationS)} · ${fmtCost(st.costUsd)} · ${final.summary} · git: ${st.commit}`);
   // A ticket just ended: refresh the advisory watch panel now rather than waiting for the next
   // interval, so the summary leads with this outcome. Fire-and-forget; a no-op when watch is off.
@@ -607,7 +613,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         `${category}: ${reason}`,
         `escalation ${escalations}/${maxEscalations}`,
       ],
-    });
+    }, task.id);
     return true;
   };
 
@@ -656,7 +662,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       `phase ${task.phase} · ${sessionLabel(spec)}`,
       continuation > 0 ? `resuming at continuation ${continuation}/${maxContinuations}` : st.attempts > 0 ? `attempt ${st.attempts + 1}` : '',
     ],
-  });
+  }, task.id);
 
   attempts: for (let attempt = 1; ; attempt++) {
     if (maxIterations > 0 && iterations >= maxIterations) {
@@ -758,7 +764,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           await slackNotify(ctx, 'taskContinue', {
             title: `${task.id} continuing — ${task.title}`,
             lines: [`slice ${continuation}/${maxContinuations} · ${sessionLabel(spec)}`, block.summary || 'more work remains'],
-          });
+          }, task.id);
           // A split requested mid-slice stops here too: the slice above is committed, so the parent's
           // task can be rewritten into subtasks and the run resumed on them.
           if (ctx.splitRequest) {

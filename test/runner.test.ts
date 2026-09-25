@@ -15,15 +15,18 @@ import type { Task } from '../src/tasks.js';
 const silent: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner() {} };
 const flags: RunFlags = { retry: false, continueOnFailure: false, dryRun: false, clearHalt: false };
 
-/** A fetch double that records the `text` of each Slack `chat.postMessage` and answers `ok: true`. */
-function slackSink(): { fetchImpl: typeof fetch; texts: string[] } {
+/** A fetch double that records each Slack `chat.postMessage` (text and params) and answers `ok: true`. */
+function slackSink(): { fetchImpl: typeof fetch; texts: string[]; params: URLSearchParams[] } {
   const texts: string[] = [];
+  const params: URLSearchParams[] = [];
   const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
-    const text = new URLSearchParams(String(init?.body)).get('text');
+    const p = new URLSearchParams(String(init?.body));
+    params.push(p);
+    const text = p.get('text');
     if (text) texts.push(text);
     return new Response(JSON.stringify({ ok: true, ts: '1' }), { status: 200, headers: { 'content-type': 'application/json' } });
   }) as unknown as typeof fetch;
-  return { fetchImpl, texts };
+  return { fetchImpl, texts, params };
 }
 
 const claudeResult = (status: string, summary: string) =>
@@ -111,6 +114,32 @@ test('taskStart posts once when a task begins, before its terminal event', async
     assert.ok(bodies.findIndex((b) => b.includes('T01 started —')) < bodies.findIndex((b) => b.includes('T01 DONE —')));
     // No run budget is configured, so no budget event may fire even with Slack on.
     assert.ok(!bodies.some((b) => b.includes('Run budget')), `unexpected budget message: ${bodies.join(' | ')}`);
+  } finally {
+    delete process.env.SLACK_BOT_TOKEN;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('task lifecycle messages thread under the task start, while run-level events do not', async () => {
+  const { paths, task } = project();
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 3, slack: { ...DEFAULTS.slack, enabled: true, channel: 'C123ABC', project: 'symphony' } };
+  const { fetchImpl, params } = slackSink();
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl };
+  process.env.SLACK_BOT_TOKEN = 'xoxb-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    const idx = (needle: string) => params.findIndex((p) => (p.get('text') ?? '').includes(needle));
+    const started = idx('T01 started —');
+    const continuing = idx('T01 continuing —');
+    const done = idx('T01 DONE —');
+    assert.ok(started >= 0 && continuing > started && done > continuing, `order: start=${started} continue=${continuing} done=${done}`);
+    // The start opens the thread; the later events for this task reply in it.
+    assert.equal(params[started].get('thread_ts'), null);
+    assert.equal(params[continuing].get('thread_ts'), '1');
+    assert.equal(params[done].get('thread_ts'), '1');
+    assert.equal(ctx.slackThreads?.get('T01'), '1');
   } finally {
     delete process.env.SLACK_BOT_TOKEN;
     delete process.env.SYMPHONY_FAKE_FIXTURES;

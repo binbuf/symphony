@@ -661,6 +661,7 @@ An unattended run is easier to trust when something tells you the moment it need
     "taskContinue": true,
     "taskFailed": true,
     "taskBlocked": true,
+    "watch": false,
     "budgetClose": true,
     "budgetExceeded": true,
     "halt": true,
@@ -679,7 +680,7 @@ An unattended run is easier to trust when something tells you the moment it need
 | `channel` | – | channel to post to: a channel id (`C…`/`G…`/`D…`) or a `#name` |
 | `user` | – | user to notify: a user id (`U…`/`W…`), an `@handle`, or a bare handle |
 | `mention` | `true` | when both `channel` and `user` are set, prefix the message with `<@id>` so the post pings the user |
-| `events.*` | all `true` | which events post (see below) |
+| `events.*` | all `true` except `watch` | which events post (see below); `watch` is opt-in |
 | `timeoutMs` | `10000` | hard cap on one notification, target resolution included |
 
 **Targets.** `channel` takes a **channel id** (`C…`/`G…`/`D…`) or a `#name`; `user` takes a **user id** (`U…`/`W…`) or a **handle** (`@ada` or `ada`). With only `user` set the message is a **DM** to that user; with only `channel` it posts to the channel; with both it posts to the channel and, when `mention` is on, pings the user in it. A literal id needs only `chat:write`. A `#name` / handle is resolved with `conversations.list` / `users.list`, so the token also needs a matching read scope (`channels:read` + `groups:read`, or `users:read`) — otherwise use the id.
@@ -696,12 +697,15 @@ An unattended run is easier to trust when something tells you the moment it need
 | `taskContinue` | a task session reported `continue`; a fresh slice is starting |
 | `taskFailed` | a task finished `failed` |
 | `taskBlocked` | a task finished `blocked`, awaiting a human |
+| `watch` | the pipeline watcher produced a new in-progress read on the running task (feature-flagged; see below) |
 | `budgetClose` | reported run cost reached 80% of `maxCostUsdPerRun` |
 | `budgetExceeded` | reported run cost reached `maxCostUsdPerRun` and the run halted |
 | `halt` | the run halted on a fatal error (auth, billing, attempts, consecutive failures, budget, …) |
 | `runEnd` | `run` finished, whatever its exit code |
 
-The two `budget*` events are the only ones that also depend on another setting: they never fire unless `maxCostUsdPerRun` is configured (greater than zero). `budgetClose` fires once per run at 80% of the cap; `budgetExceeded` fires at the cap, just before the run halts.
+The two `budget*` events depend on another setting: they never fire unless `maxCostUsdPerRun` is configured (greater than zero). `budgetClose` fires once per run at 80% of the cap; `budgetExceeded` fires at the cap, just before the run halts. `watch` is **feature-flagged off by default** and also needs `watch.enabled`: it fires once per watcher check that produces a new summary, threaded (see below), and stays quiet on a `NO_UPDATE` reply or when no task is running.
+
+**Threads.** With `taskStart` on, the first message about a task is an ordinary channel/DM message and every later message about that same task — `taskContinue`, `taskEscalated`, `taskSplit`, `taskDone`/`taskFailed`/`taskBlocked`, and a `watch` update — is posted as a reply in that message's thread, so a busy channel shows one root per task instead of a flat stream. Run-level events (`runStart`, `runEnd`, `halt`, `budget*`) are never threaded. A reply does not re-`mention` the user, even with `mention: true`; only the thread root pings. If `taskStart` is off, the first task event that actually posts becomes the thread root.
 
 **Messages.** Each headline carries the `[project]` tag, the task id and title (or the run/halt), and the resolved status; the detail lines add phase, provider/model/variant, duration, cost, summary and commit. For example:
 
@@ -778,7 +782,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `escalation.enabled`, `.provider`, `.model`, `.modelProvider`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, `Review this image deeply and describe everything about it in detail.`, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt mentions it (see [Vision tool](#vision-tool)) |
-| `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true`, `10000` | post lifecycle events to a Slack channel or DM a user (see [Slack notifications](#slack-notifications)) |
+| `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true` except `watch`, `10000` | post lifecycle events to a Slack channel or DM a user, threading a task's later events under its start (see [Slack notifications](#slack-notifications)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
 | `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.rules.*`, `.decision`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `16384`/`1`/`1`/`[task, verify]`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |

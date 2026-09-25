@@ -175,6 +175,11 @@ export interface SlackEvents {
   taskFailed: boolean;
   /** A task finished `blocked` and needs a human. */
   taskBlocked: boolean;
+  /**
+   * The pipeline watcher produced a new in-progress read on the running task. Feature-flagged and
+   * off by default; needs `watch.enabled` too, since it is the watcher that fires it.
+   */
+  watch: boolean;
   /** Reported run cost crossed the warning fraction of `maxCostUsdPerRun` (only when that cap is set). */
   budgetClose: boolean;
   /** Reported run cost reached `maxCostUsdPerRun` and the run halted (only when that cap is set). */
@@ -468,6 +473,7 @@ export const DEFAULTS: Config = {
       taskContinue: true,
       taskFailed: true,
       taskBlocked: true,
+      watch: false,
       budgetClose: true,
       budgetExceeded: true,
       halt: true,
@@ -879,6 +885,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
           taskContinue: boolOr(slackEventsRaw.taskContinue, DEFAULTS.slack.events.taskContinue, 'slack.events.taskContinue', warnings),
           taskFailed: boolOr(slackEventsRaw.taskFailed, DEFAULTS.slack.events.taskFailed, 'slack.events.taskFailed', warnings),
           taskBlocked: boolOr(slackEventsRaw.taskBlocked, DEFAULTS.slack.events.taskBlocked, 'slack.events.taskBlocked', warnings),
+          watch: boolOr(slackEventsRaw.watch, DEFAULTS.slack.events.watch, 'slack.events.watch', warnings),
           budgetClose: boolOr(slackEventsRaw.budgetClose, DEFAULTS.slack.events.budgetClose, 'slack.events.budgetClose', warnings),
           budgetExceeded: boolOr(slackEventsRaw.budgetExceeded, DEFAULTS.slack.events.budgetExceeded, 'slack.events.budgetExceeded', warnings),
           halt: boolOr(slackEventsRaw.halt, DEFAULTS.slack.events.halt, 'slack.events.halt', warnings),

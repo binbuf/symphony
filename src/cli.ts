@@ -89,7 +89,9 @@ Controls
                            the "breakdown" block (see the README).
   Slack notifications      with "slack": {"enabled": true, "channel": "#eng-alerts"} in the config,
                            post task done/continue/failed/blocked, halt and run-end events to a Slack
-                           channel or DM a user; every event is its own flag (see the README).
+                           channel or DM a user, threading a task's later events under its start; every
+                           event is its own flag, and the in-progress "watch" event is opt-in (see the
+                           README).
 
 Exit codes: 0 ok/paused · 1 unexpected error · 2 stopped on a blocked/failed task · 3 halted · 4 usage/preflight · 130/143 interrupted
 Every option also applies to the project given by --root DIR (default: the directory containing .symphony/).

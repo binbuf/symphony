@@ -1,3 +1,4 @@
+import { basename } from 'node:path';
 import type { SlackConfig } from './config.js';
 import { isRecord } from './util.js';
 
@@ -11,6 +12,7 @@ export type SlackEvent =
   | 'taskContinue'
   | 'taskFailed'
   | 'taskBlocked'
+  | 'watch'
   | 'budgetClose'
   | 'budgetExceeded'
   | 'halt'
@@ -28,6 +30,7 @@ const EMOJI: Record<SlackEvent, string> = {
   taskContinue: ':arrow_forward:',
   taskFailed: ':x:',
   taskBlocked: ':hand:',
+  watch: ':eyes:',
   budgetClose: ':warning:',
   budgetExceeded: ':money_with_wings:',
   halt: ':octagonal_sign:',
@@ -41,6 +44,8 @@ export interface SlackDeps {
   fetchImpl?: typeof fetch;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** Reply in this thread (`thread_ts`) instead of starting a new channel message. */
+  threadTs?: string;
 }
 
 export interface SlackNotification {
@@ -51,6 +56,19 @@ export interface SlackNotification {
   title: string;
   /** Optional detail lines (summary, provider/model, cost, …); empty lines are dropped. */
   lines?: string[];
+  /** When set, post as a reply in this thread rather than a new root message. */
+  threadTs?: string;
+}
+
+/** Per-run map of a task id to the `ts` of its Slack thread root. */
+export interface SlackThreadStore {
+  get(taskId: string): string | undefined;
+  set(taskId: string, ts: string): void;
+}
+
+/** The project label for a notification: the configured one, else the project folder name. */
+export function slackProject(config: SlackConfig, root: string): string | undefined {
+  return config.project || basename(root) || undefined;
 }
 
 /** The Slack Web API base for this config; `baseUrl` overrides the built-in one. */
@@ -185,8 +203,12 @@ export async function sendSlackMessage(config: SlackConfig, text: string, deps: 
   const api: SlackApi = (method, params, get) => slackApi(config, token, method, params, { get, fetchImpl: deps.fetchImpl, signal: controller.signal });
   try {
     const target = await resolveSlackTarget(config, api);
-    const body = target.mention ? `<@${target.mention}> ${text}` : text;
-    const res = await api('chat.postMessage', { channel: target.channel, text: body, unfurl_links: false, unfurl_media: false });
+    const threadTs = deps.threadTs?.trim() || undefined;
+    // Only a thread root pings the user: re-mentioning on every reply would be noise.
+    const body = target.mention && !threadTs ? `<@${target.mention}> ${text}` : text;
+    const params: Record<string, string | number | boolean> = { channel: target.channel, text: body, unfurl_links: false, unfurl_media: false };
+    if (threadTs) params.thread_ts = threadTs;
+    const res = await api('chat.postMessage', params);
     return { channel: target.channel, ts: typeof res.ts === 'string' ? res.ts : undefined };
   } catch (e) {
     if ((e as Error | undefined)?.name === 'AbortError') throw new Error(`slack: the request timed out after ${config.timeoutMs} ms`);
@@ -199,18 +221,39 @@ export async function sendSlackMessage(config: SlackConfig, text: string, deps: 
 
 /**
  * Fire-and-forget lifecycle notification: a no-op when the integration or this event is off. A
- * failure (no token, unknown target, API error, timeout) only reaches `warn`, never the run.
+ * failure (no token, unknown target, API error, timeout) only reaches `warn`, never the run. Returns
+ * the posted message's channel and `ts` (or undefined when skipped/failed) so a caller can thread.
  */
 export async function notifySlack(
   config: SlackConfig,
   n: SlackNotification,
   deps: SlackDeps = {},
   warn: (m: string) => void = () => {},
-): Promise<void> {
-  if (!slackEventEnabled(config, n.event)) return;
+): Promise<{ channel: string; ts?: string } | undefined> {
+  if (!slackEventEnabled(config, n.event)) return undefined;
   try {
-    await sendSlackMessage(config, formatSlackMessage(n), deps);
+    return await sendSlackMessage(config, formatSlackMessage(n), { ...deps, threadTs: n.threadTs });
   } catch (e) {
     warn(`slack ${n.event}: ${(e as Error).message}`);
+    return undefined;
   }
+}
+
+/**
+ * Post a task-scoped notification as a thread: the first message for a task lands as an ordinary
+ * channel/DM message and its `ts` becomes the thread root; every later message for the same task
+ * replies under it. Run-level notifications (no `taskId`) always post as their own message. Never
+ * throws; `threads` is updated in memory for the life of the run.
+ */
+export async function notifyTaskSlack(
+  config: SlackConfig,
+  threads: SlackThreadStore,
+  n: SlackNotification & { taskId?: string },
+  deps: SlackDeps = {},
+  warn: (m: string) => void = () => {},
+): Promise<void> {
+  if (!slackEventEnabled(config, n.event)) return;
+  const threadTs = n.taskId ? threads.get(n.taskId) : undefined;
+  const res = await notifySlack(config, { ...n, threadTs }, deps, warn);
+  if (n.taskId && !threadTs && res?.ts) threads.set(n.taskId, res.ts);
 }

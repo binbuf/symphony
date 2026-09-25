@@ -125,6 +125,7 @@
       "taskContinue": true,
       "taskFailed": true,
       "taskBlocked": true,
+      "watch": false,
       "budgetClose": true,
       "budgetExceeded": true,
       "halt": true,
