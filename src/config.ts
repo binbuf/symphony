@@ -154,6 +154,54 @@ export interface WatchConfig {
   timeoutMin: number;
 }
 
+/**
+ * Which lifecycle events post to Slack. Every event is gated twice: the master `slack.enabled`
+ * switch and the event's own flag, so an integration can be armed without flooding a channel.
+ */
+export interface SlackEvents {
+  /** A task finished `done` (its verify passed, if one is configured). */
+  taskDone: boolean;
+  /** A task session reported `continue` (a fresh slice is about to start). */
+  taskContinue: boolean;
+  /** A task finished `failed`. */
+  taskFailed: boolean;
+  /** A task finished `blocked` and needs a human. */
+  taskBlocked: boolean;
+  /** The run halted on a fatal error (auth, billing, attempts, consecutive failures, …). */
+  halt: boolean;
+  /** `run` finished, whatever its exit code. */
+  runEnd: boolean;
+}
+
+/**
+ * Optional Slack notifications: post a short message to a channel or DM a user when a lifecycle
+ * event fires. Off by default, and shipped with no channel/user so the example is workspace-agnostic.
+ * Reached through the Slack Web API with the token named by `apiKeyEnv`; a missing token or a failed
+ * post only warns and never breaks the run. A name target (`channel: "#general"`, `user: "@ada"`) is
+ * resolved with `conversations.list` / `users.list`, so the token needs the matching read scope; an
+ * id target (`C…`/`G…`, `U…`/`W…`) needs only `chat:write`.
+ */
+export interface SlackConfig {
+  /** Master switch; off by default so an existing run behaves exactly as before until you opt in. */
+  enabled: boolean;
+  /** Environment variable holding the token (bot `xoxb-`, user `xoxp-`, or a workspace app token). */
+  apiKeyEnv: string;
+  /** Overrides the API base (`https://slack.com/api`), e.g. a gateway or a test double. */
+  baseUrl?: string;
+  /** Label shown in every message so several repos can share a channel; empty = the project folder name. */
+  project: string;
+  /** Channel to post to: an id (`C…`/`G…`/`D…`) or a `#name`. Empty = derive the target from `user`. */
+  channel: string;
+  /** User to notify: a user id (`U…`/`W…`), an `@handle`, or a bare handle. Empty = channel-only. */
+  user: string;
+  /** When both `channel` and `user` are set, prefix the message with `<@id>` so Slack pings the user. */
+  mention: boolean;
+  /** Which lifecycle events post. */
+  events: SlackEvents;
+  /** Hard cap on one notification, including target resolution; on timeout the post is abandoned. */
+  timeoutMs: number;
+}
+
 /** The deterministic triggers that open a breakdown decision, per stage. */
 export interface BreakdownRules {
   /** `onStart` trigger: only ask when the task file body is at least this many bytes (0 = every task). */
@@ -293,6 +341,8 @@ export interface Config {
   jev: JevConfig;
   /** Optional image-analysis tool a task session can invoke. See VisionConfig. */
   vision: VisionConfig;
+  /** Optional Slack notifications on lifecycle events. See SlackConfig. */
+  slack: SlackConfig;
   /** Periodic read-only progress/health summary in the TUI. See WatchConfig. */
   watch: WatchConfig;
   /** Automatic task breakdown at task start, at a `continue` boundary, or instead of escalating. See BreakdownConfig. */
@@ -389,6 +439,23 @@ export const DEFAULTS: Config = {
     timeoutMs: 60_000,
     prompt: 'Review this image deeply and describe everything about it in detail.',
     maxImageBytes: 20 * 1024 * 1024,
+  },
+  slack: {
+    enabled: false,
+    apiKeyEnv: 'SLACK_BOT_TOKEN',
+    project: '',
+    channel: '',
+    user: '',
+    mention: true,
+    events: {
+      taskDone: true,
+      taskContinue: true,
+      taskFailed: true,
+      taskBlocked: true,
+      halt: true,
+      runEnd: true,
+    },
+    timeoutMs: 10_000,
   },
   watch: {
     enabled: true,
@@ -583,6 +650,8 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const escRaw = isRecord(raw.escalation) ? raw.escalation : {};
   const jevRaw = isRecord(raw.jev) ? raw.jev : {};
   const visionRaw = isRecord(raw.vision) ? raw.vision : {};
+  const slackRaw = isRecord(raw.slack) ? raw.slack : {};
+  const slackEventsRaw = isRecord(slackRaw.events) ? slackRaw.events : {};
   const watchRaw = isRecord(raw.watch) ? raw.watch : {};
   const breakRaw = isRecord(raw.breakdown) ? raw.breakdown : {};
   const breakRulesRaw = isRecord(breakRaw.rules) ? breakRaw.rules : {};
@@ -765,6 +834,33 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         timeoutMs: positiveOr(visionRaw.timeoutMs, DEFAULTS.vision.timeoutMs, 'vision.timeoutMs', warnings),
         prompt: typeof visionRaw.prompt === 'string' && visionRaw.prompt.trim() ? visionRaw.prompt.trim() : DEFAULTS.vision.prompt,
         maxImageBytes: positiveOr(visionRaw.maxImageBytes, DEFAULTS.vision.maxImageBytes, 'vision.maxImageBytes', warnings),
+      };
+    })(),
+    slack: (() => {
+      const channel = typeof slackRaw.channel === 'string' ? slackRaw.channel.trim() : DEFAULTS.slack.channel;
+      const user = typeof slackRaw.user === 'string' ? slackRaw.user.trim() : DEFAULTS.slack.user;
+      let enabled = boolOr(slackRaw.enabled, DEFAULTS.slack.enabled, 'slack.enabled', warnings);
+      if (enabled && !channel && !user) {
+        warnings.push('slack.enabled is true but neither slack.channel nor slack.user is set; Slack stays off');
+        enabled = false;
+      }
+      return {
+        enabled,
+        apiKeyEnv: typeof slackRaw.apiKeyEnv === 'string' && slackRaw.apiKeyEnv.trim() ? slackRaw.apiKeyEnv.trim() : DEFAULTS.slack.apiKeyEnv,
+        baseUrl: typeof slackRaw.baseUrl === 'string' && slackRaw.baseUrl.trim() ? slackRaw.baseUrl.trim() : undefined,
+        project: typeof slackRaw.project === 'string' ? slackRaw.project.trim() : DEFAULTS.slack.project,
+        channel,
+        user,
+        mention: boolOr(slackRaw.mention, DEFAULTS.slack.mention, 'slack.mention', warnings),
+        events: {
+          taskDone: boolOr(slackEventsRaw.taskDone, DEFAULTS.slack.events.taskDone, 'slack.events.taskDone', warnings),
+          taskContinue: boolOr(slackEventsRaw.taskContinue, DEFAULTS.slack.events.taskContinue, 'slack.events.taskContinue', warnings),
+          taskFailed: boolOr(slackEventsRaw.taskFailed, DEFAULTS.slack.events.taskFailed, 'slack.events.taskFailed', warnings),
+          taskBlocked: boolOr(slackEventsRaw.taskBlocked, DEFAULTS.slack.events.taskBlocked, 'slack.events.taskBlocked', warnings),
+          halt: boolOr(slackEventsRaw.halt, DEFAULTS.slack.events.halt, 'slack.events.halt', warnings),
+          runEnd: boolOr(slackEventsRaw.runEnd, DEFAULTS.slack.events.runEnd, 'slack.events.runEnd', warnings),
+        },
+        timeoutMs: positiveOr(slackRaw.timeoutMs, DEFAULTS.slack.timeoutMs, 'slack.timeoutMs', warnings),
       };
     })(),
     watch: (() => {

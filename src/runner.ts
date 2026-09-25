@@ -1,5 +1,5 @@
 import { existsSync, writeFileSync } from 'node:fs';
-import { relative } from 'node:path';
+import { basename, relative } from 'node:path';
 import { decideBreakdown, type BreakdownEvidence, type BreakdownStage, type BreakdownVerdict } from './breakdown.js';
 import { classifyFailure, evidenceText, makeClassified, type Classified, type FailureEvidence } from './classify.js';
 import { resolveEscalation, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
@@ -26,6 +26,7 @@ import type { Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, squash, stamp } from './util.js';
 import { runVerify, type VerifyResult } from './verify.js';
 import { visionPromptNote } from './vision.js';
+import { notifySlack, slackEventEnabled, type SlackEvent } from './slack.js';
 import { startPipelineWatch, type WatchState } from './watch.js';
 
 export interface RunFlags {
@@ -344,7 +345,25 @@ function snapshotText(outcome: SessionOutcome): string | undefined {
   return line ? line.slice(0, 300) : undefined;
 }
 
-function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, halt?: Halted): void {
+/** Map a terminal task status to its Slack event. */
+function slackEventFor(status: TaskStatus): SlackEvent {
+  return status === 'done' ? 'taskDone' : status === 'blocked' ? 'taskBlocked' : 'taskFailed';
+}
+
+/** `opencode · model · variant high`, for the provider line in a notification. */
+function sessionLabel(p: { providerName?: string; provider?: string; model?: string; variant?: string }): string {
+  const name = p.providerName ?? p.provider ?? '?';
+  return `${name}${p.model ? ` · ${p.model}` : ''}${p.variant ? ` · variant ${p.variant}` : ''}`;
+}
+
+/** Post a lifecycle notification when Slack is on and this event is armed. Never throws. */
+async function slackNotify(ctx: RunContext, event: SlackEvent, n: { title: string; lines?: string[] }): Promise<void> {
+  if (!slackEventEnabled(ctx.config.slack, event)) return;
+  const project = ctx.config.slack.project || basename(ctx.paths.root) || undefined;
+  await notifySlack(ctx.config.slack, { event, project, ...n }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal }, (m) => ctx.log.warn(m));
+}
+
+async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, halt?: Halted): Promise<void> {
   const { paths, config, log, state } = ctx;
   st.status = final.status;
   st.summary = final.summary;
@@ -415,6 +434,15 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
     SYMPHONY_VARIANT: st.variant ?? '',
     SYMPHONY_COST: st.costUsd !== undefined ? st.costUsd.toFixed(2) : '',
   }, (m) => log.warn(`${task.id}: ${m}`));
+  await slackNotify(ctx, slackEventFor(final.status), {
+    title: `${task.id} ${final.status.toUpperCase()} — ${task.title}`,
+    lines: [
+      `phase ${task.phase} · ${sessionLabel(st)}`,
+      `duration ${fmtDuration(st.durationS)} · cost ${fmtCost(st.costUsd)}`,
+      final.summary,
+      st.commitSha ? `commit ${st.commitSha.slice(0, 8)}` : '',
+    ],
+  });
   log.info(`=== ${task.id} -> ${final.status.toUpperCase()} · ${fmtDuration(st.durationS)} · ${fmtCost(st.costUsd)} · ${final.summary} · git: ${st.commit}`);
   // A ticket just ended: refresh the advisory watch panel now rather than waiting for the next
   // interval, so the summary leads with this outcome. Fire-and-forget; a no-op when watch is off.
@@ -696,6 +724,10 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           refreshDerivedDocs(ctx);
           if (config.commitPerSession) commitIntermediate(ctx, task, st);
           saveState(paths, state);
+          await slackNotify(ctx, 'taskContinue', {
+            title: `${task.id} continuing — ${task.title}`,
+            lines: [`slice ${continuation}/${maxContinuations} · ${sessionLabel(spec)}`, block.summary || 'more work remains'],
+          });
           // A split requested mid-slice stops here too: the slice above is committed, so the parent's
           // task can be rewritten into subtasks and the run resumed on them.
           if (ctx.splitRequest) {
@@ -813,7 +845,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     break;
   }
 
-  finalizeTask(ctx, task, st, final ?? { status: 'failed', summary: 'no attempt ran' }, halt);
+  await finalizeTask(ctx, task, st, final ?? { status: 'failed', summary: 'no attempt ran' }, halt);
   // A session stopped by the run view (TUI quit/split) marks the outcome interrupted without
   // necessarily setting ctx.interrupted; report that too, so the run loop never counts a manual stop
   // as a failure against halt.maxConsecutiveFailures.
@@ -846,7 +878,7 @@ export function haltBanner(ctx: RunContext, h: Halted): void {
   ]);
 }
 
-function setHalt(ctx: RunContext, h: Halted): number {
+async function setHalt(ctx: RunContext, h: Halted): Promise<number> {
   ctx.state.halted = h;
   saveState(ctx.paths, ctx.state);
   updatePipelineStatus(ctx.paths, ctx.tasks, ctx.state, ctx.log);
@@ -857,6 +889,10 @@ function setHalt(ctx: RunContext, h: Halted): number {
     SYMPHONY_HALT_CATEGORY: h.category,
     SYMPHONY_HALT_REASON: h.reason,
   }, (m) => ctx.log.warn(m));
+  await slackNotify(ctx, 'halt', {
+    title: `Halted${h.taskId ? ` on ${h.taskId}` : ''} — ${h.category}`,
+    lines: [h.reason, haltResumeHint(h)],
+  });
   return 3;
 }
 
@@ -991,7 +1027,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   // Automatic breakdowns attempted per task id this run: a task that keeps failing should not be
   // split again and again. (A successful split consumes the parent, so this mostly bounds failures.)
   ctx.autoSplits ??= new Map();
-  const budgetHalt = (): number | undefined => {
+  const budgetHalt = async (): Promise<number | undefined> => {
     if (config.maxCostUsdPerRun <= 0 || runCost() < config.maxCostUsdPerRun) return undefined;
     return setHalt(ctx, {
       at: nowIso(), category: 'budget',
@@ -1041,7 +1077,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
         }
         return 0;
       }
-      const spend = budgetHalt();
+      const spend = await budgetHalt();
       if (spend !== undefined) return spend;
       const st = state.tasks[task.id];
       if (st && st.status === 'failed' && st.attempts >= config.halt.maxAttemptsPerTask && !flags.retry) {
@@ -1061,7 +1097,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       if (out.stopped) return 0;
       if (out.halt) return setHalt(ctx, out.halt);
       if (out.interrupted) return ctx.signalName === 'SIGTERM' ? 143 : 130;
-      const overBudget = budgetHalt();
+      const overBudget = await budgetHalt();
       if (overBudget !== undefined) return overBudget;
 
       if (out.status === 'done') { consecutiveFailures = 0; continue; }
@@ -1095,7 +1131,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     return 0;
   };
 
-  const preSpend = budgetHalt();
+  const preSpend = await budgetHalt();
   if (preSpend !== undefined) return preSpend;
 
   acquireLock(paths);
@@ -1112,12 +1148,24 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     stopHeartbeat();
     releaseLock(paths);
   }
+  const runStatus = code === 0 ? 'ok' : code === 2 ? 'stopped' : code === 3 ? 'halted' : 'error';
   fireHook(config, 'onRunEnd', {
     SYMPHONY_ROOT: paths.root,
     SYMPHONY_EXIT: String(code),
-    SYMPHONY_STATUS: code === 0 ? 'ok' : code === 2 ? 'stopped' : code === 3 ? 'halted' : 'error',
+    SYMPHONY_STATUS: runStatus,
     SYMPHONY_COST: runCost() > 0 ? runCost().toFixed(2) : '',
   }, (m) => log.warn(m));
+  const doneCount = ctx.tasks.filter((t) => DONE_STATES.includes(state.tasks[t.id]?.status ?? 'pending')).length;
+  const blockedIds = ctx.tasks.filter((t) => state.tasks[t.id]?.status === 'blocked').map((t) => t.id);
+  const failedCount = ctx.tasks.filter((t) => state.tasks[t.id]?.status === 'failed').length;
+  await slackNotify(ctx, 'runEnd', {
+    title: `Run finished — ${runStatus}`,
+    lines: [
+      `${doneCount}/${ctx.tasks.length} done${blockedIds.length ? ` · ${blockedIds.length} blocked (${blockedIds.join(', ')})` : ''}${failedCount ? ` · ${failedCount} failed` : ''}`,
+      `exit code ${code}${runCost() > 0 ? ` · cost $${runCost().toFixed(2)} this run` : ''}`,
+      ctx.startBranch ? `branch ${ctx.startBranch}` : '',
+    ],
+  });
   return code;
 }
 
@@ -1160,7 +1208,7 @@ export async function nudgeCommand(ctx: RunContext, rawId: string, note?: string
       final = { status: 'failed', summary: block ? `${block.summary} | ${c.category}: ${c.message}` : `${c.category}: ${c.message} (still no SYMPHONY_RESULT after nudge)`, lastError: mkError(c) };
       if (c.fatal) halt = { at: nowIso(), taskId: task.id, category: c.category, reason: c.message };
     }
-    finalizeTask(ctx, task, st, final, halt);
+    await finalizeTask(ctx, task, st, final, halt);
     if (halt) return setHalt(ctx, halt);
     return final.status === 'done' ? 0 : 2;
   } finally {

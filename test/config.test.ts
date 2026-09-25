@@ -583,6 +583,49 @@ test('vision config is off by default with OpenRouter + Qwen VL, and validates i
   assert.ok(bad.warnings.some((w) => /vision\.maxImageBytes/.test(w)));
 });
 
+test('slack config is off by default with agnostic values, parses overrides, and validates keys', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-slackcfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+
+  assert.equal(DEFAULTS.slack.enabled, false);
+  assert.equal(DEFAULTS.slack.apiKeyEnv, 'SLACK_BOT_TOKEN');
+  assert.equal(DEFAULTS.slack.project, '');
+  assert.equal(DEFAULTS.slack.channel, '');
+  assert.equal(DEFAULTS.slack.user, '');
+  assert.equal(DEFAULTS.slack.mention, true);
+  assert.deepEqual(DEFAULTS.slack.events, { taskDone: true, taskContinue: true, taskFailed: true, taskBlocked: true, halt: true, runEnd: true });
+  assert.equal(loadConfig(paths, {}).config.slack.enabled, false);
+
+  writeFileSync(paths.config, JSON.stringify({ slack: { enabled: true, apiKeyEnv: 'SLACK_API_KEY', project: 'symphony', channel: '#eng', user: '@ada', mention: false, timeoutMs: 5000, events: { taskDone: true, taskContinue: false, taskFailed: true, taskBlocked: true, halt: false, runEnd: true } } }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.slack.enabled, true);
+  assert.equal(config.slack.apiKeyEnv, 'SLACK_API_KEY');
+  assert.equal(config.slack.project, 'symphony');
+  assert.equal(config.slack.channel, '#eng');
+  assert.equal(config.slack.user, '@ada');
+  assert.equal(config.slack.mention, false);
+  assert.equal(config.slack.timeoutMs, 5000);
+  assert.deepEqual(config.slack.events, { taskDone: true, taskContinue: false, taskFailed: true, taskBlocked: true, halt: false, runEnd: true });
+  assert.equal(warnings.length, 0);
+
+  // Enabled with no target cannot post anywhere: it is turned off with a warning.
+  writeFileSync(paths.config, JSON.stringify({ slack: { enabled: true } }));
+  const noTarget = loadConfig(paths, {});
+  assert.equal(noTarget.config.slack.enabled, false);
+  assert.ok(noTarget.warnings.some((w) => /neither slack\.channel nor slack\.user/.test(w)));
+
+  // Non-positive timeout and non-boolean flags warn and fall back.
+  writeFileSync(paths.config, JSON.stringify({ slack: { enabled: true, channel: 'C123ABC', timeoutMs: 0, mention: 'yes', events: { taskDone: 1 } } }));
+  const bad = loadConfig(paths, {});
+  assert.equal(bad.config.slack.timeoutMs, DEFAULTS.slack.timeoutMs);
+  assert.equal(bad.config.slack.mention, DEFAULTS.slack.mention);
+  assert.equal(bad.config.slack.events.taskDone, DEFAULTS.slack.events.taskDone);
+  assert.ok(bad.warnings.some((w) => /slack\.timeoutMs/.test(w)));
+  assert.ok(bad.warnings.some((w) => /slack\.mention/.test(w)));
+  assert.ok(bad.warnings.some((w) => /slack\.events\.taskDone/.test(w)));
+});
+
 test('modelProvider composes the OpenCode "provider/model" reference for every block', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-mp-'));
   const paths = resolvePaths(dir);

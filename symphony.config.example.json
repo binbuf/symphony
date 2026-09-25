@@ -108,6 +108,24 @@
     "maxImageBytes": 20971520,
     "prompt": "Deeply eview this image and describe everything about it in detail."
   },
+  "slack": {
+    "_slack": "Target a channel and/or a user: slack.channel is a channel id (C…/G…/D…) or #name; slack.user is a user id (U…/W…) or @handle. Set one, or both with mention:true to ping the user in the channel.",
+    "enabled": false,
+    "apiKeyEnv": "SLACK_BOT_TOKEN",
+    "project": "",
+    "channel": "",
+    "user": "",
+    "mention": true,
+    "events": {
+      "taskDone": true,
+      "taskContinue": true,
+      "taskFailed": true,
+      "taskBlocked": true,
+      "halt": true,
+      "runEnd": true
+    },
+    "timeoutMs": 10000
+  },
   "watch": {
     "enabled": true,
     "intervalMin": 5,

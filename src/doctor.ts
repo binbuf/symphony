@@ -10,6 +10,7 @@ import { haltResumeHint, liveLock, type State } from './state.js';
 import { resolveSpawn } from './spawn.js';
 import { isPathLike, resolveBinary } from './util.js';
 import { visionProblem } from './vision.js';
+import { slackProblem } from './slack.js';
 
 export interface Check { name: string; level: 'ok' | 'warn' | 'fail'; detail: string }
 
@@ -151,6 +152,15 @@ export function runDoctor(i: DoctorInput): Check[] {
     const problem = visionProblem(v, process.env);
     const detail = `vision tool via ${v.provider} · ${v.model} (key from ${v.apiKeyEnv})`;
     add('vision', problem ? 'warn' : 'ok', problem ? `vision is on but ${problem}; the tool will fail until this is fixed (set ${v.apiKeyEnv}, or vision.enabled=false). ${detail}` : detail);
+  }
+
+  if (i.config.slack.enabled) {
+    const s = i.config.slack;
+    const problem = slackProblem(s, process.env);
+    const target = s.channel ? `channel ${s.channel}` : s.user ? `user ${s.user}` : 'no target';
+    const events = (Object.entries(s.events) as [string, boolean][]).filter(([, on]) => on).map(([name]) => name).join(', ') || 'none';
+    const detail = `Slack → ${target} (token from ${s.apiKeyEnv}) · events ${events}`;
+    add('slack', problem ? 'warn' : 'ok', problem ? `slack is on but ${problem}; posts will be skipped until this is fixed (set ${s.apiKeyEnv}, or slack.enabled=false). ${detail}` : detail);
   }
 
   if (stopPresent(i.paths)) add('stop', 'warn', `${rel(i.paths.root, i.paths.stop)} present; run pauses until it is removed`);

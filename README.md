@@ -6,7 +6,7 @@ symphony lives in `<your target project>/.symphony/` (gitignored) and reads its 
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Slack notifications](#slack-notifications) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -95,7 +95,7 @@ On Windows use `./.symphony/symphony.ps1` (or `.symphony\symphony.cmd` from `cmd
 
 ### Preflight — `doctor`
 
-Run it before the first `run` and after changing providers or config. It checks, in order: Node version, that the project is a git repository (and whether the worktree is dirty), that `ROADMAP.md` exists and parses, that the binary of every provider a task will use is on `PATH` (per-task front matter included), that they are authenticated, that an independent verify command exists (warning when nothing will check a `done`), that the [`vision` tool's](#vision-tool) API key is present when it is enabled, and whether a halt, STOP sentinel or another live run (lock) would block you. Failures exit `4`; warnings do not stop a run. `run` repeats these checks itself before every invocation.
+Run it before the first `run` and after changing providers or config. It checks, in order: Node version, that the project is a git repository (and whether the worktree is dirty), that `ROADMAP.md` exists and parses, that the binary of every provider a task will use is on `PATH` (per-task front matter included), that they are authenticated, that an independent verify command exists (warning when nothing will check a `done`), that the [`vision` tool's](#vision-tool) API key is present when it is enabled, that the [Slack](#slack-notifications) target and token are set when it is enabled, and whether a halt, STOP sentinel or another live run (lock) would block you. Failures exit `4`; warnings do not stop a run. `run` repeats these checks itself before every invocation.
 
 ### `init` — scaffold the plan
 
@@ -637,6 +637,90 @@ Configure it with the `watch` block; the provider and model are independent of t
 
 Set `"enabled": false` to turn it off. The panel appears once the watcher is armed (or, if its provider binary is missing, shows the error while the run continues), and the timer starts after preflight passes — not during `--dry-run`, `prepare`, or an empty run.
 
+## Slack notifications
+
+An unattended run is easier to trust when something tells you the moment it needs a human. Symphony can post a short message to a **channel** or **DM a user** on lifecycle events, reached through the Slack Web API with the token named by `slack.apiKeyEnv`. It is **off by default**, and the example ships with no channel or user so the block stays workspace-agnostic.
+
+```json
+"slack": {
+  "enabled": true,
+  "apiKeyEnv": "SLACK_BOT_TOKEN",
+  "project": "my-app",
+  "channel": "#eng-alerts",
+  "user": "",
+  "mention": true,
+  "events": {
+    "taskDone": true,
+    "taskContinue": true,
+    "taskFailed": true,
+    "taskBlocked": true,
+    "halt": true,
+    "runEnd": true
+  },
+  "timeoutMs": 10000
+}
+```
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | master switch |
+| `apiKeyEnv` | `SLACK_BOT_TOKEN` | environment variable holding the token (bot `xoxb-`, user `xoxp-`, or an app token) |
+| `project` | the project folder name | label shown as `[name]` in every message, so several repos can share one channel |
+| `baseUrl` | – | override the API base (`https://slack.com/api`), e.g. a gateway or a test double |
+| `channel` | – | channel to post to: a channel id (`C…`/`G…`/`D…`) or a `#name` |
+| `user` | – | user to notify: a user id (`U…`/`W…`), an `@handle`, or a bare handle |
+| `mention` | `true` | when both `channel` and `user` are set, prefix the message with `<@id>` so the post pings the user |
+| `events.*` | all `true` | which events post (see below) |
+| `timeoutMs` | `10000` | hard cap on one notification, target resolution included |
+
+**Targets.** `channel` takes a **channel id** (`C…`/`G…`/`D…`) or a `#name`; `user` takes a **user id** (`U…`/`W…`) or a **handle** (`@ada` or `ada`). With only `user` set the message is a **DM** to that user; with only `channel` it posts to the channel; with both it posts to the channel and, when `mention` is on, pings the user in it. A literal id needs only `chat:write`. A `#name` / handle is resolved with `conversations.list` / `users.list`, so the token also needs a matching read scope (`channels:read` + `groups:read`, or `users:read`) — otherwise use the id.
+
+**Events.** Each is gated twice: the master `enabled` switch and the event's own flag.
+
+| event | when |
+|---|---|
+| `taskDone` | a task finished `done` (after its verify, if one is configured) |
+| `taskContinue` | a task session reported `continue`; a fresh slice is starting |
+| `taskFailed` | a task finished `failed` |
+| `taskBlocked` | a task finished `blocked`, awaiting a human |
+| `halt` | the run halted on a fatal error (auth, billing, attempts, consecutive failures, budget, …) |
+| `runEnd` | `run` finished, whatever its exit code |
+
+**Messages.** Each headline carries the `[project]` tag, the task id and title (or the run/halt), and the resolved status; the detail lines add phase, provider/model/variant, duration, cost, summary and commit. For example:
+
+```
+:white_check_mark: *[symphony] T05 DONE — Add login*
+phase Auth · opencode · openrouter/deepseek-v4.1-flash · variant high
+duration 4m 12s · cost $1.23
+Added the login form and its tests.
+commit 1a2b3c4d
+
+:x: *[symphony] T05 FAILED — Add login*
+phase Auth · opencode · openrouter/deepseek-v4.1-flash · variant high
+duration 4m 12s · cost $1.23
+verify failed (exit 1): npm test — 2 failing
+
+:hand: *[symphony] T05 BLOCKED — Add login*
+phase Auth · opencode · openrouter/deepseek-v4.1-flash · variant high
+duration 6m 01s · cost $1.90
+needs a DATABASE_URL before the migration can run
+
+:arrow_forward: *[symphony] T05 continuing — Add login*
+slice 2/4 · opencode · openrouter/deepseek-v4.1-flash · variant high
+wired the form; the API call and tests come next
+
+:octagonal_sign: *[symphony] Halted on T05 — auth*
+not authenticated: provider returned 401
+re-run after `symphony clear-halt` once the key is fixed
+
+:checkered_flag: *[symphony] Run finished — ok*
+4/6 done · 1 blocked (T05)
+exit code 0 · cost $8.90 this run
+branch main
+```
+
+Messages are best-effort: a missing token, an unknown target, a non-`ok` API answer or a timeout only logs a warning and never fails or halts the run. `symphony doctor` reports the configured target and the armed events, and warns when the token is missing.
+
 ## Config
 
 Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags and environment variables override it per run. Keys beginning with `_` are ignored, so you can leave notes in the file — the example uses `_models` to point at [Models.md](Models.md).
@@ -677,6 +761,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `escalation.enabled`, `.provider`, `.model`, `.modelProvider`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, `Review this image deeply and describe everything about it in detail.`, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt mentions it (see [Vision tool](#vision-tool)) |
+| `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true`, `10000` | post lifecycle events to a Slack channel or DM a user (see [Slack notifications](#slack-notifications)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
 | `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.rules.*`, `.decision`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `16384`/`1`/`1`/`[task, verify]`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
