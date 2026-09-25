@@ -10,6 +10,12 @@ export const PROVIDER_NAMES: ProviderName[] = ['claude', 'cursor', 'opencode', '
 export interface ProviderConfig {
   bin: string;
   model?: string;
+  /**
+   * The upstream provider a bare `model` runs on, for CLIs that address models as `provider/model`
+   * (OpenCode). Symphony composes `modelProvider/model` before invoking the CLI, so configs can keep
+   * `model` bare. Ignored by providers whose model is a bare id (Claude, Cursor, Codex, Gemini, …).
+   */
+  modelProvider?: string;
   /** Default reasoning-effort / variant for this provider (e.g. "high"). Ignored by providers without a knob. */
   variant?: string;
   extraArgs: string[];
@@ -49,8 +55,10 @@ export interface EscalationConfig {
    * shipped default model (GLM-5.3). Set it to your own provider for a same-provider model bump.
    */
   provider?: ProviderName;
-  /** Model the escalation provider runs, e.g. "openrouter/z-ai/glm-5.3" (OpenCode) or a Claude model id. */
+  /** Model the escalation provider runs. For OpenCode this is a bare id; `modelProvider` names the upstream provider. */
   model: string;
+  /** OpenCode only: upstream provider for a bare `model` (e.g. "openrouter"); defaults to the provider's own. */
+  modelProvider?: string;
   /** How many escalation sessions a single task may take before it is failed for good. */
   maxAttempts: number;
   /** Failure categories that hand the task to the escalation model. */
@@ -133,8 +141,10 @@ export interface WatchConfig {
   intervalMin: number;
   /** Provider the watcher runs on; independent of the run's provider. */
   provider: ProviderName;
-  /** Model the watcher runs (e.g. "openrouter/deepseek/deepseek-v4.1-flash"); empty = provider default. */
+  /** Model the watcher runs; empty = provider default. For OpenCode this is a bare id (see `modelProvider`). */
   model: string;
+  /** OpenCode only: upstream provider for a bare `model` (e.g. "openrouter"); defaults to the provider's own. */
+  modelProvider?: string;
   /**
    * Optional reasoning-effort override for the watcher model. Unset = the provider's default, which
    * avoids the synchronous provider-catalog lookup that validating a variant requires.
@@ -181,6 +191,8 @@ export interface BreakdownConfig {
   provider?: ProviderName;
   /** Model the fallback LLM runs (defaults to the watch block's model). */
   model: string;
+  /** OpenCode only: upstream provider for a bare `model` (defaults to the watch block's). */
+  modelProvider?: string;
   /** Optional reasoning-effort override for the fallback LLM. Unset = the provider's default. */
   variant?: string;
   /** Hard wall clock for one fallback-LLM decision; on timeout the rules answer. */
@@ -290,6 +302,8 @@ export interface Config {
 export interface CliOverrides {
   provider?: string;
   model?: string;
+  /** OpenCode only: upstream provider for a bare `--model` (e.g. "openrouter"). */
+  modelProvider?: string;
   variant?: string;
   timeoutMin?: number;
   budgetUsd?: number;
@@ -305,7 +319,7 @@ export const DEFAULTS: Config = {
   providers: {
     claude: { bin: 'claude', model: 'claude-opus-5', variant: 'high', extraArgs: [] },
     cursor: { bin: 'agent', model: 'claude-opus-5', extraArgs: [], idleTimeoutMin: 45 },
-    opencode: { bin: 'opencode', model: 'anthropic/claude-sonnet-4-5', variant: 'high', extraArgs: [], idleTimeoutMin: 45 },
+    opencode: { bin: 'opencode', model: 'claude-sonnet-4-5', modelProvider: 'anthropic', variant: 'high', extraArgs: [], idleTimeoutMin: 45 },
     codex: { bin: 'codex', model: 'gpt-6-sol', variant: 'high', extraArgs: [], idleTimeoutMin: 45 },
     gemini: { bin: 'gemini', model: 'gemini-3.1-pro-preview', extraArgs: [], idleTimeoutMin: 45 },
     antigravity: { bin: 'agy', model: 'gemini-3.1-pro-high', variant: 'high', extraArgs: [], idleTimeoutMin: 45 },
@@ -349,7 +363,8 @@ export const DEFAULTS: Config = {
   escalation: {
     enabled: false,
     provider: 'opencode',
-    model: 'openrouter/z-ai/glm-5.3',
+    model: 'z-ai/glm-5.3',
+    modelProvider: 'openrouter',
     maxAttempts: 1,
     onCategories: ['task', 'verify'],
   },
@@ -379,7 +394,8 @@ export const DEFAULTS: Config = {
     enabled: true,
     intervalMin: 5,
     provider: 'opencode',
-    model: 'openrouter/deepseek/deepseek-v4.1-flash',
+    model: 'deepseek/deepseek-v4.1-flash',
+    modelProvider: 'openrouter',
     timeoutMin: 5,
   },
   breakdown: {
@@ -396,6 +412,7 @@ export const DEFAULTS: Config = {
     decision: 'auto',
     provider: undefined,
     model: '',
+    modelProvider: undefined,
     timeoutMin: 5,
     preferOverEscalation: true,
     maxPerTask: 1,
@@ -542,9 +559,15 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
       const pn = asProviderName(name, 'symphony.config.json providers');
       if (!isRecord(val)) throw new UsageError(`symphony.config.json: providers.${name} must be an object`);
       const base = providers[pn];
+      let modelProvider = typeof val.modelProvider === 'string' && val.modelProvider.trim() ? val.modelProvider.trim() : base.modelProvider;
+      if (modelProvider && pn !== 'opencode') {
+        warnings.push(`providers.${name}.modelProvider is only used by opencode; ignored`);
+        modelProvider = undefined;
+      }
       providers[pn] = {
         bin: typeof val.bin === 'string' && val.bin ? val.bin : base.bin,
         model: typeof val.model === 'string' && val.model ? val.model : base.model,
+        modelProvider,
         variant: typeof val.variant === 'string' && val.variant ? val.variant : base.variant,
         extraArgs: stringArray(val.extraArgs, base.extraArgs, `providers.${name}.extraArgs`, warnings),
         budgetUsd: val.budgetUsd === undefined || val.budgetUsd === null ? base.budgetUsd : numberOr(val.budgetUsd, 0, `providers.${name}.budgetUsd`, warnings),
@@ -659,12 +682,19 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         warnings.push('escalation.enabled is true but escalation.model is empty; escalation stays off');
         enabled = false;
       }
+      const provider = escRaw.provider === undefined || escRaw.provider === null
+        ? DEFAULTS.escalation.provider
+        : asProviderName(escRaw.provider, 'symphony.config.json escalation.provider');
+      let modelProvider = typeof escRaw.modelProvider === 'string' && escRaw.modelProvider.trim() ? escRaw.modelProvider.trim() : DEFAULTS.escalation.modelProvider;
+      if (provider !== 'opencode' && modelProvider) {
+        warnings.push('escalation.modelProvider is only used by opencode; ignored');
+        modelProvider = undefined;
+      }
       return {
         enabled,
-        provider: escRaw.provider === undefined || escRaw.provider === null
-          ? DEFAULTS.escalation.provider
-          : asProviderName(escRaw.provider, 'symphony.config.json escalation.provider'),
+        provider,
         model,
+        modelProvider,
         maxAttempts: Math.max(0, numberOr(escRaw.maxAttempts, DEFAULTS.escalation.maxAttempts, 'escalation.maxAttempts', warnings)),
         onCategories: stringArray(escRaw.onCategories, DEFAULTS.escalation.onCategories, 'escalation.onCategories', warnings),
       };
@@ -752,11 +782,17 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         warnings.push('watch.enabled is true but watch.model is empty and the provider declares none; pipeline watch stays off');
         enabled = false;
       }
+      let modelProvider = typeof watchRaw.modelProvider === 'string' && watchRaw.modelProvider.trim() ? watchRaw.modelProvider.trim() : DEFAULTS.watch.modelProvider;
+      if (provider !== 'opencode' && modelProvider) {
+        warnings.push('watch.modelProvider is only used by opencode; ignored');
+        modelProvider = undefined;
+      }
       return {
         enabled,
         intervalMin: positiveOr(watchRaw.intervalMin, DEFAULTS.watch.intervalMin, 'watch.intervalMin', warnings),
         provider,
         model,
+        modelProvider,
         variant: (() => {
           const v = watchRaw.variant;
           if (v === undefined || v === null) return undefined;
@@ -797,6 +833,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         decision,
         provider,
         model: typeof breakRaw.model === 'string' ? breakRaw.model.trim() : DEFAULTS.breakdown.model,
+        modelProvider: typeof breakRaw.modelProvider === 'string' && breakRaw.modelProvider.trim() ? breakRaw.modelProvider.trim() : DEFAULTS.breakdown.modelProvider,
         variant: (() => {
           const v = breakRaw.variant;
           if (v === undefined || v === null) return undefined;
@@ -831,7 +868,18 @@ export interface SessionSpec {
   timeoutMin: number;
   idleTimeoutMin: number;
   autoApprove: boolean;
-  sources: { provider: string; model: string; variant: string };
+  sources: { provider: string; model: string; modelProvider: string; variant: string };
+}
+
+/**
+ * Compose the model string handed to the CLI. OpenCode addresses a model as `provider/model`, but
+ * every other provider takes a bare id, so `modelProvider` names that upstream provider and `model`
+ * stays bare; the two are joined here. A model that already starts with the prefix is left alone.
+ */
+export function composeModel(providerName: ProviderName, modelProvider: string | undefined, model: string | undefined): string | undefined {
+  if (providerName !== 'opencode' || !model || !modelProvider) return model;
+  const prefix = `${modelProvider}/`;
+  return model.startsWith(prefix) ? model : `${prefix}${model}`;
 }
 
 /**
@@ -865,6 +913,24 @@ export function resolveSession(
   else if (meta.model) { model = meta.model; modelSource = 'task front matter'; }
   else { model = pc.model || undefined; modelSource = pc.model ? 'config' : 'provider default'; }
 
+  // The upstream provider for CLIs that address a model as `provider/model` (OpenCode). Precedence
+  // mirrors `model`. Only OpenCode uses it; on any other provider it is dropped with a warning when
+  // the value was set explicitly rather than inherited from config.
+  let modelProvider: string | undefined;
+  let modelProviderSource: string;
+  if (cli.modelProvider !== undefined) { modelProvider = cli.modelProvider.trim() || undefined; modelProviderSource = '--model-provider'; }
+  else if (env.SYMPHONY_MODEL_PROVIDER) { modelProvider = env.SYMPHONY_MODEL_PROVIDER.trim() || undefined; modelProviderSource = 'env SYMPHONY_MODEL_PROVIDER'; }
+  else if (meta.modelProvider) { modelProvider = meta.modelProvider.trim() || undefined; modelProviderSource = 'task front matter'; }
+  else if (pc.modelProvider) { modelProvider = pc.modelProvider; modelProviderSource = 'config'; }
+  else { modelProvider = undefined; modelProviderSource = 'provider default'; }
+  if (modelProvider && providerName !== 'opencode') {
+    const explicit = modelProviderSource === '--model-provider' || modelProviderSource === 'env SYMPHONY_MODEL_PROVIDER' || modelProviderSource === 'task front matter';
+    if (explicit) warnings.push(`modelProvider "${modelProvider}" ignored: provider ${providerName} takes a bare model id [${modelProviderSource}]`);
+    modelProvider = undefined;
+    modelProviderSource = 'provider default';
+  }
+  model = composeModel(providerName, modelProvider, model);
+
   // Reasoning effort. Default comes from the provider config (shipped as "high" where supported);
   // it is dropped when the provider has no knob or the model does not advertise it.
   let variant: string | undefined;
@@ -888,7 +954,7 @@ export function resolveSession(
     budgetUsd = undefined;
   }
   if (providerName === 'opencode' && model && !model.includes('/')) {
-    warnings.push(`opencode models are "provider/model" (e.g. anthropic/claude-sonnet-4-5); got "${model}"`);
+    warnings.push(`opencode addresses a model as "provider/model"; set providers.opencode.modelProvider (or use a "provider/model" model); got "${model}"`);
   }
 
   let timeoutMin = config.timeoutMin;
@@ -909,7 +975,7 @@ export function resolveSession(
       timeoutMin,
       idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
       autoApprove: config.autoApprove,
-      sources: { provider: providerSource, model: modelSource, variant: variantSource },
+      sources: { provider: providerSource, model: modelSource, modelProvider: modelProviderSource, variant: variantSource },
     },
     warnings,
   };
@@ -967,14 +1033,16 @@ export function resolveBreakdown(
   const warnings: string[] = [];
   const providerName = b.provider ?? config.watch.provider;
   const pc = config.providers[providerName];
-  const model = b.model.trim() || config.watch.model.trim() || pc.model;
+  const modelProvider = b.modelProvider ?? config.watch.modelProvider ?? pc.modelProvider;
+  if (b.modelProvider && providerName !== 'opencode') warnings.push('breakdown.modelProvider is only used by opencode; ignored');
+  const model = composeModel(providerName, modelProvider, b.model.trim() || config.watch.model.trim() || pc.model);
   let variant = b.variant ?? config.watch.variant;
   if (variant && !variantSupport(providerName, pc.bin, model, variant)) {
     warnings.push(`${providerName}${model ? ` model ${model}` : ''} does not support variant "${variant}" (breakdown.variant); using provider default`);
     variant = undefined;
   }
   if (providerName === 'opencode' && model && !model.includes('/')) {
-    warnings.push(`opencode models are "provider/model" (e.g. openrouter/deepseek/deepseek-v4.1-flash); breakdown.model got "${model}"`);
+    warnings.push(`opencode addresses a model as "provider/model"; set breakdown.modelProvider or watch.modelProvider (or use a "provider/model" model); got "${model}"`);
   }
   return {
     spec: {
@@ -987,7 +1055,7 @@ export function resolveBreakdown(
       timeoutMin: b.timeoutMin,
       idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
       autoApprove: false,
-      sources: { provider: b.provider ? 'breakdown' : 'watch', model: b.model ? 'breakdown' : 'watch', variant: b.variant ? 'breakdown' : variant ? 'watch' : 'provider default' },
+      sources: { provider: b.provider ? 'breakdown' : 'watch', model: b.model ? 'breakdown' : 'watch', modelProvider: b.modelProvider ? 'breakdown' : config.watch.modelProvider ? 'watch' : pc.modelProvider ? 'config' : 'provider default', variant: b.variant ? 'breakdown' : variant ? 'watch' : 'provider default' },
     },
     warnings,
   };
@@ -1007,12 +1075,15 @@ export function resolveEscalation(
   if (!config.escalation.enabled) return undefined;
   const warnings: string[] = [];
   const providerName = config.escalation.provider ?? primary.providerName;
-  const model = config.escalation.model.trim();
-  if (!model) {
+  const rawModel = config.escalation.model.trim();
+  if (!rawModel) {
     warnings.push('escalation.model is empty; escalation stays off');
     return undefined;
   }
   const pc = config.providers[providerName];
+  const modelProvider = config.escalation.modelProvider ?? pc.modelProvider;
+  if (config.escalation.modelProvider && providerName !== 'opencode') warnings.push('escalation.modelProvider is only used by opencode; ignored');
+  const model = composeModel(providerName, modelProvider, rawModel)!;
   let budgetUsd = pc.budgetUsd;
   if (budgetUsd !== undefined && !supportsBudget(providerName)) {
     warnings.push(`escalation budget ${budgetUsd} USD ignored: provider ${providerName} has no budget flag`);
@@ -1021,7 +1092,7 @@ export function resolveEscalation(
   let variant = pc.variant;
   if (variant && !variantSupport(providerName, pc.bin, model, variant)) variant = undefined;
   if (providerName === 'opencode' && !model.includes('/')) {
-    warnings.push(`opencode models are "provider/model" (e.g. openrouter/z-ai/glm-5.3); escalation got "${model}"`);
+    warnings.push(`opencode addresses a model as "provider/model"; set escalation.modelProvider (or use a "provider/model" model); got "${model}"`);
   }
   return {
     spec: {
@@ -1034,7 +1105,7 @@ export function resolveEscalation(
       timeoutMin: config.timeoutMin,
       idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
       autoApprove: config.autoApprove,
-      sources: { provider: 'escalation', model: 'escalation', variant: variant ? 'config' : 'provider default' },
+      sources: { provider: 'escalation', model: 'escalation', modelProvider: config.escalation.modelProvider ? 'escalation' : pc.modelProvider ? 'config' : 'provider default', variant: variant ? 'config' : 'provider default' },
     },
     warnings,
   };
@@ -1056,14 +1127,16 @@ export function resolveWatch(
   const warnings: string[] = [];
   const providerName = w.provider;
   const pc = config.providers[providerName];
-  const model = w.model.trim() || pc.model;
+  const modelProvider = w.modelProvider ?? pc.modelProvider;
+  if (w.modelProvider && providerName !== 'opencode') warnings.push('watch.modelProvider is only used by opencode; ignored');
+  const model = composeModel(providerName, modelProvider, w.model.trim() || pc.model);
   let variant = w.variant;
   if (variant && !variantSupport(providerName, pc.bin, model, variant)) {
     warnings.push(`${providerName}${model ? ` model ${model}` : ''} does not support variant "${variant}" (watch.variant); using provider default`);
     variant = undefined;
   }
   if (providerName === 'opencode' && model && !model.includes('/')) {
-    warnings.push(`opencode models are "provider/model" (e.g. openrouter/deepseek/deepseek-v4.1-flash); watch.model got "${model}"`);
+    warnings.push(`opencode addresses a model as "provider/model"; set watch.modelProvider (or use a "provider/model" model); got "${model}"`);
   }
   return {
     spec: {
@@ -1076,7 +1149,7 @@ export function resolveWatch(
       timeoutMin: w.timeoutMin,
       idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
       autoApprove: false,
-      sources: { provider: 'watch', model: 'watch', variant: variant ? 'watch' : 'provider default' },
+      sources: { provider: 'watch', model: 'watch', modelProvider: w.modelProvider ? 'watch' : pc.modelProvider ? 'config' : 'provider default', variant: variant ? 'watch' : 'provider default' },
     },
     warnings,
   };

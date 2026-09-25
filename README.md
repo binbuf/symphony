@@ -54,12 +54,14 @@ symphony defaults to **Claude Code** (`claude`). Install and log in to the agent
 {
   "provider": "opencode",
   "providers": {
-    "opencode": { "model": "anthropic/claude-sonnet-4-5" }
+    "opencode": { "model": "claude-sonnet-4-5", "modelProvider": "anthropic" }
   }
 }
 ```
 
-Or override per run: `./.symphony/symphony run --provider codex --model gpt-5`. The resolution order is `--provider/--model/--variant` > `SYMPHONY_PROVIDER`/`SYMPHONY_MODEL`/`SYMPHONY_VARIANT` > task front matter > config > defaults. Every key is optional; see [Providers](#providers) and [Config](#config). `doctor` verifies the chosen binary and its login before anything runs.
+`modelProvider` is the upstream provider a model id belongs to; only OpenCode needs it (it addresses models as `provider/model`), and symphony composes `modelProvider/model` for you. Every other CLI takes the bare `model` and ignores `modelProvider`.
+
+Or override per run: `./.symphony/symphony run --provider codex --model gpt-5`. The resolution order is `--provider/--model/--model-provider/--variant` > `SYMPHONY_PROVIDER`/`SYMPHONY_MODEL`/`SYMPHONY_MODEL_PROVIDER`/`SYMPHONY_VARIANT` > task front matter > config > defaults. Every key is optional; see [Providers](#providers) and [Config](#config). `doctor` verifies the chosen binary and its login before anything runs.
 
 ### 3. init → doctor → run
 
@@ -287,7 +289,8 @@ In the run view, press `b` on the selected task: the run pauses at the next boun
     "onCategories": ["task", "verify"]
   },
   "decision": "auto",
-  "model": "openrouter/deepseek/deepseek-v4.1-flash",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "modelProvider": "openrouter",
   "timeoutMin": 5,
   "preferOverEscalation": true,
   "maxPerTask": 1
@@ -305,7 +308,7 @@ In the run view, press `b` on the selected task: the run pauses at the next boun
 | `rules.afterFailedAttempts` | `1` | `onFailure` trigger: sessions already run before the decision opens |
 | `rules.onCategories` | `[task, verify]` | `onFailure` categories that open the decision; infrastructure failures (auth, rate limits, timeouts) never do |
 | `decision` | `auto` | who answers: `auto` (Jev → fallback LLM → rules), `jev`, `llm`, or `rules` |
-| `provider` `.model` `.variant` | the `watch` block's | where the fallback LLM runs (OpenCode `provider/model`, e.g. `openrouter/deepseek/deepseek-v4.1-flash`) |
+| `provider` `.model` `.modelProvider` `.variant` | the `watch` block's | where the fallback LLM runs (`modelProvider` names the OpenCode upstream provider; defaults to the watch block's) |
 | `timeoutMin` | `5` | hard cap on one fallback-LLM decision |
 | `preferOverEscalation` | `true` | with `decision: rules` (and as the last resort), split rather than escalate when both are possible |
 | `maxPerTask` | `1` | automatic breakdowns one task may take in a run (0 = unlimited) |
@@ -379,12 +382,13 @@ The harness owns the checkbox and the trailing tag; edit everything else freely.
 - [x] T04 — Auth spike ⟵ accepted           signed off by a human with `accept`
 ```
 
-Ids are `T01`, `T02`, … (`01 —` and `3.` also parse), and a task broken down with `symphony split` keeps its number with a letter suffix: `T10a`, `T10b`, … (splitting a subtask again gives `T10a1`, …). Task files are matched by the link, else by the id's filename prefix (`10-slug.md` for `T10`, `10a-slug.md` for `T10a`). A bullet with no task file still runs; the agent is told to create the file first. A task file may start with front matter to override the provider, model, reasoning variant, timeout or verify command for that task only:
+Ids are `T01`, `T02`, … (`01 —` and `3.` also parse), and a task broken down with `symphony split` keeps its number with a letter suffix: `T10a`, `T10b`, … (splitting a subtask again gives `T10a1`, …). Task files are matched by the link, else by the id's filename prefix (`10-slug.md` for `T10`, `10a-slug.md` for `T10a`). A bullet with no task file still runs; the agent is told to create the file first. A task file may start with front matter to override the provider, model, model provider, reasoning variant, timeout or verify command for that task only:
 
 ```markdown
 ---
-provider: gemini
-model: gemini-2.5-pro
+provider: opencode
+model: z-ai/glm-5.3
+modelProvider: openrouter
 variant: high
 timeoutMin: 90
 verify: npm test -- --runInBand
@@ -434,7 +438,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | flag | meaning |
 |---|---|
 | `--prepare` | run `prepare` first; abort the run if the docs still do not lint clean |
-| `--provider P`, `--model M`, `--variant V` | override provider/model/reasoning effort for this run (see precedence above; `--variant ""` clears it) |
+| `--provider P`, `--model M`, `--model-provider P`, `--variant V` | override provider/model/model-provider/reasoning effort for this run (see precedence above; `--variant ""` clears it) |
 | `--from T03`, `--to T10`, `--only T05,T06` | restrict which tasks are selected |
 | `--set NAME` | run a declared task set's plan instead of the base docs package |
 | `--retry` | re-run selected tasks even if they are done, accepted or blocked |
@@ -462,7 +466,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `antigravity` | `agy` | `-p --output-format json --workspace <root>` + prompt-file bootstrap | `--dangerously-skip-permissions` | no bypass flag |
 | `fake` | node | replays an NDJSON fixture; for tests | | |
 
-- **Models:** pass `--model`, or set `providers.<name>.model`. Current ids per provider are listed in [Models.md](Models.md); OpenCode addresses models as `provider/model` (browse <https://openrouter.ai/models>). Ids churn, so confirm against each CLI's own listing.
+- **Models:** pass `--model` (and `--model-provider` for OpenCode), or set `providers.<name>.model` (+ `.modelProvider`). Current ids per provider are listed in [Models.md](Models.md); OpenCode addresses models as `provider/model`, and symphony composes that from `modelProvider` + `model` (browse <https://openrouter.ai/models>). Ids churn, so confirm against each CLI's own listing.
 - **OpenCode 1.x required:** the OpenCode adapter targets the 1.x CLI (`opencode run --format json --thinking --variant …`). OpenCode 2.x is beta and not supported yet — it moves the variant into the model reference (`provider/model#variant`), regroups the model catalog, and adds server flags (`--standalone`) the adapter does not pass. `doctor` warns when it detects a non-1.x version. Pin 1.x with `npm i -g opencode-ai@1` until 2.x is stable.
 - **Running alongside OpenCode 2.x:** the harness launches whatever `providers.opencode.bin` names (default `opencode`) and reports the version it finds — it does not detect or pin a version itself. A 2.x **desktop/GUI** app does not put `opencode` on your shell `PATH`, so it leaves a 1.x CLI install alone. Two **CLI** installs, however, share the `opencode` command name (the V2 CLI is `@opencode/cli` / the `opencode-v2` tap / `opencode-beta`; the V2 curl installer replaces the V1 binary), so whichever is first on `PATH` wins. Pin 1.x explicitly by setting `providers.opencode.bin` to a path (see below), then confirm with `doctor`.
 - **Choosing the binary:** `providers.<name>.bin` may be a command name looked up on `PATH` (the default), or a path — absolute, `~`, or relative to the project root — which always wins over `PATH`. Point it at a chosen install, e.g. `/usr/local/bin/opencode` or `~/.opencode/bin/opencode`. The harness reports the resolved path and version in `doctor`. On Windows an npm `.cmd`/`.bat` shim is launched through `cmd.exe` automatically (argv escaped), so a normal npm install works with no config; a native `.exe` is spawned directly.
@@ -482,7 +486,8 @@ It is off by default, and the shipped default target is OpenCode running **GLM-5
 "escalation": {
   "enabled": true,
   "provider": "opencode",
-  "model": "openrouter/z-ai/glm-5.3",
+  "model": "z-ai/glm-5.3",
+  "modelProvider": "openrouter",
   "maxAttempts": 1,
   "onCategories": ["task", "verify"]
 }
@@ -492,7 +497,8 @@ It is off by default, and the shipped default target is OpenCode running **GLM-5
 |---|---|---|
 | `enabled` | `false` | turn escalation on |
 | `provider` | `opencode` | provider the escalated sessions run on; set it to your own provider for a same-provider model bump |
-| `model` | `openrouter/z-ai/glm-5.3` | model the escalation provider runs (OpenCode wants `provider/model`) |
+| `model` | `z-ai/glm-5.3` | model the escalation provider runs |
+| `modelProvider` | `openrouter` | OpenCode only: the upstream provider `model` belongs to (composed as `modelProvider/model`) |
 | `maxAttempts` | `1` | escalation sessions a single task may take before it is failed for good |
 | `onCategories` | `[task, verify]` | the give-up reasons that escalate: `task` covers a reported `failed` and the continuation limit, `verify` a rejected `done` |
 
@@ -621,7 +627,8 @@ Configure it with the `watch` block; the provider and model are independent of t
   "enabled": true,
   "intervalMin": 5,
   "provider": "opencode",
-  "model": "openrouter/deepseek/deepseek-v4.1-flash",
+  "model": "deepseek/deepseek-v4.1-flash",
+  "modelProvider": "openrouter",
   "timeoutMin": 5
 }
 ```
@@ -637,7 +644,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | key | default | meaning |
 |---|---|---|
 | `provider` | `claude` | `claude` · `cursor` · `opencode` · `codex` · `gemini` · `antigravity` |
-| `providers.<name>.bin` `.model` `.variant` `.extraArgs` `.budgetUsd` `.idleTimeoutMin` | see `symphony.config.example.json` | binary (a `PATH` name, or an absolute/`~`/project-relative path that overrides `PATH`), model, reasoning-effort default (`high`), extra CLI args, per-task budget (Claude), stall timeout override |
+| `providers.<name>.bin` `.model` `.modelProvider` `.variant` `.extraArgs` `.budgetUsd` `.idleTimeoutMin` | see `symphony.config.example.json` | binary (a `PATH` name, or an absolute/`~`/project-relative path that overrides `PATH`), model, upstream provider for OpenCode's `provider/model` form, reasoning-effort default (`high`), extra CLI args, per-task budget (Claude), stall timeout override |
 | `paths.docs` | `docs` (legacy `.docs` honoured) | planning package directory |
 | `paths.roadmap` `.progress` `.tasks` `.design` `.adr` `.logs` `.index` | derived from `paths.docs` | individual overrides, absolute or root-relative |
 | `paths.stop` | `.stop` | graceful-pause sentinel (absolute or root-relative) |
@@ -667,11 +674,11 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `git.autoIgnoreUntracked`, `git.extraIgnore` | `true`, `[]` | before committing, keep untracked ephemeral/secret files out of the commit by adding their patterns to `.gitignore` |
 | `retry.maxAttempts`, `retry.exponential`, `retry.baseSec`, `retry.factor`, `retry.maxSec`, `retry.jitter`, `retry.honorRetryAfter`, `retry.backoffSec` | `8`, `true`, `30`, `2`, `900`, `0.2`, `true`, `[30,120,300]` | transient-error retries: exponential by default (`baseSec × factor^n`, capped, jittered, a provider `Retry-After` honoured), or the fixed `backoffSec` schedule when `exponential` is false |
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
-| `escalation.enabled`, `.provider`, `.model`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `openrouter/z-ai/glm-5.3`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
+| `escalation.enabled`, `.provider`, `.model`, `.modelProvider`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, `Review this image deeply and describe everything about it in detail.`, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt mentions it (see [Vision tool](#vision-tool)) |
-| `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `openrouter/deepseek/deepseek-v4.1-flash`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
-| `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.rules.*`, `.decision`, `.provider`, `.model`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `16384`/`1`/`1`/`[task, verify]`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
+| `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
+| `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.rules.*`, `.decision`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `16384`/`1`/`1`/`[task, verify]`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
 
 ## Hooks

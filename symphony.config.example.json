@@ -1,5 +1,6 @@
 {
   "_models": "Current model ids per provider are documented in Models.md.",
+  "_modelProvider": "OpenCode addresses a model as provider/model (e.g. openrouter/qwen/qwen3-vl-235b-a22b-instruct). Set modelProvider (e.g. \"openrouter\") next to a bare model instead of writing that prefix yourself.",
   "_bin": "providers.<name>.bin is a command name looked up on PATH, or a path (absolute, ~, or project-relative) that overrides PATH and pins a specific install.",
   "provider": "opencode",
   "providers": {
@@ -16,7 +17,8 @@
     },
     "opencode": {
       "bin": "opencode",
-      "model": "openrouter/deepseek/deepseek-v4.1-flash",
+      "model": "deepseek/deepseek-v4.1-flash",
+      "modelProvider": "openrouter",
       "variant": "high",
       "extraArgs": [],
       "idleTimeoutMin": 45
@@ -73,7 +75,8 @@
   "escalation": {
     "enabled": false,
     "provider": "opencode",
-    "model": "openrouter/z-ai/glm-5.3",
+    "model": "z-ai/glm-5.3",
+    "modelProvider": "openrouter",
     "maxAttempts": 1,
     "onCategories": [
       "task",
@@ -101,15 +104,16 @@
     "provider": "openrouter",
     "model": "qwen/qwen3-vl-235b-a22b-instruct",
     "apiKeyEnv": "OPENROUTER_API_KEY",
-    "timeoutMs": 60000,
+    "timeoutMs": 120000,
     "maxImageBytes": 20971520,
-    "prompt": "Review this image deeply and describe everything about it in detail."
+    "prompt": "Deeply eview this image and describe everything about it in detail."
   },
   "watch": {
     "enabled": true,
     "intervalMin": 5,
     "provider": "opencode",
-    "model": "openrouter/deepseek/deepseek-v4.1-flash",
+    "model": "deepseek/deepseek-v4.1-flash",
+    "modelProvider": "openrouter",
     "timeoutMin": 5
   },
   "breakdown": {

@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { resolveVerify, type Config, type SessionSpec } from './config.js';
+import { composeModel, resolveVerify, type Config, type SessionSpec } from './config.js';
 import { dirtyFiles, gitAvailable, gitToplevel } from './git.js';
 import { jevProblem } from './jev.js';
 import { rel, stopPresent, type Paths } from './paths.js';
@@ -136,8 +136,10 @@ export function runDoctor(i: DoctorInput): Check[] {
   const bd = i.config.breakdown;
   if (bd.enabled) {
     const stages = [bd.onStart && 'start', bd.onContinue && 'continue', bd.onFailure && 'failure'].filter(Boolean).join('/');
-    const model = bd.model || i.config.watch.model;
-    const decision = bd.decision === 'rules' ? 'rules' : `${bd.decision} (jev → ${bd.provider ?? i.config.watch.provider}${model ? ` · ${model}` : ''} → rules)`;
+    const bdProvider = bd.provider ?? i.config.watch.provider;
+    const bdModelProvider = bd.modelProvider ?? i.config.watch.modelProvider ?? i.config.providers[bdProvider].modelProvider;
+    const model = composeModel(bdProvider, bdModelProvider, bd.model || i.config.watch.model);
+    const decision = bd.decision === 'rules' ? 'rules' : `${bd.decision} (jev → ${bdProvider}${model ? ` · ${model}` : ''} → rules)`;
     const rules = `minTaskBytes=${bd.rules.minTaskBytes}, afterContinuations=${bd.rules.afterContinuations}, afterFailedAttempts=${bd.rules.afterFailedAttempts}, onCategories=${bd.rules.onCategories.join('/') || 'none'}`;
     add('breakdown', stages ? 'ok' : 'warn', stages
       ? `on ${stages} · decision ${decision} · rules ${rules} · max ${bd.maxPerTask || '∞'} per task`

@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { DEFAULTS, findTaskSet, loadConfig, resolveBreakdown, resolveEscalation, resolveSession, resolveVerify, resolveWatch } from '../src/config.js';
+import { DEFAULTS, composeModel, findTaskSet, loadConfig, resolveBreakdown, resolveEscalation, resolveSession, resolveVerify, resolveWatch } from '../src/config.js';
 import { resolvePaths, taskSetOverrides } from '../src/paths.js';
 import type { Task } from '../src/tasks.js';
 
@@ -372,7 +372,8 @@ test('escalation defaults to GLM-5.3 via OpenCode, is off until enabled, and res
   // The shipped default is a real, usable pair even though escalation is off by default.
   assert.equal(DEFAULTS.escalation.enabled, false);
   assert.equal(DEFAULTS.escalation.provider, 'opencode');
-  assert.equal(DEFAULTS.escalation.model, 'openrouter/z-ai/glm-5.3');
+  assert.equal(DEFAULTS.escalation.model, 'z-ai/glm-5.3');
+  assert.equal(DEFAULTS.escalation.modelProvider, 'openrouter');
   const off = loadConfig(paths, {}).config;
   assert.equal(off.escalation.enabled, false);
   assert.equal(resolveEscalation(off, resolveSession(off, task(), {}, {}).spec), undefined);
@@ -384,7 +385,9 @@ test('escalation defaults to GLM-5.3 via OpenCode, is off until enabled, and res
   assert.equal(config.escalation.model, 'gpt-5');
   assert.equal(config.escalation.maxAttempts, 2);
   assert.deepEqual(config.escalation.onCategories, ['task']);
-  assert.equal(warnings.length, 0);
+  // modelProvider is OpenCode-only: switching the block to Codex drops it with a warning.
+  assert.equal(config.escalation.modelProvider, undefined);
+  assert.ok(warnings.some((w) => /escalation\.modelProvider/.test(w)));
   const resolved = resolveEscalation(config, resolveSession(config, task(), {}, {}).spec);
   assert.equal(resolved?.spec.providerName, 'codex');
   assert.equal(resolved?.spec.model, 'gpt-5');
@@ -445,7 +448,8 @@ test('watch config is on by default every 5 min on OpenCode, parses overrides, a
   assert.equal(DEFAULTS.watch.enabled, true);
   assert.equal(DEFAULTS.watch.intervalMin, 5);
   assert.equal(DEFAULTS.watch.provider, 'opencode');
-  assert.equal(DEFAULTS.watch.model, 'openrouter/deepseek/deepseek-v4.1-flash');
+  assert.equal(DEFAULTS.watch.model, 'deepseek/deepseek-v4.1-flash');
+  assert.equal(DEFAULTS.watch.modelProvider, 'openrouter');
   assert.equal(loadConfig(paths, {}).config.watch.enabled, true);
 
   writeFileSync(paths.config, JSON.stringify({ watch: { enabled: false, intervalMin: 10, provider: 'codex', model: 'gpt-5', variant: 'high', timeoutMin: 3 } }));
@@ -456,7 +460,9 @@ test('watch config is on by default every 5 min on OpenCode, parses overrides, a
   assert.equal(config.watch.model, 'gpt-5');
   assert.equal(config.watch.variant, 'high');
   assert.equal(config.watch.timeoutMin, 3);
-  assert.equal(warnings.length, 0);
+  // modelProvider is OpenCode-only: switching the block to Codex drops it with a warning.
+  assert.equal(config.watch.modelProvider, undefined);
+  assert.ok(warnings.some((w) => /watch\.modelProvider/.test(w)));
 
   writeFileSync(paths.config, JSON.stringify({ watch: { provider: 'nope', intervalMin: 0, variant: 5 } }));
   const bad = loadConfig(paths, {});
@@ -575,4 +581,56 @@ test('vision config is off by default with OpenRouter + Qwen VL, and validates i
   assert.ok(bad.warnings.some((w) => /vision\.provider/.test(w)));
   assert.ok(bad.warnings.some((w) => /vision\.timeoutMs/.test(w)));
   assert.ok(bad.warnings.some((w) => /vision\.maxImageBytes/.test(w)));
+});
+
+test('modelProvider composes the OpenCode "provider/model" reference for every block', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-mp-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({
+    provider: 'opencode',
+    providers: { opencode: { model: 'qwen/qwen3-vl-235b-a22b-instruct', modelProvider: 'openrouter' } },
+    watch: { provider: 'opencode', model: 'deepseek/deepseek-v4.1-flash', modelProvider: 'openrouter' },
+    escalation: { enabled: true, provider: 'opencode', model: 'z-ai/glm-5.3', modelProvider: 'openrouter' },
+    breakdown: { enabled: true, model: 'anthropic/claude-3-5-haiku', modelProvider: 'openrouter' },
+  }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(warnings.length, 0);
+
+  // providers.opencode: a bare model gets the configured prefix.
+  const s = resolveSession(config, task(), {}, {}).spec;
+  assert.equal(s.providerName, 'opencode');
+  assert.equal(s.model, 'openrouter/qwen/qwen3-vl-235b-a22b-instruct');
+  assert.equal(s.sources.modelProvider, 'config');
+
+  // A model that already carries the prefix is not doubled.
+  assert.equal(resolveSession(config, task({ model: 'openrouter/qwen/qwen3-vl-235b-a22b-instruct' }), {}, {}).spec.model, 'openrouter/qwen/qwen3-vl-235b-a22b-instruct');
+
+  // Precedence: --model-provider and front matter beat config.
+  const byCli = resolveSession(config, task({ model: 'claude-sonnet-4-5' }), { modelProvider: 'anthropic' }, {}).spec;
+  assert.equal(byCli.model, 'anthropic/claude-sonnet-4-5');
+  assert.equal(byCli.sources.modelProvider, '--model-provider');
+  const byMeta = resolveSession(config, task({ model: 'gemini-3.1-pro-preview', modelProvider: 'google' }), {}, {}).spec;
+  assert.equal(byMeta.model, 'google/gemini-3.1-pro-preview');
+  assert.equal(byMeta.sources.modelProvider, 'task front matter');
+  const byEnv = resolveSession(config, task({ model: 'claude-sonnet-4-5' }), {}, { SYMPHONY_MODEL_PROVIDER: 'openai' }).spec;
+  assert.equal(byEnv.model, 'openai/claude-sonnet-4-5');
+
+  // The other blocks compose too.
+  assert.equal(resolveWatch(config).spec.model, 'openrouter/deepseek/deepseek-v4.1-flash');
+  assert.equal(resolveWatch(config).spec.sources.modelProvider, 'watch');
+  assert.equal(resolveEscalation(config, s)?.spec.model, 'openrouter/z-ai/glm-5.3');
+  assert.equal(resolveBreakdown(config).spec.model, 'openrouter/anthropic/claude-3-5-haiku');
+
+  // Existing fully-qualified values keep working with no modelProvider.
+  const legacy = { ...config, providers: { ...config.providers, opencode: { ...config.providers.opencode, modelProvider: undefined, model: 'openrouter/deepseek/deepseek-v4.1-flash' } } };
+  assert.equal(resolveSession(legacy, task(), {}, {}).spec.model, 'openrouter/deepseek/deepseek-v4.1-flash');
+
+  // composeModel is a no-op for providers that take a bare id; an explicit modelProvider there warns.
+  assert.equal(composeModel('claude', 'openrouter', 'claude-opus-5'), 'claude-opus-5');
+  assert.equal(composeModel('opencode', undefined, 'qwen/q'), 'qwen/q');
+  writeFileSync(paths.config, JSON.stringify({ providers: { claude: { modelProvider: 'openrouter' } } }));
+  const bad = loadConfig(paths, {});
+  assert.equal(bad.config.providers.claude.modelProvider, undefined);
+  assert.ok(bad.warnings.some((w) => /providers\.claude\.modelProvider/.test(w)));
 });

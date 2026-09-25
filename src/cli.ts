@@ -23,7 +23,7 @@ import { describeImage, visionProblem } from './vision.js';
 const HELP = `symphony — run an LLM coding agent through your roadmap, one fresh session per task
 
 Usage
-  symphony run     [--prepare] [--provider P] [--model M] [--variant V] [--from T03] [--to T10] [--only T05,T06] [--retry]
+  symphony run     [--prepare] [--provider P] [--model M] [--model-provider P] [--variant V] [--from T03] [--to T10] [--only T05,T06] [--retry]
                    [--continue-on-failure] [--dry-run] [--safe] [--no-nudge] [--timeout-min N] [--max-tasks N]
                    [--max-iterations N] [--budget USD] [--max-cost USD] [--clear-halt] [--set NAME] [--tui|--no-tui]
   symphony status  [--json]              progress table (or JSON)
@@ -46,11 +46,13 @@ Usage
   symphony --version                     print the version
 
 Providers: claude (Claude Code) · cursor (Cursor agent) · opencode (1.x) · codex (Codex CLI) · gemini (Gemini CLI) · antigravity (Google Antigravity) · fake (fixture replay)
-Provider/model precedence: --provider/--model/--variant > SYMPHONY_PROVIDER/SYMPHONY_MODEL/SYMPHONY_VARIANT
-> task front matter (provider, model, variant) > .symphony/symphony.config.json > defaults. All providers run with
+Provider/model precedence: --provider/--model/--model-provider/--variant > SYMPHONY_PROVIDER/SYMPHONY_MODEL/SYMPHONY_MODEL_PROVIDER/SYMPHONY_VARIANT
+> task front matter (provider, model, modelProvider, variant) > .symphony/symphony.config.json > defaults. All providers run with
 permissions bypassed unless --safe. Reasoning effort ("variant") defaults to "high" for providers that support it
 (claude --effort, opencode --variant, codex model_reasoning_effort, antigravity --effort) and is only sent when the
 model supports it; override or clear it per run with --variant (empty string = provider default).
+OpenCode addresses a model as "provider/model"; set "modelProvider" (e.g. "openrouter") next to a bare "model"
+instead of writing the prefix yourself. A model that already starts with "modelProvider/" is passed through.
 Every location (docs, tasks, progress, design, adr, logs, stop, state, runs, log) is overridable via the
 "paths" section of .symphony/symphony.config.json.
 Task sets: declare extra, independent task sets in the "taskSets" array of .symphony/symphony.config.json.
@@ -136,6 +138,7 @@ export async function main(argv: string[]): Promise<number> {
       set: { type: 'string' },
       provider: { type: 'string' },
       model: { type: 'string' },
+      'model-provider': { type: 'string' },
       variant: { type: 'string' },
       from: { type: 'string' },
       to: { type: 'string' },
@@ -174,6 +177,7 @@ export async function main(argv: string[]): Promise<number> {
   const cli: CliOverrides = {
     provider: v.provider,
     model: v.model,
+    modelProvider: v['model-provider'],
     variant: v.variant,
     timeoutMin: v['timeout-min'] !== undefined ? Number(v['timeout-min']) : undefined,
     maxTasks: v['max-tasks'] !== undefined ? Number(v['max-tasks']) : undefined,

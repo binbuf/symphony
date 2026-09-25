@@ -53,8 +53,12 @@ confirm with `agent --help`, and note the parameterised form is quoted:
 ## opencode — OpenCode
 
 OpenCode addresses every model as `provider/model` and routes to any provider, so there is no fixed
-list to pin here. Browse the live catalogue at **<https://openrouter.ai/models>**, then use the id
-in that form — for example `openrouter/deepseek/deepseek-v4.1-flash` or `openrouter/z-ai/glm-5.3`.
+list to pin here. Browse the live catalogue at **<https://openrouter.ai/models>**, then set `model` to
+the bare id and `modelProvider` to the routing provider — for example
+`{ "modelProvider": "openrouter", "model": "deepseek/deepseek-v4.1-flash" }` or
+`{ "modelProvider": "openrouter", "model": "z-ai/glm-5.3" }`. Symphony composes the
+`provider/model` reference OpenCode expects. Every other CLI takes the bare `model` and ignores
+`modelProvider`.
 
 symphony requires **OpenCode 1.x** (`opencode-ai@1`); 2.x is beta and not yet supported. Reasoning
 effort uses the 1.x `--variant` run flag (e.g. `high`), gated on the model's `variants` from
