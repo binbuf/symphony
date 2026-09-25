@@ -12,6 +12,7 @@ import { startSession, type Session, type SessionOutcome } from './session.js';
 import { buildStatusTable } from './status.js';
 import { DONE_STATES, type State } from './state.js';
 import type { Task } from './tasks.js';
+import { renderPrompt } from './templates.js';
 import { ensureDir, fmtCost, fmtDateTime, fmtDuration, nowIso, resolveBinary, resolveExecutable, squash, stamp } from './util.js';
 
 /**
@@ -19,7 +20,7 @@ import { ensureDir, fmtCost, fmtDateTime, fmtDuration, nowIso, resolveBinary, re
  * flight. It reads a self-contained snapshot of the pipeline (current task, phase progress, task
  * outcomes, PROGRESS.md, counts) and adds the interpretation the TUI's live status table cannot show
  * — what the snapshot means for the run, where it looks fragile, what to expect next — rather than
- * restating the visible status. When it has nothing useful to add it replies `NO_UPDATE` and the
+ * restating the visible status. When nothing material has changed it replies `NO_UPDATE` and the
  * panel keeps its previous summary. The latest answer is shown in the TUI's top panel and every
  * check is appended to a dedicated watch log. It is advisory: an unavailable provider or a failed
  * check only updates the panel, never the run.
@@ -165,9 +166,8 @@ function capTailBytes(text: string, maxBytes: number): string {
  * the tasks that finished in that window, the progress notes written in it, and the relative path of
  * the latest task's own session log, which the watcher is asked to read (its one permitted action) —
  * so a check costs about the same whether the run is five minutes or five hours old. The instructions
- * frame the header as context the operator can already see and ask only for a read the status table
- * cannot give: is the task in flight healthy or struggling, is the current phase/gate on track, and is
- * the run as a whole likely to finish as anticipated.
+ * frame the header as context the operator can already see. The previous panel text lets this fresh
+ * session distinguish a new insight from a repeat.
  */
 export function buildWatchPrompt(ctx: RunContext, window: WatchWindow = {}): string {
   const { paths, tasks, state } = ctx;
@@ -193,8 +193,8 @@ export function buildWatchPrompt(ctx: RunContext, window: WatchWindow = {}): str
     return `- ${t.id} [${st?.status ?? '?'}] ${squash(t.title, 80)}${st?.summary ? ` — ${squash(st.summary, 240)}` : ''}`;
   });
 
-  // The ticket in flight, or the one that just finished when nothing is running.
-  const currentTask = tasks.find((t) => statusOf(state, t) === 'running') ?? recent[0];
+  // The ticket in flight, or the most recently finished when nothing is running.
+  const currentTask = tasks.find((t) => statusOf(state, t) === 'running') ?? finished[0];
   const currentLine = (() => {
     if (!currentTask) return undefined;
     const st = state.tasks[currentTask.id];
@@ -216,8 +216,8 @@ export function buildWatchPrompt(ctx: RunContext, window: WatchWindow = {}): str
   })();
 
   // The relative path of the latest session log (the running task's, or the most recently finished
-// one's). The watcher is asked to read that one file rather than have its contents inlined, which
-// keeps the prompt small no matter how long the session runs.
+  // one's). The watcher is asked to read that one file rather than have its contents inlined, which
+  // keeps the prompt small no matter how long the session runs.
   const latestLogTask = tasks.find((t) => statusOf(state, t) === 'running') ?? finished[0];
   const refs = latestLogTask ? state.tasks[latestLogTask.id]?.logs ?? [] : [];
   const latestRef = refs[refs.length - 1];
@@ -248,82 +248,21 @@ export function buildWatchPrompt(ctx: RunContext, window: WatchWindow = {}): str
     ? capTailBytes(fresh.map((s) => `## ${s.heading}\n\n${s.body}`).join('\n\n'), WATCH_PROGRESS_BYTES)
     : '(no new progress notes since the last check)';
 
-  return [
-    'You are a read-only analyst of a live autonomous coding pipeline ("symphony"). The harness runs',
-    'one fresh AI session per task in ROADMAP.md and commits after each. The operator is watching the',
-    'run in a terminal that already shows, updating live: the task in flight and its elapsed time, the',
-    'current phase and its progress, the done/total counts, the cost, and the full task list. Your',
-    'answer is rendered verbatim in a small strip above that table.',
-    '',
-    'Each check gives you what changed since your last check — the tasks that finished in that window,',
-    "the progress notes written in it, a compact current-status header, and the path of the latest task's",
-    'session log. You may read that one file to see what the work is actually doing; it is the only file',
-    'you are permitted to open. Judge the delta against the header; do not re-read old work or repeat',
-    'what an earlier check already said.',
-    '',
-    'Your value is interpretation, not narration. Restating what the operator can already see — that a',
-    'task is running, how long it has been running, which phase we are in, how many tasks are done —',
-    'adds nothing. What the operator needs is a read on how it is actually going:',
-    '',
-    '- Is the task in flight healthy, or struggling? Read its log: is it working one thread to',
-    '  completion, or looping, erroring, retrying, or fighting the same failing command? Say which, and',
-    '  what it means for the outcome.',
-    '- Is the current phase or milestone on track? Are the tasks inside it landing as expected, or is',
-    '  one stubborn and likely to hold the gate open? Name what still stands between here and closing it.',
-    '- Summarize the latest task log only as far as it supports that read — what the session is actually',
-    '  doing, in plain terms, not a transcript and not a reworded version of its reported summary.',
-    '- Is the run as a whole likely to finish as anticipated? If the pace, the retries, or the outcomes',
-    '  point to a different end than planned, say so and why.',
-    '',
-    'Which of those matters most changes from check to check, so do not march through a checklist or',
-    'answer all of them every time: pick the two or three things that are true and consequential right',
-    'now, and skip the rest. When a task is struggling, a phase is at risk, or completion no longer',
-    'looks likely, that is exactly what must lead.',
-    '',
-    'Hard rules:',
-    '- Never narrate raw status or timing ("task N is running", "X minutes in", "just started", "N of M',
-    '  done", "still early") — the operator already has that line. Characterizing the task itself is',
-    '  wanted: what it is doing and whether that is normal.',
-    '- Never say it is too early to tell, that there is not enough information, or otherwise hedge',
-    '  about what you can know.',
-    '- Never pad to fill the panel and never manufacture concern. Do not treat silence as the safe',
-    '  default: a genuine observation is nearly always available. Reply with exactly NO_UPDATE and',
-    '  nothing else only at the very start of a run — the first task is still in flight and nothing has',
-    '  finished yet, so there is truly nothing to interpret. Once any task has finished, always give',
-    '  your read rather than going quiet.',
-    '- Begin directly with the observation. Do not open with a preamble or acknowledgement ("I looked',
-    '  into…", "Looking at the snapshot…", "Based on the logs…", "It looks like…", "Sure,").',
-    '- Ground every claim in the snapshot and in the task log you read; invent nothing. Your only',
-    '  permitted action is reading the file named under LATEST TASK LOG — do not run commands, edit, or',
-    '  read anything else. If that file cannot be read, base your read on the snapshot instead of',
-    '  guessing at the log.',
-    '',
-    'Your update: 2 to 4 short sentences of plain prose. No headings, no bullet lists, no code fences.',
-    '',
-    '=== CURRENTLY RUNNING (or, if idle, most recently finished) — already visible to the operator ===',
-    currentLine ?? '- (nothing running and nothing finished yet)',
-    '',
-    `=== LATEST TASK LOG (${latestLogLabel}) ===`,
-    latestLogPath
+  return renderPrompt('watch.md', {
+    previousSummary: ctx.watch?.summary ? squash(ctx.watch.summary, 500) : '(no previous update)',
+    currentLine: currentLine ?? '- (nothing running and nothing finished yet)',
+    latestLogLabel,
+    latestLog: latestLogPath
       ? `Read this file (relative to the project root): ${latestLogPath}`
       : '- (no session log yet — nothing to read)',
-    '',
-    '=== PHASES / GATES (▶ marks the phase of the current task) ===',
-    phaseLines.join('\n') || '- (no tasks)',
-    '',
-    `=== RECENT TASK OUTCOMES (finished since ${sinceLabel} — earlier work was already reported) ===`,
-    outcomeLines.join('\n') || '- (no task finished in this window)',
-    '',
-    `=== NEW PROGRESS NOTES (${rel(paths.root, paths.progress)}, since ${sinceLabel}) ===`,
+    phases: phaseLines.join('\n') || '- (no tasks)',
+    sinceLabel,
+    outcomes: outcomeLines.join('\n') || '- (no task finished in this window)',
+    progressPath: rel(paths.root, paths.progress),
     progress,
-    '',
-    '=== PIPELINE SNAPSHOT (overall) ===',
-    pipelineSnapshot(ctx),
-    '',
-    '=== TASK LIST (status only) ===',
-    taskLines.join('\n') || '- (no tasks)',
-    '=== END OF SNAPSHOT ===',
-  ].join('\n');
+    pipeline: pipelineSnapshot(ctx),
+    taskList: taskLines.join('\n') || '- (no tasks)',
+  });
 }
 
 /** Append one check's result to the dedicated watch log. Never throws at the caller. */
@@ -408,7 +347,7 @@ async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider, 
       : 'session produced no answer';
     return { status: 'error', error, durationS, costUsd: outcome.costUsd, ...paths };
   }
-  // Room for the requested 2–4 sentences; the panel and log both cap their own display.
+  // The panel and log both cap their own display if a provider exceeds the prompt's size request.
   return { status: 'ready', summary: squash(cleaned, 1200), durationS, costUsd: outcome.costUsd, ...paths };
 }
 

@@ -22,7 +22,7 @@ const STREAM_MAX = 5000;
 const TABLE_TTL_MS = 250;
 const TOAST_MS = 5000;
 const BAR_ROWS = 2;
-/** Height of the pipeline-watch panel (a title line plus four body lines, enough for a 3–5 sentence summary). */
+/** Height of the pipeline-watch panel (a title line plus four body lines for a compact paragraph). */
 const WATCH_ROWS = 5;
 
 export type Layout = 'both' | 'top' | 'bottom';
@@ -854,13 +854,12 @@ export class TuiApp {
       text = w.summary ? `${w.summary}  ·  watch error: ${w.error ?? 'unknown'}` : `Watch error: ${w.error ?? 'unknown'}`;
       color = C.red;
     } else {
-      // A silent check (NO_UPDATE) is only expected at the very start, before the first task lands;
-      // show a dim placeholder so the strip never looks broken.
+      // If a silent check arrives before the first summary, show a placeholder.
       if (w.summary) {
         text = w.summary;
         color = C.green;
       } else {
-        text = 'No update yet — nothing to interpret until the first task lands.';
+        text = 'No update yet — watching for a meaningful change.';
         color = C.dim;
       }
     }

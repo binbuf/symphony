@@ -46,7 +46,7 @@ test('buildWatchPrompt and pipelineSnapshot describe the pipeline from live stat
   assert.match(prompt, /T02 \[running\]/);
   assert.match(prompt, /RECENT TASK OUTCOMES/);
   assert.match(prompt, /landed the thing/);
-  assert.match(prompt, /permitted action is reading the file named under LATEST TASK LOG/);
+  assert.match(prompt, /Read only the file named under LATEST TASK LOG/);
   // The snapshot still leads with the current ticket and its phase, but frames them as context the
   // operator can already see.
   assert.match(prompt, /CURRENTLY RUNNING/);
@@ -57,20 +57,33 @@ test('buildWatchPrompt and pipelineSnapshot describe the pipeline from live stat
   assert.ok(prompt.indexOf('CURRENTLY RUNNING') < prompt.indexOf('PHASES / GATES'), 'current ticket precedes its phase');
   assert.ok(prompt.indexOf('PHASES / GATES') < prompt.indexOf('RECENT TASK OUTCOMES'), 'phase precedes recent outcomes');
   assert.ok(prompt.indexOf('RECENT TASK OUTCOMES') < prompt.indexOf('PIPELINE SNAPSHOT'), 'recent outcomes precede the overall snapshot');
-  // The instructions ask for interpretation, forbid narrating the visible status, and allow a silent
-  // reply only at the very start rather than hedging.
-  assert.match(prompt, /interpretation, not narration/);
-  assert.match(prompt, /2 to 4 short sentences/);
-  assert.match(prompt, /Never narrate raw status or timing/);
-  assert.match(prompt, /Never say it is too early to tell/);
-  assert.match(prompt, /Reply with exactly NO_UPDATE/);
-  assert.match(prompt, /only at the very start of a run/);
-  assert.match(prompt, /Once any task has finished, always give/);
-  assert.match(prompt, /Begin directly with the observation/);
+  // The instructions ask for a bounded, evidence-based paragraph that can stay quiet on an unchanged check.
+  assert.match(prompt, /at most 300 characters/);
+  assert.match(prompt, /Do not repeat visible status or timing/);
+  assert.match(prompt, /If nothing meaningful can be added or changed.*reply exactly NO_UPDATE/);
+  assert.match(prompt, /even after tasks have finished/);
+  assert.match(prompt, /Begin with the insight/);
   assert.match(prompt, /LATEST TASK LOG/);
-  assert.match(prompt, /Is the task in flight healthy, or struggling/);
-  assert.match(prompt, /do not march through a checklist/);
+  assert.match(prompt, /repeated failure, or stalled approach/);
+  assert.match(prompt, /PREVIOUS PANEL TEXT/);
   assert.doesNotMatch(prompt, /what it has accomplished so far and what is left/);
+});
+
+test('buildWatchPrompt carries the previous panel text and identifies the latest finished task when idle', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-idle-'));
+  const old = new Date(Date.now() - 120_000).toISOString();
+  const recent = new Date(Date.now() - 60_000).toISOString();
+  const tasks = [task('T01', 1), task('T02', 2)];
+  const state: State = { version: 1, tasks: {
+    T01: { ...newTaskState('one'), status: 'done', finished: old },
+    T02: { ...newTaskState('two'), status: 'done', finished: recent },
+  } };
+  const ctx = makeCtx(dir, tasks, state);
+  ctx.watch = { status: 'ready', enabled: true, intervalMin: 5, provider: 'fake', checks: 1, summary: 'T01 settled the failing test; T02 is checking the next dependency.' };
+  const prompt = buildWatchPrompt(ctx, { sinceMs: Date.now() });
+  assert.match(prompt, /PREVIOUS PANEL TEXT.*T01 settled the failing test/s);
+  assert.match(prompt, /T02 — Task 2 · phase: Phase 1 · done/);
+  assert.match(prompt, /no task finished in this window/);
 });
 
 test('buildWatchPrompt references the latest task session log by path instead of inlining it', () => {
