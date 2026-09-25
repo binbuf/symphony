@@ -46,7 +46,7 @@ test('buildWatchPrompt and pipelineSnapshot describe the pipeline from live stat
   assert.match(prompt, /T02 \[running\]/);
   assert.match(prompt, /RECENT TASK OUTCOMES/);
   assert.match(prompt, /landed the thing/);
-  assert.match(prompt, /Read only the file named under LATEST TASK LOG/);
+  assert.match(prompt, /Review the most recent changes in the file named under/);
   // The snapshot still leads with the current ticket and its phase, but frames them as context the
   // operator can already see.
   assert.match(prompt, /CURRENTLY RUNNING/);
@@ -57,12 +57,8 @@ test('buildWatchPrompt and pipelineSnapshot describe the pipeline from live stat
   assert.ok(prompt.indexOf('CURRENTLY RUNNING') < prompt.indexOf('PHASES / GATES'), 'current ticket precedes its phase');
   assert.ok(prompt.indexOf('PHASES / GATES') < prompt.indexOf('RECENT TASK OUTCOMES'), 'phase precedes recent outcomes');
   assert.ok(prompt.indexOf('RECENT TASK OUTCOMES') < prompt.indexOf('PIPELINE SNAPSHOT'), 'recent outcomes precede the overall snapshot');
-  // The instructions ask for a bounded, evidence-based paragraph that can stay quiet on an unchanged check.
-  assert.match(prompt, /at most 300 characters/);
-  assert.match(prompt, /Do not repeat visible status or timing/);
-  assert.match(prompt, /If nothing meaningful can be added or changed.*reply exactly NO_UPDATE/);
-  assert.match(prompt, /even after tasks have finished/);
-  assert.match(prompt, /Begin with the insight/);
+  // The instructions ask for a bounded, evidence-based paragraph.
+  assert.match(prompt, /350 characters max/);
   assert.match(prompt, /LATEST TASK LOG/);
   assert.match(prompt, /repeated failure, or stalled approach/);
   assert.match(prompt, /PREVIOUS PANEL TEXT/);
@@ -122,8 +118,6 @@ test('cleanWatchSummary strips conversational openers but keeps real analysis', 
   assert.equal(cleanWatchSummary('Sure, the retry count is climbing.'), 'the retry count is climbing.');
   assert.equal(cleanWatchSummary("I've checked the recent outcomes. Two retries stand out."), 'Two retries stand out.');
   assert.equal(cleanWatchSummary('It looks like the build will time out.'), 'the build will time out.');
-  // A preamble followed only by NO_UPDATE still leaves the control token intact.
-  assert.equal(cleanWatchSummary('I looked into that and NO_UPDATE'), 'NO_UPDATE');
   // Content that merely starts with a similar word is not butchered, and an all-preamble answer survives.
   assert.equal(cleanWatchSummary('Checking this is the last phase.'), 'Checking this is the last phase.');
   assert.equal(cleanWatchSummary('T03 is retrying.'), 'T03 is retrying.');
@@ -325,66 +319,6 @@ test('a ready watch check posts an in-progress message threaded under the runnin
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
     delete process.env.SLACK_BOT_TOKEN;
-  }
-});
-
-test('a watcher NO_UPDATE reply keeps the panel quiet and is logged as no update', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-silent-'));
-  const paths = resolvePaths(dir);
-  const fixtures = join(dir, 'fixtures');
-  mkdirSync(fixtures, { recursive: true });
-  writeFileSync(join(fixtures, 'watch.jsonl'), `${JSON.stringify({
-    type: 'result', subtype: 'success', is_error: false, session_id: 'w2', result: 'NO_UPDATE',
-  })}\n`);
-  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
-
-  const tasks = [task('T01', 1)];
-  const state: State = { version: 1, tasks: { T01: { ...newTaskState('one'), status: 'running', attempts: 1, started: new Date().toISOString() } } };
-  const ctx = makeCtx(dir, tasks, state);
-  ctx.config = { ...DEFAULTS, watch: { ...DEFAULTS.watch, provider: 'fake', model: '' } };
-
-  try {
-    const watcher = startPipelineWatch(ctx);
-    assert.ok(watcher, 'watcher starts with a usable provider');
-    await watcher!.checkNow();
-    assert.equal(ctx.watch?.status, 'ready');
-    assert.equal(ctx.watch?.summary, undefined, 'nothing is shown when the watcher has nothing to add');
-    assert.ok(ctx.watch?.updatedAt, 'the refresh still stamps the panel');
-
-    const log = readFileSync(watchLogPath(paths), 'utf8');
-    assert.match(log, /result: ready \(no update\)/);
-    assert.match(log, /no update — nothing worth adding/);
-    watcher!.stop();
-  } finally {
-    delete process.env.SYMPHONY_FAKE_FIXTURES;
-  }
-});
-
-test('a NO_UPDATE token followed by real content is kept as a summary, not swallowed', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-token-'));
-  const paths = resolvePaths(dir);
-  const fixtures = join(dir, 'fixtures');
-  mkdirSync(fixtures, { recursive: true });
-  writeFileSync(join(fixtures, 'watch.jsonl'), `${JSON.stringify({
-    type: 'result', subtype: 'success', is_error: false, session_id: 'w3',
-    result: 'NO_UPDATE — actually T03 has retried twice; that gate may not open.',
-  })}\n`);
-  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
-
-  const tasks = [task('T01', 1)];
-  const state: State = { version: 1, tasks: { T01: { ...newTaskState('one'), status: 'running', attempts: 1, started: new Date().toISOString() } } };
-  const ctx = makeCtx(dir, tasks, state);
-  ctx.config = { ...DEFAULTS, watch: { ...DEFAULTS.watch, provider: 'fake', model: '' } };
-
-  try {
-    const watcher = startPipelineWatch(ctx);
-    assert.ok(watcher, 'watcher starts with a usable provider');
-    await watcher!.checkNow();
-    assert.equal(ctx.watch?.status, 'ready');
-    assert.match(ctx.watch?.summary ?? '', /T03 has retried twice/, 'content after the token is not discarded');
-    watcher!.stop();
-  } finally {
-    delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
 });
 

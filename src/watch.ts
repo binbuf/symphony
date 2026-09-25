@@ -20,8 +20,7 @@ import { ensureDir, fmtCost, fmtDateTime, fmtDuration, nowIso, resolveBinary, re
  * flight. It reads a self-contained snapshot of the pipeline (current task, phase progress, task
  * outcomes, PROGRESS.md, counts) and adds the interpretation the TUI's live status table cannot show
  * — what the snapshot means for the run, where it looks fragile, what to expect next — rather than
- * restating the visible status. When nothing material has changed it replies `NO_UPDATE` and the
- * panel keeps its previous summary. The latest answer is shown in the TUI's top panel and every
+ * restating the visible status. The latest answer is shown in the TUI's top panel and every
  * check is appended to a dedicated watch log. It is advisory: an unavailable provider or a failed
  * check only updates the panel, never the run.
  */
@@ -54,8 +53,6 @@ export interface WatchLogEntry {
   model?: string;
   /** `ready` when the check produced a summary, else `error`. */
   status: 'ready' | 'error';
-  /** True when the watcher deliberately had nothing to add (`NO_UPDATE`). */
-  silent?: boolean;
   pipeline: string;
   summary?: string;
   error?: string;
@@ -67,8 +64,6 @@ export interface WatchLogEntry {
 }
 
 const WATCH_TASK_ID = 'watch';
-/** The token the watcher replies with when it has nothing useful to add (keeps the panel quiet). */
-const WATCH_NO_UPDATE = 'NO_UPDATE';
 
 /**
  * Conversational openers the watcher sometimes leads with ("I looked into that and…", "Based on the
@@ -278,11 +273,11 @@ export function appendWatchLog(paths: Paths, entry: WatchLogEntry): void {
     lines.push('');
     lines.push(`- provider: ${entry.provider}${entry.model ? ` · ${entry.model}` : ''}`);
     lines.push(`- pipeline: ${entry.pipeline}`);
-    lines.push(`- result: ${entry.status}${entry.silent ? ' (no update)' : ''}${entry.durationS !== undefined ? ` · ${fmtDuration(entry.durationS)}` : ''}${entry.costUsd !== undefined ? ` · ${fmtCost(entry.costUsd)}` : ''}`);
+    lines.push(`- result: ${entry.status}${entry.durationS !== undefined ? ` · ${fmtDuration(entry.durationS)}` : ''}${entry.costUsd !== undefined ? ` · ${fmtCost(entry.costUsd)}` : ''}`);
     if (entry.error) lines.push(`- error: ${entry.error}`);
     lines.push(`- session: ${entry.sessionLog} · raw: ${entry.sessionJsonl} · prompt: ${entry.sessionPrompt}`);
     lines.push('');
-    lines.push(entry.silent ? '_(no update — nothing worth adding)_' : entry.summary?.trim() || '_(no summary produced)_');
+    lines.push(entry.summary?.trim() || '_(no summary produced)_');
     lines.push('');
     appendFileSync(file, `${lines.join('\n')}\n`);
   } catch {
@@ -292,8 +287,6 @@ export function appendWatchLog(paths: Paths, entry: WatchLogEntry): void {
 
 interface CheckResult {
   status: 'ready' | 'error';
-  /** True when the watcher had nothing useful to add (`NO_UPDATE`). */
-  silent?: boolean;
   summary?: string;
   error?: string;
   costUsd?: number;
@@ -334,13 +327,9 @@ async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider, 
   }
   const durationS = Math.round(outcome.durationMs / 1000);
   const raw = (outcome.result.text || outcome.allText).trim();
-  // Drop conversational openers ("I looked into…") before the answer is judged, shown or logged.
+  // Drop conversational openers ("I looked into…") before the answer is shown or logged.
   const cleaned = cleanWatchSummary(raw);
   const failed = !outcome.result.ok || outcome.interrupted || outcome.timedOut || outcome.stalled || !!outcome.spawnError;
-  // A deliberate, successful "nothing to add" keeps the panel quiet. Only an answer that is *exactly*
-  // the token counts: if the model appends anything useful, it is kept as a summary instead of dropped.
-  const silent = !failed && new RegExp(`^${WATCH_NO_UPDATE}[\\s.!]*$`, 'i').test(cleaned);
-  if (silent) return { status: 'ready', silent: true, durationS, costUsd: outcome.costUsd, ...paths };
   if (!raw) {
     const error = failed
       ? outcome.spawnError ?? outcome.result.errorSubtype ?? (outcome.timedOut ? 'timeout' : outcome.stalled ? 'stalled' : 'no answer')
@@ -428,7 +417,7 @@ export class PipelineWatcher {
     const state = this.ctx.watch;
     const entry: WatchLogEntry = {
       at: nowIso(), check: this.checks, provider: this.spec.providerName, model: this.spec.model,
-      status: result.status, silent: result.silent, pipeline: pipelineSnapshot(this.ctx), summary: result.summary, error: result.error,
+      status: result.status, pipeline: pipelineSnapshot(this.ctx), summary: result.summary, error: result.error,
       durationS: result.durationS, costUsd: result.costUsd,
       sessionLog: result.sessionLog, sessionJsonl: result.sessionJsonl, sessionPrompt: result.sessionPrompt,
     };
@@ -437,8 +426,6 @@ export class PipelineWatcher {
       state.checks = this.checks;
       if (result.status === 'ready') {
         state.status = 'ready';
-        // A silent check keeps the previous summary; the timestamp marks the refresh so the operator
-        // can tell the watcher looked and had nothing new to add.
         if (result.summary) state.summary = result.summary;
         state.updatedAt = entry.at;
         delete state.error;
@@ -450,8 +437,7 @@ export class PipelineWatcher {
     }
     // An in-progress Slack update for the task in flight, threaded under that task's taskStart
     // message. Feature-flagged (`slack.events.watch`, off by default) and only on a real summary, so
-    // a NO_UPDATE reply or an idle pipeline stays quiet. Fire-and-forget: Slack must never delay the
-    // next watch check.
+    // an idle pipeline stays quiet. Fire-and-forget: Slack must never delay the next watch check.
     if (!this.stopped && result.status === 'ready' && result.summary && slackEventEnabled(this.ctx.config.slack, 'watch')) {
       const running = this.ctx.tasks.find((t) => (this.ctx.state.tasks[t.id]?.status ?? 'pending') === 'running');
       if (running) {
@@ -474,7 +460,7 @@ export class PipelineWatcher {
         );
       }
     }
-    this.ctx.log.info(`watch #${this.checks}: ${result.status}${result.silent ? ' · no update' : result.summary ? ` · ${squash(result.summary, 160)}` : result.error ? ` · ${result.error}` : ''}`);
+    this.ctx.log.info(`watch #${this.checks}: ${result.status}${result.summary ? ` · ${squash(result.summary, 160)}` : result.error ? ` · ${result.error}` : ''}`);
     if (!this.stopped) this.arm(this.intervalMs);
   }
 }

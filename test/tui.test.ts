@@ -165,7 +165,7 @@ test('TuiApp renders the pipeline-watch panel above the status table', () => {
   assert.match(ready, /On track: T01 is running normally\./);
   assert.match(ready, /2 updates/);
 
-  // A silent check before any summary has landed must not leave the body blank.
+  // A ready panel without a summary must not leave the body blank.
   ctx.watch = { status: 'ready', enabled: true, intervalMin: 5, provider: 'opencode', model: 'x', updatedAt: new Date().toISOString(), checks: 1 };
   const silent = stripAnsi(app.renderLines(100, 24).join('\n'));
   assert.match(silent, /1 update ·/);

@@ -854,7 +854,7 @@ export class TuiApp {
       text = w.summary ? `${w.summary}  ·  watch error: ${w.error ?? 'unknown'}` : `Watch error: ${w.error ?? 'unknown'}`;
       color = C.red;
     } else {
-      // If a silent check arrives before the first summary, show a placeholder.
+      // If a ready check has no summary yet, show a placeholder.
       if (w.summary) {
         text = w.summary;
         color = C.green;
