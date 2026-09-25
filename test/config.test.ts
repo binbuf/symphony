@@ -478,6 +478,7 @@ test('watch config is on by default every 5 min on OpenCode, parses overrides, a
   const rw = resolveWatch({ ...DEFAULTS, watch: { ...DEFAULTS.watch, provider: 'fake', model: '', timeoutMin: 2 } });
   assert.equal(rw.spec.providerName, 'fake');
   assert.equal(rw.spec.autoApprove, false);
+  assert.equal(rw.spec.readOnly, true, 'the watcher session is read-only');
   assert.equal(rw.spec.timeoutMin, 2);
   assert.equal(rw.spec.variant, undefined);
   let looked = false;

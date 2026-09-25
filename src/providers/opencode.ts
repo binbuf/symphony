@@ -218,6 +218,8 @@ export const opencodeProvider: Provider = {
     // OpenCode 1.x run flag. (2.x moves it into the model reference as `provider/model#variant`.)
     if (o.variant) args.push('--variant', o.variant);
     if (o.autoApprove) args.push('--auto');
+    // A read-only session (the watcher) is the default here: without `--auto`, reads are permitted
+    // and edits/shell commands need approval nobody can give, so it can read the named log only.
     // The full prompt is attached with `--file`; argv only carries a short bootstrap so an oversized
     // prompt can never overflow the OS command-line limit. In the OpenCode 1.x CLI `--file` is an
     // array flag that would swallow a following positional as another file, so the bootstrap message

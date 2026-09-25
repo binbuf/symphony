@@ -109,6 +109,8 @@ export class TuiApp {
   private mouseDrag?: { x: number };
   private lastStatuses = new Map<string, string>();
   private lastHalted = false;
+  /** The task the pipeline was last on, so the status panel can follow it when it changes. */
+  private lastCurrentTaskId?: string;
   private renderScheduled = false;
   private timer?: NodeJS.Timeout;
   private tableCache?: { at: number; table: StatusTable };
@@ -128,6 +130,8 @@ export class TuiApp {
     this.term.onResize(() => this.render());
     this.selected = this.initialSelection();
     this.snapshotStatuses();
+    // Land on the task in flight (or the one the run halted on) rather than the top of the table.
+    this.revealTask(this.currentTaskId() ?? this.selectedTaskId(), true);
     this.render();
     this.timer = setInterval(() => this.tick(), 1000);
     this.timer.unref?.();
@@ -201,11 +205,16 @@ export class TuiApp {
     const halted = !!this.ctx.state.halted;
     if (halted && !this.lastHalted) this.toast(`halted: ${this.ctx.state.halted!.category}`);
     this.lastHalted = halted;
+    // Follow the pipeline: when it moves to a new task, recenter the status table on it.
+    const currentId = this.currentTaskId();
+    if (currentId && currentId !== this.lastCurrentTaskId) this.revealTask(currentId, true);
+    this.lastCurrentTaskId = currentId;
   }
 
   private snapshotStatuses(): void {
     for (const t of this.ctx.tasks) this.lastStatuses.set(t.id, this.ctx.state.tasks[t.id]?.status ?? 'pending');
     this.lastHalted = !!this.ctx.state.halted;
+    this.lastCurrentTaskId = this.currentTaskId();
   }
 
   private initialSelection(): number {
@@ -602,13 +611,35 @@ export class TuiApp {
   }
 
   private ensureSelectionVisible(): void {
-    const id = this.selectedTaskId();
+    this.revealTask(this.selectedTaskId());
+  }
+
+  /**
+   * Bring a status-table task into view. With `center` the row is placed mid-panel (used when the
+   * pipeline moves to a new task, so the active row is never hugging an edge); otherwise the panel
+   * only scrolls when the row is actually off-screen.
+   */
+  private revealTask(id: string | undefined, center = false): void {
     if (!id) return;
-    const row = this.table().taskRow[id];
+    const table = this.table();
+    const row = table.taskRow[id];
     if (row === undefined) return;
-    const area = Math.max(1, this.focusBodyHeight());
-    if (row < this.statusPanel.vOffset) this.statusPanel.vOffset = row;
-    else if (row >= this.statusPanel.vOffset + area) this.statusPanel.vOffset = row - area + 1;
+    const area = this.statusBodyHeight();
+    const maxOff = Math.max(0, table.rows.length - area);
+    let off = this.statusPanel.vOffset;
+    if (center) off = row - Math.floor(area / 2);
+    else if (row < off) off = row;
+    else if (row >= off + area) off = row - area + 1;
+    else return;
+    this.statusPanel.vOffset = clamp(off, 0, maxOff);
+    this.statusPanel.follow = false;
+  }
+
+  /** Visible body rows of the status table (header excluded), independent of which panel has focus. */
+  private statusBodyHeight(): number {
+    const { rows } = this.term.size();
+    const { top } = this.panelHeights(rows - BAR_ROWS - this.watchRows());
+    return Math.max(1, top - 2);
   }
 
   private focusBodyHeight(): number {
@@ -823,8 +854,15 @@ export class TuiApp {
       text = w.summary ? `${w.summary}  ·  watch error: ${w.error ?? 'unknown'}` : `Watch error: ${w.error ?? 'unknown'}`;
       color = C.red;
     } else {
-      text = w.summary ?? '';
-      color = C.green;
+      // A silent check (NO_UPDATE) is only expected at the very start, before the first task lands;
+      // show a dim placeholder so the strip never looks broken.
+      if (w.summary) {
+        text = w.summary;
+        color = C.green;
+      } else {
+        text = 'No update yet — nothing to interpret until the first task lands.';
+        color = C.dim;
+      }
     }
     const wrapped = wrapText(text, bodyWidth, bodyRows);
     for (let i = 0; i < bodyRows; i++) {

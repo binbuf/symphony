@@ -9,7 +9,7 @@ import { resolvePaths } from '../src/paths.js';
 import type { RunContext } from '../src/runner.js';
 import { newTaskState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
-import { buildWatchPrompt, pipelineSnapshot, progressSectionCount, startPipelineWatch, watchLogPath } from '../src/watch.js';
+import { buildWatchPrompt, cleanWatchSummary, pipelineSnapshot, progressSectionCount, startPipelineWatch, watchLogPath } from '../src/watch.js';
 
 const silent: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner() {} };
 
@@ -46,7 +46,7 @@ test('buildWatchPrompt and pipelineSnapshot describe the pipeline from live stat
   assert.match(prompt, /T02 \[running\]/);
   assert.match(prompt, /RECENT TASK OUTCOMES/);
   assert.match(prompt, /landed the thing/);
-  assert.match(prompt, /Do not call tools/);
+  assert.match(prompt, /permitted action is reading the file named under LATEST TASK LOG/);
   // The snapshot still leads with the current ticket and its phase, but frames them as context the
   // operator can already see.
   assert.match(prompt, /CURRENTLY RUNNING/);
@@ -58,13 +58,64 @@ test('buildWatchPrompt and pipelineSnapshot describe the pipeline from live stat
   assert.ok(prompt.indexOf('PHASES / GATES') < prompt.indexOf('RECENT TASK OUTCOMES'), 'phase precedes recent outcomes');
   assert.ok(prompt.indexOf('RECENT TASK OUTCOMES') < prompt.indexOf('PIPELINE SNAPSHOT'), 'recent outcomes precede the overall snapshot');
   // The instructions ask for interpretation, forbid narrating the visible status, and allow a silent
-  // reply instead of hedging.
+  // reply only at the very start rather than hedging.
   assert.match(prompt, /interpretation, not narration/);
   assert.match(prompt, /2 to 4 short sentences/);
-  assert.match(prompt, /Never narrate status or timing/);
+  assert.match(prompt, /Never narrate raw status or timing/);
   assert.match(prompt, /Never say it is too early to tell/);
-  assert.match(prompt, /reply with exactly NO_UPDATE/);
+  assert.match(prompt, /Reply with exactly NO_UPDATE/);
+  assert.match(prompt, /only at the very start of a run/);
+  assert.match(prompt, /Once any task has finished, always give/);
+  assert.match(prompt, /Begin directly with the observation/);
+  assert.match(prompt, /LATEST TASK LOG/);
+  assert.match(prompt, /Is the task in flight healthy, or struggling/);
+  assert.match(prompt, /do not march through a checklist/);
   assert.doesNotMatch(prompt, /what it has accomplished so far and what is left/);
+});
+
+test('buildWatchPrompt references the latest task session log by path instead of inlining it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-log-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(join(dir, 'runs'), { recursive: true });
+  writeFileSync(join(dir, 'runs', 'T02-1.log'), 'older line\n\nlatest line: retrying the failing test\n');
+  const tasks = [task('T01', 1), task('T02', 2)];
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: { ...newTaskState('one'), status: 'done', attempts: 1, finished: new Date().toISOString(), summary: 'ok' },
+      T02: {
+        ...newTaskState('two'), status: 'running', attempts: 2, started: new Date().toISOString(),
+        logs: [{ kind: 'task', jsonl: 'runs/T02-1.jsonl', log: 'runs/T02-1.log', prompt: 'runs/T02-1.prompt.md' }],
+      },
+    },
+  };
+  const ctx = makeCtx(dir, tasks, state);
+  const prompt = buildWatchPrompt(ctx);
+  // The prompt carries a path, not the log text, so its size never grows with the session.
+  assert.match(prompt, /LATEST TASK LOG \(T02's latest session\)/);
+  assert.match(prompt, /Read this file \(relative to the project root\): runs\/T02-1\.log/);
+  assert.doesNotMatch(prompt, /latest line: retrying the failing test/);
+  // An unavailable log degrades to a placeholder instead of a dangling path.
+  const noLog = buildWatchPrompt(makeCtx(dir, [task('T01', 1)], { version: 1, tasks: {} }));
+  assert.match(noLog, /\(no session log yet — nothing to read\)/);
+});
+
+test('cleanWatchSummary strips conversational openers but keeps real analysis', () => {
+  // The filler the user complained about: a meta opener separated from the point by "and" or a comma.
+  assert.equal(cleanWatchSummary('I looked into that and the pipeline should finish on time.'), 'the pipeline should finish on time.');
+  assert.equal(cleanWatchSummary('I looked at the logs, and T03 is circling.'), 'T03 is circling.');
+  assert.equal(cleanWatchSummary('Based on the snapshot, T05 looks fragile.'), 'T05 looks fragile.');
+  assert.equal(cleanWatchSummary('Looking at the delta: the final gate is not opening.'), 'the final gate is not opening.');
+  assert.equal(cleanWatchSummary('Sure, the retry count is climbing.'), 'the retry count is climbing.');
+  assert.equal(cleanWatchSummary("I've checked the recent outcomes. Two retries stand out."), 'Two retries stand out.');
+  assert.equal(cleanWatchSummary('It looks like the build will time out.'), 'the build will time out.');
+  // A preamble followed only by NO_UPDATE still leaves the control token intact.
+  assert.equal(cleanWatchSummary('I looked into that and NO_UPDATE'), 'NO_UPDATE');
+  // Content that merely starts with a similar word is not butchered, and an all-preamble answer survives.
+  assert.equal(cleanWatchSummary('Checking this is the last phase.'), 'Checking this is the last phase.');
+  assert.equal(cleanWatchSummary('T03 is retrying.'), 'T03 is retrying.');
+  assert.equal(cleanWatchSummary('I looked into that.'), 'I looked into that.');
+  assert.equal(cleanWatchSummary(''), '');
 });
 
 test('buildWatchPrompt inlines only outcomes that finished inside the window', () => {
@@ -235,6 +286,34 @@ test('a watcher NO_UPDATE reply keeps the panel quiet and is logged as no update
     const log = readFileSync(watchLogPath(paths), 'utf8');
     assert.match(log, /result: ready \(no update\)/);
     assert.match(log, /no update — nothing worth adding/);
+    watcher!.stop();
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a NO_UPDATE token followed by real content is kept as a summary, not swallowed', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-token-'));
+  const paths = resolvePaths(dir);
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  writeFileSync(join(fixtures, 'watch.jsonl'), `${JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, session_id: 'w3',
+    result: 'NO_UPDATE — actually T03 has retried twice; that gate may not open.',
+  })}\n`);
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+
+  const tasks = [task('T01', 1)];
+  const state: State = { version: 1, tasks: { T01: { ...newTaskState('one'), status: 'running', attempts: 1, started: new Date().toISOString() } } };
+  const ctx = makeCtx(dir, tasks, state);
+  ctx.config = { ...DEFAULTS, watch: { ...DEFAULTS.watch, provider: 'fake', model: '' } };
+
+  try {
+    const watcher = startPipelineWatch(ctx);
+    assert.ok(watcher, 'watcher starts with a usable provider');
+    await watcher!.checkNow();
+    assert.equal(ctx.watch?.status, 'ready');
+    assert.match(ctx.watch?.summary ?? '', /T03 has retried twice/, 'content after the token is not discarded');
     watcher!.stop();
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;

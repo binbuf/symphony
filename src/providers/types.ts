@@ -13,6 +13,8 @@ export interface BuildCommandOpts {
   /** Reasoning-effort / variant knob, already validated for this provider (e.g. "high"). */
   variant?: string;
   autoApprove: boolean;
+  /** When true the session may read files but must not edit or run commands; adapters map this to their read-only mode. */
+  readOnly?: boolean;
   budgetUsd?: number;
   extraArgs: string[];
   cwd: string;

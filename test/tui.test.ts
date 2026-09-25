@@ -164,6 +164,41 @@ test('TuiApp renders the pipeline-watch panel above the status table', () => {
   const ready = stripAnsi(app.renderLines(100, 24).join('\n'));
   assert.match(ready, /On track: T01 is running normally\./);
   assert.match(ready, /2 updates/);
+
+  // A silent check before any summary has landed must not leave the body blank.
+  ctx.watch = { status: 'ready', enabled: true, intervalMin: 5, provider: 'opencode', model: 'x', updatedAt: new Date().toISOString(), checks: 1 };
+  const silent = stripAnsi(app.renderLines(100, 24).join('\n'));
+  assert.match(silent, /1 update ·/);
+  assert.match(silent, /No update/, 'a summary-less ready panel shows a placeholder instead of going blank');
+});
+
+test('TuiApp scrolls the status table to the running task on start and when the pipeline moves on', () => {
+  const tasks = Array.from({ length: 30 }, (_, i) => task(`T${String(i + 1).padStart(2, '0')}`, i + 1));
+  const runningState = (id: string): State => ({
+    version: 1,
+    tasks: { [id]: { ...newTaskState(id), status: 'running', attempts: 1, durationS: 5, started: new Date().toISOString() } },
+  });
+  const ctx = makeCtx(tasks, runningState('T25'));
+  const app = new TuiApp(ctx, new AnsiTerminal(() => {}));
+  const priv = app as unknown as {
+    start(): void; stop(): void; checkTransitions(): void; tableCache?: unknown;
+    statusPanel: { vOffset: number; follow: boolean };
+  };
+
+  // Start lands on T25 (far down the table) instead of showing the first rows.
+  priv.start();
+  priv.stop();
+  assert.ok(priv.statusPanel.vOffset > 0, 'start scrolled down to the running task');
+  assert.match(stripAnsi(app.renderLines(100, 24).join('\n')), /T25/);
+
+  // When the pipeline moves to a different task the panel recenters on it.
+  const before = priv.statusPanel.vOffset;
+  ctx.state = runningState('T28');
+  priv.tableCache = undefined;
+  priv.checkTransitions();
+  assert.ok(priv.statusPanel.vOffset > before, 'a task change scrolls further down to the new active task');
+  const moved = stripAnsi(app.renderLines(100, 24).join('\n'));
+  assert.match(moved, /T28/);
 });
 
 test('TuiApp: e expands every status column and panning can reach the full text', () => {

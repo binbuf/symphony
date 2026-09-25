@@ -988,6 +988,12 @@ export interface SessionSpec {
   timeoutMin: number;
   idleTimeoutMin: number;
   autoApprove: boolean;
+  /**
+   * Read-only session: it may read files (so the watcher can inspect a named log) but must not edit
+   * or run commands. Adapters map this to their own read-only permission mode; `autoApprove` is
+   * ignored when set.
+   */
+  readOnly?: boolean;
   sources: { provider: string; model: string; modelProvider: string; variant: string };
 }
 
@@ -1236,8 +1242,9 @@ export function resolveEscalation(
  * watcher's provider/model come from the `watch` block alone so it can be a different, cheaper model
  * than the workhorse. A variant is only resolved when `watch.variant` is set explicitly — that keeps
  * the common case free of the synchronous provider-catalog lookup a variant check needs, and lets the
- * watcher default to the provider's own reasoning effort. Pinned to `autoApprove: false` so a
- * mis-prompted watcher cannot edit the tree.
+ * watcher default to the provider's own reasoning effort. Pinned to `autoApprove: false` and
+ * `readOnly: true` so a mis-prompted watcher cannot edit the tree but can still read the one log the
+ * prompt names.
  */
 export function resolveWatch(
   config: Config,
@@ -1269,6 +1276,7 @@ export function resolveWatch(
       timeoutMin: w.timeoutMin,
       idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
       autoApprove: false,
+      readOnly: true,
       sources: { provider: 'watch', model: 'watch', modelProvider: w.modelProvider ? 'watch' : pc.modelProvider ? 'config' : 'provider default', variant: variant ? 'watch' : 'provider default' },
     },
     warnings,

@@ -68,6 +68,34 @@ const WATCH_TASK_ID = 'watch';
 /** The token the watcher replies with when it has nothing useful to add (keeps the panel quiet). */
 const WATCH_NO_UPDATE = 'NO_UPDATE';
 
+/**
+ * Conversational openers the watcher sometimes leads with ("I looked into that and…", "Based on the
+ * logs…"). They are pure filler in the panel, so they are stripped before the summary is shown or
+ * logged. Each tries to consume the whole leading clause (through its sentence punctuation, a
+ * comma/colon, or a following "and"/"but") and only fires when something follows.
+ */
+const WATCH_PREAMBLE_PATTERNS = [
+  /^(?:sure|okay|ok|alright|certainly|got it|understood|of course)[\s,!.]+/i,
+  /^i(?:'ve| have)?\s+(?:looked|checked|reviewed|examined|scanned|dug|went through|took a look)\b[^.!?]{0,200}?(?:[.!?]|[;,:]\s*(?:and\s+|but\s+)?|\s+(?:and|but)\s+)/i,
+  /^(?:looking|based on|after (?:reviewing|checking|looking)|reviewing|examining|checking|here(?:'s| is))\b[^.!?]{0,200}?(?:[.!?]|[;,:]\s*(?:and\s+|but\s+)?|\s+(?:and|but)\s+)/i,
+  /^(?:it|this)\s+(?:looks|seems|appears)\s+(?:like|that)\s+/i,
+];
+
+/** Strip a conversational preamble from a watcher answer, falling back to the original if it empties it. */
+export function cleanWatchSummary(text: string): string {
+  const original = text.trim();
+  let out = original;
+  for (let pass = 0; pass < 2; pass++) {
+    let changed = false;
+    for (const re of WATCH_PREAMBLE_PATTERNS) {
+      const next = out.replace(re, '').trim();
+      if (next && next !== out) { out = next; changed = true; break; }
+    }
+    if (!changed) break;
+  }
+  return out || original;
+}
+
 /** The dedicated append-only log beside the harness log (`.symphony/watch.log`, or the set's dir). */
 export function watchLogPath(paths: Paths): string {
   return join(dirname(paths.log), 'watch.log');
@@ -132,11 +160,13 @@ function capTailBytes(text: string, maxBytes: number): string {
 }
 
 /**
- * The watcher prompt: a compact current-status header plus only what changed since the previous check
- * — the tasks that finished in that window and the progress notes written in it — so a check costs the
- * same whether the run is five minutes or five hours old. The instructions frame the header as context
- * the operator can already see and ask only for interpretation the status table cannot show, or
- * `NO_UPDATE`.
+ * The watcher prompt: a compact current-status header plus what changed since the previous check —
+ * the tasks that finished in that window, the progress notes written in it, and the relative path of
+ * the latest task's own session log, which the watcher is asked to read (its one permitted action) —
+ * so a check costs about the same whether the run is five minutes or five hours old. The instructions
+ * frame the header as context the operator can already see and ask only for a read the status table
+ * cannot give: is the task in flight healthy or struggling, is the current phase/gate on track, and is
+ * the run as a whole likely to finish as anticipated.
  */
 export function buildWatchPrompt(ctx: RunContext, window: WatchWindow = {}): string {
   const { paths, tasks, state } = ctx;
@@ -178,8 +208,22 @@ export function buildWatchPrompt(ctx: RunContext, window: WatchWindow = {}): str
       bits.push(`took ${fmtDuration(st.durationS)}`);
     }
     if (st?.summary) bits.push(squash(st.summary, 300));
+    if (st?.transientRetries) bits.push(`transient retries ${st.transientRetries}`);
+    if (st?.lastError) bits.push(`last error ${st.lastError.category}${st.lastError.transient ? ' (transient)' : ''}: ${squash(st.lastError.message, 140)}`);
+    if (st?.verify && !st.verify.ok) bits.push(`verify FAILED (${st.verify.command})`);
     return `- ${currentTask.id} — ${squash(currentTask.title, 100)} · phase: ${currentTask.phase} · ${bits.join(' · ')}`;
   })();
+
+  // The relative path of the latest session log (the running task's, or the most recently finished
+// one's). The watcher is asked to read that one file rather than have its contents inlined, which
+// keeps the prompt small no matter how long the session runs.
+  const latestLogTask = tasks.find((t) => statusOf(state, t) === 'running') ?? finished[0];
+  const refs = latestLogTask ? state.tasks[latestLogTask.id]?.logs ?? [] : [];
+  const latestRef = refs[refs.length - 1];
+  const latestLogPath = latestLogTask && latestRef?.log ? latestRef.log : undefined;
+  const latestLogLabel = latestLogPath
+    ? `${latestLogTask!.id}'s latest session`
+    : 'no task session yet';
 
   // Per-phase progress, with the current phase flagged, so the model can judge the gate we are in.
   const phaseStats = new Map<string, { done: number; total: number; remaining: string[] }>();
@@ -210,39 +254,58 @@ export function buildWatchPrompt(ctx: RunContext, window: WatchWindow = {}): str
     'current phase and its progress, the done/total counts, the cost, and the full task list. Your',
     'answer is rendered verbatim in a small strip above that table.',
     '',
-    'Each check gives you only what changed since your last check — the tasks that finished in that',
-    'window, the progress notes written in it, and a compact current-status header. You do not get the',
-    'earlier history again, so judge the delta against the header instead of re-reading old work.',
+    'Each check gives you what changed since your last check — the tasks that finished in that window,',
+    "the progress notes written in it, a compact current-status header, and the path of the latest task's",
+    'session log. You may read that one file to see what the work is actually doing; it is the only file',
+    'you are permitted to open. Judge the delta against the header; do not re-read old work or repeat',
+    'what an earlier check already said.',
     '',
     'Your value is interpretation, not narration. Restating what the operator can already see — that a',
     'task is running, how long it has been running, which phase we are in, how many tasks are done —',
-    'adds nothing. Add only what the table cannot show at a glance: what the snapshot means for whether',
-    'this run will finish, where it looks fragile, and what to expect next.',
+    'adds nothing. What the operator needs is a read on how it is actually going:',
     '',
-    'Decide what is genuinely worth saying from where the run is:',
-    "- A task running long or retrying: is that anomalous against this pipeline's own recent pace, and",
-    '  does it change your expectation of the outcome? Say what you now expect, and why.',
-    '- Work that looks harder or more fragile than the rest (repeated retries, a summary that',
-    '  contradicts its task, a phase that keeps circling, a gate that will not open): name the specific',
-    '  concern and what evidence would settle it.',
-    '- The final stretch: what still stands between here and completion beyond the task in flight, and',
-    '  whether finishing is realistically in reach.',
-    '- A real pattern across the recent outcomes that the counts alone do not reveal.',
+    '- Is the task in flight healthy, or struggling? Read its log: is it working one thread to',
+    '  completion, or looping, erroring, retrying, or fighting the same failing command? Say which, and',
+    '  what it means for the outcome.',
+    '- Is the current phase or milestone on track? Are the tasks inside it landing as expected, or is',
+    '  one stubborn and likely to hold the gate open? Name what still stands between here and closing it.',
+    '- Summarize the latest task log only as far as it supports that read — what the session is actually',
+    '  doing, in plain terms, not a transcript and not a reworded version of its reported summary.',
+    '- Is the run as a whole likely to finish as anticipated? If the pace, the retries, or the outcomes',
+    '  point to a different end than planned, say so and why.',
+    '',
+    'Which of those matters most changes from check to check, so do not march through a checklist or',
+    'answer all of them every time: pick the two or three things that are true and consequential right',
+    'now, and skip the rest. When a task is struggling, a phase is at risk, or completion no longer',
+    'looks likely, that is exactly what must lead.',
     '',
     'Hard rules:',
-    '- Never narrate status or timing ("task N is running", "X minutes in", "just started", "N of M',
-    '  done", "still early"). The operator already has that line.',
+    '- Never narrate raw status or timing ("task N is running", "X minutes in", "just started", "N of M',
+    '  done", "still early") — the operator already has that line. Characterizing the task itself is',
+    '  wanted: what it is doing and whether that is normal.',
     '- Never say it is too early to tell, that there is not enough information, or otherwise hedge',
     '  about what you can know.',
-    '- Never pad to fill the panel and never manufacture concern. If the snapshot holds no real insight,',
-    '  reply with exactly NO_UPDATE and nothing else.',
-    '- Ground every claim in the snapshot; invent nothing. Do not call tools and do not change files.',
+    '- Never pad to fill the panel and never manufacture concern. Do not treat silence as the safe',
+    '  default: a genuine observation is nearly always available. Reply with exactly NO_UPDATE and',
+    '  nothing else only at the very start of a run — the first task is still in flight and nothing has',
+    '  finished yet, so there is truly nothing to interpret. Once any task has finished, always give',
+    '  your read rather than going quiet.',
+    '- Begin directly with the observation. Do not open with a preamble or acknowledgement ("I looked',
+    '  into…", "Looking at the snapshot…", "Based on the logs…", "It looks like…", "Sure,").',
+    '- Ground every claim in the snapshot and in the task log you read; invent nothing. Your only',
+    '  permitted action is reading the file named under LATEST TASK LOG — do not run commands, edit, or',
+    '  read anything else. If that file cannot be read, base your read on the snapshot instead of',
+    '  guessing at the log.',
     '',
-    'When you do have something: 2 to 4 short sentences of plain prose — the observation, what it means',
-    'for the run, and what you expect next. No headings, no bullet lists, no code fences.',
+    'Your update: 2 to 4 short sentences of plain prose. No headings, no bullet lists, no code fences.',
     '',
     '=== CURRENTLY RUNNING (or, if idle, most recently finished) — already visible to the operator ===',
     currentLine ?? '- (nothing running and nothing finished yet)',
+    '',
+    `=== LATEST TASK LOG (${latestLogLabel}) ===`,
+    latestLogPath
+      ? `Read this file (relative to the project root): ${latestLogPath}`
+      : '- (no session log yet — nothing to read)',
     '',
     '=== PHASES / GATES (▶ marks the phase of the current task) ===',
     phaseLines.join('\n') || '- (no tasks)',
@@ -313,7 +376,7 @@ async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider, 
   };
   const cmd = provider.buildCommand({
     bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: WATCH_TASK_ID, attempt: 1, kind: 'task',
-    model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, extraArgs: spec.extraArgs, cwd: ctx.paths.root,
+    model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, readOnly: spec.readOnly, extraArgs: spec.extraArgs, cwd: ctx.paths.root,
   });
   const session = startSession({
     spec: cmd, provider, cwd: ctx.paths.root,
@@ -331,9 +394,12 @@ async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider, 
   }
   const durationS = Math.round(outcome.durationMs / 1000);
   const raw = (outcome.result.text || outcome.allText).trim();
+  // Drop conversational openers ("I looked into…") before the answer is judged, shown or logged.
+  const cleaned = cleanWatchSummary(raw);
   const failed = !outcome.result.ok || outcome.interrupted || outcome.timedOut || outcome.stalled || !!outcome.spawnError;
-  // A deliberate, successful "nothing to add" keeps the panel quiet instead of filling it with filler.
-  const silent = !failed && new RegExp(`^${WATCH_NO_UPDATE}\\b`, 'i').test(raw);
+  // A deliberate, successful "nothing to add" keeps the panel quiet. Only an answer that is *exactly*
+  // the token counts: if the model appends anything useful, it is kept as a summary instead of dropped.
+  const silent = !failed && new RegExp(`^${WATCH_NO_UPDATE}[\\s.!]*$`, 'i').test(cleaned);
   if (silent) return { status: 'ready', silent: true, durationS, costUsd: outcome.costUsd, ...paths };
   if (!raw) {
     const error = failed
@@ -342,7 +408,7 @@ async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider, 
     return { status: 'error', error, durationS, costUsd: outcome.costUsd, ...paths };
   }
   // Room for the requested 2–4 sentences; the panel and log both cap their own display.
-  return { status: 'ready', summary: squash(raw, 1200), durationS, costUsd: outcome.costUsd, ...paths };
+  return { status: 'ready', summary: squash(cleaned, 1200), durationS, costUsd: outcome.costUsd, ...paths };
 }
 
 /**

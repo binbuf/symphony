@@ -86,7 +86,10 @@ export const claudeProvider: Provider = {
     // Claude Code's session effort knob: low | medium | high | xhigh | max.
     if (o.variant) args.push('--effort', o.variant);
     if (o.budgetUsd !== undefined) args.push('--max-budget-usd', String(o.budgetUsd));
-    if (o.autoApprove) args.push('--dangerously-skip-permissions');
+    if (o.readOnly) {
+      // Read-only sessions may read but not write or run commands: allow Read, block the write/shell tools.
+      args.push('--permission-mode', 'acceptEdits', '--permission-prompts', 'none', '--allowedTools', 'Read', '--disallowedTools', 'Edit', 'Write', 'NotebookEdit', 'Bash');
+    } else if (o.autoApprove) args.push('--dangerously-skip-permissions');
     else args.push('--permission-mode', 'acceptEdits', '--permission-prompts', 'none');
     args.push(...o.extraArgs);
     return { bin: o.bin, args, stdinPayload: o.prompt };

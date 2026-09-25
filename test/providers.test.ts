@@ -51,6 +51,13 @@ test('claude buildCommand: stdin prompt, bypass by default, safe mode flags', ()
   const s = claudeProvider.buildCommand(opts({ autoApprove: false }));
   assert.ok(!s.args.includes('--dangerously-skip-permissions'));
   assert.ok(s.args.join(' ').includes('--permission-mode acceptEdits'));
+  // A read-only session pre-approves Read and blocks the write/shell tools, whatever autoApprove says.
+  const ro = claudeProvider.buildCommand(opts({ readOnly: true }));
+  const roArgs = ro.args.join(' ');
+  assert.ok(roArgs.includes('--allowedTools Read'));
+  assert.ok(roArgs.includes('--disallowedTools Edit Write NotebookEdit Bash'));
+  assert.ok(roArgs.includes('--permission-mode acceptEdits'));
+  assert.ok(!ro.args.includes('--dangerously-skip-permissions'), 'read-only beats the bypass flag');
 });
 
 test('cursor parser: tool_call reduction and result', () => {
@@ -160,6 +167,11 @@ test('codex buildCommand: full bypass by default, sandbox in safe mode, resume s
   assert.deepEqual(s.args.slice(0, 3), ['exec', 'resume', 'th1']);
   assert.ok(s.args.join(' ').includes('--sandbox workspace-write'));
   assert.ok(!s.args.includes('--dangerously-bypass-approvals-and-sandbox'));
+  // A read-only session runs in codex's read-only sandbox, whatever autoApprove says.
+  const ro = codexProvider.buildCommand(opts({ readOnly: true }));
+  assert.ok(ro.args.join(' ').includes('--sandbox read-only'));
+  assert.ok(!ro.args.join(' ').includes('workspace-write'));
+  assert.ok(!ro.args.includes('--dangerously-bypass-approvals-and-sandbox'));
   const big = codexProvider.buildCommand(opts({ prompt: 'x'.repeat(9000) }));
   assert.equal(big.args[big.args.length - 1], '-');
   assert.equal(big.stdinPayload?.length, 9000);

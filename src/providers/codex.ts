@@ -129,7 +129,8 @@ export const codexProvider: Provider = {
     if (o.model) args.push('--model', o.model);
     // Codex has no effort flag: the setting is a config key, overridden per invocation.
     if (o.variant) args.push('-c', `model_reasoning_effort=${o.variant}`);
-    if (o.autoApprove) args.push('--dangerously-bypass-approvals-and-sandbox');
+    if (o.readOnly) args.push('--sandbox', 'read-only', '--ask-for-approval', 'never');
+    else if (o.autoApprove) args.push('--dangerously-bypass-approvals-and-sandbox');
     else args.push('--sandbox', 'workspace-write', '--ask-for-approval', 'never');
     args.push(...o.extraArgs);
     // `-` reads the prompt from stdin; never place the prompt on argv.
