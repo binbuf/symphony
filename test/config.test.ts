@@ -541,3 +541,38 @@ test('breakdown config is off by default, parses overrides, and validates keys',
   assert.equal(own.spec.sources.model, 'breakdown');
   assert.equal(own.spec.autoApprove, false);
 });
+
+test('vision config is off by default with OpenRouter + Qwen VL, and validates its keys', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-visioncfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+
+  assert.equal(DEFAULTS.vision.enabled, false);
+  assert.equal(DEFAULTS.vision.provider, 'openrouter');
+  assert.equal(DEFAULTS.vision.model, 'qwen/qwen3-vl-235b-a22b-instruct');
+  assert.equal(DEFAULTS.vision.apiKeyEnv, 'OPENROUTER_API_KEY');
+  assert.equal(loadConfig(paths, {}).config.vision.enabled, false);
+
+  writeFileSync(paths.config, JSON.stringify({ vision: { enabled: true, model: 'qwen/qwen3-vl-30b', apiKeyEnv: 'MY_KEY', timeoutMs: 1200, maxImageBytes: 4096, prompt: 'What is wrong here?' } }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.vision.enabled, true);
+  assert.equal(config.vision.model, 'qwen/qwen3-vl-30b');
+  assert.equal(config.vision.apiKeyEnv, 'MY_KEY');
+  assert.equal(config.vision.timeoutMs, 1200);
+  assert.equal(config.vision.maxImageBytes, 4096);
+  assert.equal(config.vision.prompt, 'What is wrong here?');
+  assert.equal(warnings.length, 0);
+
+  // Unknown provider and non-positive numbers warn and fall back. An empty model falls back to the
+  // shipped default (as Jev does), so a partially-written block cannot silently disable the tool.
+  writeFileSync(paths.config, JSON.stringify({ vision: { enabled: true, provider: 'nope', model: '', timeoutMs: 0, maxImageBytes: -1 } }));
+  const bad = loadConfig(paths, {});
+  assert.equal(bad.config.vision.provider, DEFAULTS.vision.provider);
+  assert.equal(bad.config.vision.enabled, true);
+  assert.equal(bad.config.vision.model, DEFAULTS.vision.model);
+  assert.equal(bad.config.vision.timeoutMs, DEFAULTS.vision.timeoutMs);
+  assert.equal(bad.config.vision.maxImageBytes, DEFAULTS.vision.maxImageBytes);
+  assert.ok(bad.warnings.some((w) => /vision\.provider/.test(w)));
+  assert.ok(bad.warnings.some((w) => /vision\.timeoutMs/.test(w)));
+  assert.ok(bad.warnings.some((w) => /vision\.maxImageBytes/.test(w)));
+});

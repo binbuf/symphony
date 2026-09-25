@@ -9,6 +9,7 @@ import type { Provider } from './providers/types.js';
 import { haltResumeHint, liveLock, type State } from './state.js';
 import { resolveSpawn } from './spawn.js';
 import { isPathLike, resolveBinary } from './util.js';
+import { visionProblem } from './vision.js';
 
 export interface Check { name: string; level: 'ok' | 'warn' | 'fail'; detail: string }
 
@@ -141,6 +142,13 @@ export function runDoctor(i: DoctorInput): Check[] {
     add('breakdown', stages ? 'ok' : 'warn', stages
       ? `on ${stages} · decision ${decision} · rules ${rules} · max ${bd.maxPerTask || '∞'} per task`
       : `breakdown.enabled is true but onStart/onContinue/onFailure are all false; nothing will trigger`);
+  }
+
+  if (i.config.vision.enabled) {
+    const v = i.config.vision;
+    const problem = visionProblem(v, process.env);
+    const detail = `vision tool via ${v.provider} · ${v.model} (key from ${v.apiKeyEnv})`;
+    add('vision', problem ? 'warn' : 'ok', problem ? `vision is on but ${problem}; the tool will fail until this is fixed (set ${v.apiKeyEnv}, or vision.enabled=false). ${detail}` : detail);
   }
 
   if (stopPresent(i.paths)) add('stop', 'warn', `${rel(i.paths.root, i.paths.stop)} present; run pauses until it is removed`);

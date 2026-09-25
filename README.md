@@ -6,7 +6,7 @@ symphony lives in `<your target project>/.symphony/` (gitignored) and reads its 
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Pipeline watch](#pipeline-watch) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -93,7 +93,7 @@ On Windows use `./.symphony/symphony.ps1` (or `.symphony\symphony.cmd` from `cmd
 
 ### Preflight — `doctor`
 
-Run it before the first `run` and after changing providers or config. It checks, in order: Node version, that the project is a git repository (and whether the worktree is dirty), that `ROADMAP.md` exists and parses, that the binary of every provider a task will use is on `PATH` (per-task front matter included), that they are authenticated, that an independent verify command exists (warning when nothing will check a `done`), and whether a halt, STOP sentinel or another live run (lock) would block you. Failures exit `4`; warnings do not stop a run. `run` repeats these checks itself before every invocation.
+Run it before the first `run` and after changing providers or config. It checks, in order: Node version, that the project is a git repository (and whether the worktree is dirty), that `ROADMAP.md` exists and parses, that the binary of every provider a task will use is on `PATH` (per-task front matter included), that they are authenticated, that an independent verify command exists (warning when nothing will check a `done`), that the [`vision` tool's](#vision-tool) API key is present when it is enabled, and whether a halt, STOP sentinel or another live run (lock) would block you. Failures exit `4`; warnings do not stop a run. `run` repeats these checks itself before every invocation.
 
 ### `init` — scaffold the plan
 
@@ -427,6 +427,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `reset --all` | clear every task's state and the halt, and reset every roadmap marker to `[ ]` |
 | `nudge T05 [--note "…"]` | resume a task's last session and ask it to close out with a result block |
 | `clear-halt` | lift a halt so `run` can start again. For an `attempts` halt, add `--retry` (`run --clear-halt --retry --only T05`) or `reset T05`: clearing the halt alone leaves the task's failure counter at the limit, so the next run re-halts |
+| `vision <image> [--prompt "…"] [--context "…"]` | send a local image (or `http(s)` URL) to the configured vision model and print its text description; `--prompt` replaces the base instruction and `--context` appends to it; only available when the [`vision` block](#vision-tool) is enabled |
 
 ### `run` flags
 
@@ -556,6 +557,46 @@ When the [`breakdown` block](#automatic-breakdowns) is enabled and one of its ga
 
 `symphony doctor` reports which workflows are armed and whether the key is present; a missing key halts the next `run` (exit `3`) until it is set or `jev.enabled` is turned off.
 
+## Vision tool
+
+Sometimes a task only makes sense if you can *look* at something — a screenshot of a failing UI, a photo of a whiteboard, a diagram, a chart, a mockup. A coding session's model may not accept images at all, so symphony can run a separate **vision model** on the session's behalf. When it is enabled, every task prompt gains one line telling the session the tool exists and how to call it; the session writes an image to a file and runs:
+
+```bash
+./.symphony/symphony vision shot.png                 # describe it with the configured model
+./.symphony/symphony vision shot.png --prompt "What error is on screen?"   # replace the base instruction
+./.symphony/symphony vision shot.png --context "The user says nothing happens when they click Save"
+./.symphony/symphony vision https://example.com/diagram.png
+```
+
+The command encodes the file (or passes an `http(s)` URL straight through), sends it to the configured router/model, and prints the model's description to stdout, which the calling agent reads like any other command output. `--prompt` replaces the base instruction; `--context` appends extra detail (the task's own question, a symptom, what to focus on) to whichever base instruction is in play. It works for every provider because it is just a shell command the agent already knows how to run.
+
+It is **off by default**. Turn it on with the `vision` block:
+
+```json
+"vision": {
+  "enabled": true,
+  "provider": "openrouter",
+  "model": "qwen/qwen3-vl-235b-a22b-instruct",
+  "apiKeyEnv": "OPENROUTER_API_KEY",
+  "timeoutMs": 60000,
+  "maxImageBytes": 20971520,
+  "prompt": "Review this image deeply and describe everything about it in detail."
+}
+```
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | master switch; when off the command refuses to run and no prompt mentions it |
+| `provider` | `openrouter` | router the request goes to; only OpenRouter is built in |
+| `baseUrl` | – | override the provider's base URL (e.g. a self-hosted gateway) |
+| `model` | `qwen/qwen3-vl-235b-a22b-instruct` | vision model id |
+| `apiKeyEnv` | `OPENROUTER_API_KEY` | environment variable holding the bearer token |
+| `timeoutMs` | `60000` | hard cap on one request |
+| `prompt` | `Review this image deeply and describe everything about it in detail.` | instruction sent with the image when `--prompt` is not given |
+| `maxImageBytes` | `20971520` (20 MB) | largest image accepted; a bigger file is rejected before upload |
+
+Configure the router with `provider` or addresses models as `vendor/model` on OpenRouter (browse <https://openrouter.ai/models> for vision-capable ids). `symphony doctor` reports the configured model and warns when the API key is missing; the tool itself fails fast with a clear message when disabled, misconfigured, or given an image that does not exist or is over the size limit.
+
 ## Pipeline watch
 
 While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: the harness assembles a self-contained snapshot — the currently running ticket (or the one that just finished), per-phase progress with the current phase flagged, **only the task outcomes and `PROGRESS.md` sections that landed since the previous check**, the pipeline counts and a status-only task list, and the halted banner if any — and asks the watcher model to **add interpretation the status table cannot show**. Each check's window starts where the previous one stopped, so a check costs the same whether the run is five minutes or five hours old instead of re-inlining the whole history every interval. The TUI already shows the running ticket and its elapsed time, the phase, the counts and the cost, so the watcher is told not to restate any of that; it speaks only when it can say something a careful operator would not already know:
@@ -628,6 +669,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
 | `escalation.enabled`, `.provider`, `.model`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `openrouter/z-ai/glm-5.3`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
+| `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, `Review this image deeply and describe everything about it in detail.`, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt mentions it (see [Vision tool](#vision-tool)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `openrouter/deepseek/deepseek-v4.1-flash`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
 | `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.rules.*`, `.decision`, `.provider`, `.model`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `16384`/`1`/`1`/`[task, verify]`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |

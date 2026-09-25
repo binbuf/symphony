@@ -18,6 +18,7 @@ import { saveState } from './state.js';
 import { splitCommand, splitTask } from './split.js';
 import { runWithTui } from './tui/index.js';
 import { UsageError } from './util.js';
+import { describeImage, visionProblem } from './vision.js';
 
 const HELP = `symphony — run an LLM coding agent through your roadmap, one fresh session per task
 
@@ -40,6 +41,7 @@ Usage
   symphony reset   --all                 clear every task's state and the halt, so a replaced roadmap starts clean
   symphony nudge   T05 [--note "..."]    resume a task's last session and ask it to close out
   symphony clear-halt                    lift a halt so run can start again
+  symphony vision  <image> [--prompt "..."] [--context "..."]  analyze an image with the configured vision model and print its description
   symphony brief                         print a paste-ready prompt that makes any LLM client emit the docs package in this format
   symphony --version                     print the version
 
@@ -98,7 +100,7 @@ export const VERSION: string = (() => {
   }
 })();
 
-const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'split', 'init', 'accept', 'reset', 'nudge', 'clear-halt', 'brief', 'help']);
+const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'split', 'init', 'accept', 'reset', 'nudge', 'clear-halt', 'vision', 'brief', 'help']);
 
 /**
  * The effective path overrides for this invocation: the base `paths`, or — with `--set NAME` — a
@@ -160,6 +162,8 @@ export async function main(argv: string[]): Promise<number> {
       note: { type: 'string' },
       revert: { type: 'boolean' },
       json: { type: 'boolean' },
+      prompt: { type: 'string' },
+      context: { type: 'string' },
     },
   });
   const cmd = positionals[0] ?? (v.help ? 'help' : 'help');
@@ -208,6 +212,18 @@ export async function main(argv: string[]): Promise<number> {
     const report = lintDocs(paths, { design: config.designDocs, skipDirs: allDocsDirs(paths.root, config) });
     formatLint(report).forEach((l) => log.plain(l));
     return report.ok ? 0 : 2;
+  }
+
+  // The vision tool is invoked by a task session through this same CLI. It needs the config (model,
+  // key, router) but not the roadmap/state, so it answers before the project is loaded.
+  if (cmd === 'vision') {
+    const image = positionals[1];
+    if (!image) throw new UsageError('vision: give an image path or URL, e.g. symphony vision shot.png [--prompt "..."] [--context "..."]');
+    const problem = visionProblem(config.vision);
+    if (problem) throw new UsageError(`vision: unavailable (${problem}); enable it with "vision": {"enabled": true} in ${paths.config} and set ${config.vision.apiKeyEnv}`);
+    const result = await describeImage(config.vision, { image, prompt: v.prompt, context: v.context, cwd: paths.root });
+    process.stdout.write(`${result.text}\n`);
+    return 0;
   }
 
   let loaded = loadProject(paths, log);

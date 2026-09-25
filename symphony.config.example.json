@@ -96,6 +96,15 @@
       "continue"
     ]
   },
+  "vision": {
+    "enabled": false,
+    "provider": "openrouter",
+    "model": "qwen/qwen3-vl-235b-a22b-instruct",
+    "apiKeyEnv": "OPENROUTER_API_KEY",
+    "timeoutMs": 60000,
+    "maxImageBytes": 20971520,
+    "prompt": "Review this image deeply and describe everything about it in detail."
+  },
   "watch": {
     "enabled": true,
     "intervalMin": 5,

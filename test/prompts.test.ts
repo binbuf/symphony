@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { docsContract } from '../src/contract.js';
 import type { LintReport } from '../src/lint.js';
 import { resolvePaths, type Paths } from '../src/paths.js';
-import { buildTaskPrompt, type PromptCtx } from '../src/prompt.js';
+import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, type PromptCtx } from '../src/prompt.js';
 import { buildPreparePrompt } from '../src/prepare.js';
 import type { RunContext } from '../src/runner.js';
 import type { State } from '../src/state.js';
@@ -114,4 +114,14 @@ test('an explicit indexBody is inlined instead of the on-disk INDEX.md', () => {
   assert.match(text, /--- PROJECT INDEX \(docs\/INDEX\.md\) ---/);
   assert.match(text, /src\/app\.ts/);
   assert.doesNotMatch(text, /not generated yet/);
+});
+
+test('the vision note is injected into every task prompt only when set', () => {
+  const { ctx } = fixture();
+  const note = 'Image analysis is available: run `./.symphony/symphony vision <image>` to describe an image.';
+  assert.doesNotMatch(buildTaskPrompt(ctx), /Image analysis is available/);
+  assert.match(buildTaskPrompt({ ...ctx, visionNote: note }), /Image analysis is available/);
+  assert.match(buildContinuePrompt({ ...ctx, visionNote: note }), /Image analysis is available/);
+  assert.match(buildNudgePrompt({ ...ctx, visionNote: note }), /Image analysis is available/);
+  assert.match(buildResumePrompt({ ...ctx, visionNote: note }, 'boom'), /Image analysis is available/);
 });

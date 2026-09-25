@@ -90,3 +90,20 @@ test('--set selects a declared task set, isolates its state, and rejects an unkn
   // The set's state lives under .symphony/sets/<name>/, not the base state file.
   assert.ok(setPaths.state.includes(join('.symphony', 'sets', 'phase-2', 'state.json')));
 });
+
+test('vision is rejected when disabled or missing a key, before any network call', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cli-vision-'));
+  mkdirSync(join(dir, '.symphony'), { recursive: true });
+
+  await assert.rejects(main(['vision', '--root', dir]), (e: unknown) => e instanceof UsageError && /give an image/.test((e as Error).message));
+  await assert.rejects(main(['vision', 'shot.png', '--root', dir]), (e: unknown) => e instanceof UsageError && /unavailable \(disabled\)/.test((e as Error).message));
+
+  writeFileSync(join(dir, '.symphony', 'symphony.config.json'), JSON.stringify({ vision: { enabled: true } }));
+  const saved = process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  try {
+    await assert.rejects(main(['vision', 'shot.png', '--root', dir]), (e: unknown) => e instanceof UsageError && /OPENROUTER_API_KEY/.test((e as Error).message));
+  } finally {
+    if (saved !== undefined) process.env.OPENROUTER_API_KEY = saved;
+  }
+});

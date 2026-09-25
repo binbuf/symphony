@@ -37,6 +37,8 @@ export interface PromptCtx {
   maxTaskBytes?: number;
   /** Pre-generated repo map to inline instead of reading `paths.index` (used by `--dry-run`). */
   indexBody?: string;
+  /** One-line note about the vision tool, when it is enabled; omitted otherwise. */
+  visionNote?: string;
 }
 
 export const PROGRESS_HEADER = `# Progress notes
@@ -148,6 +150,7 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
 
   const vars: Record<string, string | number> = {
     projectName: basename(paths.root),
+    visionNote: ctx.visionNote ? `${ctx.visionNote}\n` : '',
     retryNote,
     continuationNote,
     root: paths.root,
@@ -189,11 +192,16 @@ function readProgress(ctx: PromptCtx, paths: Paths): string {
   });
 }
 
+/** Append the vision-tool note to the plain prompts (task.md carries it as a template variable). */
+function withVision(text: string, ctx: PromptCtx): string {
+  return ctx.visionNote ? `${text.trimEnd()}\n\n${ctx.visionNote}\n` : text;
+}
+
 export function buildContinuePrompt(ctx: PromptCtx): string {
   const { paths, task } = ctx;
   const d = docPaths(paths);
   const rel0 = task.taskFileRel ?? defaultTaskFileRel(paths, task);
-  return `This is a continuation session for ${task.id} — ${task.title}. A previous session completed part of this task and reported status "continue"; the harness has started you in a fresh session to finish it.
+  return withVision(`This is a continuation session for ${task.id} — ${task.title}. A previous session completed part of this task and reported status "continue"; the harness has started you in a fresh session to finish it.
 
 Nobody can answer questions. Work only on what remains:
 1. Read ${rel0} (especially "## Hand-off"), the "## ${task.id}" section in ${d.progress}, and run \`git status\` and \`git log -5\` to see what already landed.
@@ -206,14 +214,14 @@ SYMPHONY_RESULT
 status: <exactly one word: done, continue, blocked, or failed>
 summary: <one line>
 END_SYMPHONY_RESULT
-`;
+`, ctx);
 }
 
 export function buildNudgePrompt(ctx: PromptCtx, extraNote?: string): string {
   const { task, paths } = ctx;
   const d = docPaths(paths);
   const rel0 = task.taskFileRel ?? defaultTaskFileRel(paths, task);
-  return `Your previous turn ended without the required SYMPHONY_RESULT block, so the harness could not record ${task.id} — ${task.title}. This is a one-shot session: ending a turn exits the process, and any background job you were waiting on was killed at that moment; no notification will ever arrive.
+  return withVision(`Your previous turn ended without the required SYMPHONY_RESULT block, so the harness could not record ${task.id} — ${task.title}. This is a one-shot session: ending a turn exits the process, and any background job you were waiting on was killed at that moment; no notification will ever arrive.
 
 You have been resumed with your full context. Close ${task.id} out now, in this single turn:
 1. Finish only what can be finished cheaply, running every command in the foreground. Anything else: drop it and list it under "## Hand-off" in ${rel0} as remaining work.
@@ -225,12 +233,12 @@ SYMPHONY_RESULT
 status: <exactly one word: done, continue, blocked, or failed>
 summary: <one line>
 END_SYMPHONY_RESULT
-${extraNote ? `\nAlso note:\n${extraNote}\n` : ''}`;
+${extraNote ? `\nAlso note:\n${extraNote}\n` : ''}`, ctx);
 }
 
 export function buildResumePrompt(ctx: PromptCtx, errorMessage: string): string {
   const { task } = ctx;
-  return `The previous turn of this session was cut short by an infrastructure error (${errorMessage}), not by anything you did. You have been resumed with the same context.
+  return withVision(`The previous turn of this session was cut short by an infrastructure error (${errorMessage}), not by anything you did. You have been resumed with the same context.
 
 Continue ${task.id} — ${task.title} from where you left off under the same rules. Check \`git status\` and \`git log -3\` first to see what is already in place. Run everything in the foreground, finish the progress section and the Hand-off, and end your final message with the SYMPHONY_RESULT block exactly as instructed:
 
@@ -238,5 +246,5 @@ SYMPHONY_RESULT
 status: <exactly one word: done, continue, blocked, or failed>
 summary: <one line>
 END_SYMPHONY_RESULT
-`;
+`, ctx);
 }

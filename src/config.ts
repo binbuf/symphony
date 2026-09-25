@@ -95,6 +95,32 @@ export interface JevConfig {
 }
 
 /**
+ * Optional vision tool: lets a task session analyze an image (a screenshot it captures, a photo, a
+ * diagram) with a dedicated vision model and get a text description back. Off by default. The session
+ * invokes it through the harness CLI (`symphony vision <image>`), so it works for every provider
+ * without the agent needing its own image support. When enabled, every task prompt tells the session
+ * the command exists.
+ */
+export interface VisionConfig {
+  /** Master switch; off by default so an existing run behaves exactly as before until you opt in. */
+  enabled: boolean;
+  /** Router the vision request goes to. Only OpenRouter is built in. */
+  provider: JevProviderName;
+  /** Overrides the provider's base URL (e.g. a self-hosted gateway). */
+  baseUrl?: string;
+  /** Vision model id, e.g. "qwen/qwen3-vl-235b-a22b-instruct". */
+  model: string;
+  /** Environment variable holding the bearer token. */
+  apiKeyEnv: string;
+  /** Hard cap on one vision request; on timeout the command fails. */
+  timeoutMs: number;
+  /** Default instruction sent with an image when the caller passes none. */
+  prompt: string;
+  /** Largest image accepted, in bytes; a bigger file is rejected before it is uploaded. */
+  maxImageBytes: number;
+}
+
+/**
  * Optional "pipeline watch": a separate, read-only LLM session the harness runs on a timer while a
  * run is in flight. It adds interpretation the TUI's live status table cannot show — how the run is
  * trending, where it looks fragile, what to expect — into the TUI's top panel and a dedicated log.
@@ -253,6 +279,8 @@ export interface Config {
   escalation: EscalationConfig;
   /** Optional Jev decision calls as a nudge fallback. See JevConfig. */
   jev: JevConfig;
+  /** Optional image-analysis tool a task session can invoke. See VisionConfig. */
+  vision: VisionConfig;
   /** Periodic read-only progress/health summary in the TUI. See WatchConfig. */
   watch: WatchConfig;
   /** Automatic task breakdown at task start, at a `continue` boundary, or instead of escalating. See BreakdownConfig. */
@@ -337,6 +365,15 @@ export const DEFAULTS: Config = {
     timeoutMs: 4000,
     minConfidence: 0.7,
     acceptStatuses: ['done', 'continue'],
+  },
+  vision: {
+    enabled: false,
+    provider: 'openrouter',
+    model: 'qwen/qwen3-vl-235b-a22b-instruct',
+    apiKeyEnv: 'OPENROUTER_API_KEY',
+    timeoutMs: 60_000,
+    prompt: 'Review this image deeply and describe everything about it in detail.',
+    maxImageBytes: 20 * 1024 * 1024,
   },
   watch: {
     enabled: true,
@@ -522,6 +559,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const gitRaw = isRecord(raw.git) ? raw.git : {};
   const escRaw = isRecord(raw.escalation) ? raw.escalation : {};
   const jevRaw = isRecord(raw.jev) ? raw.jev : {};
+  const visionRaw = isRecord(raw.vision) ? raw.vision : {};
   const watchRaw = isRecord(raw.watch) ? raw.watch : {};
   const breakRaw = isRecord(raw.breakdown) ? raw.breakdown : {};
   const breakRulesRaw = isRecord(breakRaw.rules) ? breakRaw.rules : {};
@@ -671,6 +709,32 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
           return n;
         })(),
         acceptStatuses,
+      };
+    })(),
+    vision: (() => {
+      let provider: JevProviderName = DEFAULTS.vision.provider;
+      if (visionRaw.provider !== undefined && visionRaw.provider !== null) {
+        if (typeof visionRaw.provider === 'string' && (JEV_PROVIDERS as readonly string[]).includes(visionRaw.provider)) {
+          provider = visionRaw.provider as JevProviderName;
+        } else {
+          warnings.push(`vision.provider: expected one of ${JEV_PROVIDERS.join(', ')}, got ${JSON.stringify(visionRaw.provider)}; using ${DEFAULTS.vision.provider}`);
+        }
+      }
+      const model = typeof visionRaw.model === 'string' && visionRaw.model.trim() ? visionRaw.model.trim() : DEFAULTS.vision.model;
+      let enabled = boolOr(visionRaw.enabled, DEFAULTS.vision.enabled, 'vision.enabled', warnings);
+      if (enabled && !model) {
+        warnings.push('vision.enabled is true but vision.model is empty; vision stays off');
+        enabled = false;
+      }
+      return {
+        enabled,
+        provider,
+        baseUrl: typeof visionRaw.baseUrl === 'string' && visionRaw.baseUrl.trim() ? visionRaw.baseUrl.trim() : undefined,
+        model,
+        apiKeyEnv: typeof visionRaw.apiKeyEnv === 'string' && visionRaw.apiKeyEnv.trim() ? visionRaw.apiKeyEnv.trim() : DEFAULTS.vision.apiKeyEnv,
+        timeoutMs: positiveOr(visionRaw.timeoutMs, DEFAULTS.vision.timeoutMs, 'vision.timeoutMs', warnings),
+        prompt: typeof visionRaw.prompt === 'string' && visionRaw.prompt.trim() ? visionRaw.prompt.trim() : DEFAULTS.vision.prompt,
+        maxImageBytes: positiveOr(visionRaw.maxImageBytes, DEFAULTS.vision.maxImageBytes, 'vision.maxImageBytes', warnings),
       };
     })(),
     watch: (() => {

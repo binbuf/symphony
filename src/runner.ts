@@ -25,6 +25,7 @@ import { DONE_STATES, SKIP_STATES, acquireLock, haltResumeHint, newTaskState, re
 import type { Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, squash, stamp } from './util.js';
 import { runVerify, type VerifyResult } from './verify.js';
+import { visionPromptNote } from './vision.js';
 import { startPipelineWatch, type WatchState } from './watch.js';
 
 export interface RunFlags {
@@ -421,7 +422,7 @@ function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, 
 }
 
 function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError: string | undefined, continuation: number, indexBody?: string): PromptCtx {
-  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, variant: spec.variant, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody };
+  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, variant: spec.variant, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody, visionNote: ctx.config.vision.enabled ? visionPromptNote() : undefined };
 }
 
 /** Abortable, STOP- and split-aware backoff. Returns true when the run should stop waiting. */
