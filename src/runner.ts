@@ -29,6 +29,13 @@ import { visionPromptNote } from './vision.js';
 import { notifySlack, slackEventEnabled, type SlackEvent } from './slack.js';
 import { startPipelineWatch, type WatchState } from './watch.js';
 
+/**
+ * Fraction of `maxCostUsdPerRun` at which the `budgetClose` Slack notice fires (once per run). Only
+ * meaningful when the run budget is configured (`maxCostUsdPerRun > 0`); `budgetExceeded` fires at the
+ * cap itself and is what halts the run.
+ */
+export const BUDGET_CLOSE_FRACTION = 0.8;
+
 export interface RunFlags {
   from?: string;
   to?: string;
@@ -189,6 +196,13 @@ async function autoBreakdown(ctx: RunContext, task: Task, ev: BreakdownEvidence)
   ctx.log.info(`${task.id}: broken down into ${result.children.join(', ')}; continuing with the subtasks`);
   retargetFlags(ctx.flags, task.id, result.children);
   ctx.onPlanChanged?.(task.id, result.children);
+  await slackNotify(ctx, 'taskSplit', {
+    title: `${task.id} split — ${task.title}`,
+    lines: [
+      result.children.length ? `into ${result.children.join(', ')}` : '',
+      `${ev.stage} breakdown${verdict.source ? ` (${verdict.source})` : ''}: ${verdict.reason}`,
+    ],
+  });
   return { verdict, split: true };
 }
 
@@ -575,6 +589,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         }
       }
     }
+    const from = spec;
     escalations += 1;
     escalating = true;
     spec = escalation.spec;
@@ -585,6 +600,14 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     continuation = 0;
     delete st.continuation;
     log.warn(`${task.id}: ${category} — ${reason}. Escalating to ${spec.providerName}${spec.model ? ` · ${spec.model}` : ''}${spec.variant ? ` · variant ${spec.variant}` : ''} (escalation ${escalations}/${maxEscalations}).`);
+    await slackNotify(ctx, 'taskEscalated', {
+      title: `${task.id} escalated — ${task.title}`,
+      lines: [
+        `${sessionLabel(from)} → ${sessionLabel(spec)}`,
+        `${category}: ${reason}`,
+        `escalation ${escalations}/${maxEscalations}`,
+      ],
+    });
     return true;
   };
 
@@ -626,6 +649,14 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     if (!provider.supportsResume || !sessionId) resumeId = undefined;
     return true;
   };
+
+  await slackNotify(ctx, 'taskStart', {
+    title: `${task.id} started — ${task.title}`,
+    lines: [
+      `phase ${task.phase} · ${sessionLabel(spec)}`,
+      continuation > 0 ? `resuming at continuation ${continuation}/${maxContinuations}` : st.attempts > 0 ? `attempt ${st.attempts + 1}` : '',
+    ],
+  });
 
   attempts: for (let attempt = 1; ; attempt++) {
     if (maxIterations > 0 && iterations >= maxIterations) {
@@ -1027,12 +1058,31 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   // Automatic breakdowns attempted per task id this run: a task that keeps failing should not be
   // split again and again. (A successful split consumes the parent, so this mostly bounds failures.)
   ctx.autoSplits ??= new Map();
+  // The run budget is opt-in (`maxCostUsdPerRun > 0`). `budgetClose` fires once when reported spend
+  // first reaches BUDGET_CLOSE_FRACTION of the cap; `budgetExceeded` fires at the cap and the run
+  // halts. Both are additionally gated by `slackEventEnabled` inside notifySlack.
+  let budgetCloseSent = false;
   const budgetHalt = async (): Promise<number | undefined> => {
-    if (config.maxCostUsdPerRun <= 0 || runCost() < config.maxCostUsdPerRun) return undefined;
-    return setHalt(ctx, {
-      at: nowIso(), category: 'budget',
-      reason: `sessions reported $${runCost().toFixed(2)} during this run (maxCostUsdPerRun = $${config.maxCostUsdPerRun.toFixed(2)}); raise the cap or \`symphony clear-halt\` to continue`,
-    });
+    if (config.maxCostUsdPerRun <= 0) return undefined;
+    const cost = runCost();
+    if (cost >= config.maxCostUsdPerRun) {
+      await slackNotify(ctx, 'budgetExceeded', {
+        title: `Run budget exceeded — $${cost.toFixed(2)} of $${config.maxCostUsdPerRun.toFixed(2)}`,
+        lines: [`sessions reported $${cost.toFixed(2)} during this run; halting`],
+      });
+      return setHalt(ctx, {
+        at: nowIso(), category: 'budget',
+        reason: `sessions reported $${cost.toFixed(2)} during this run (maxCostUsdPerRun = $${config.maxCostUsdPerRun.toFixed(2)}); raise the cap or \`symphony clear-halt\` to continue`,
+      });
+    }
+    if (!budgetCloseSent && cost >= config.maxCostUsdPerRun * BUDGET_CLOSE_FRACTION) {
+      budgetCloseSent = true;
+      await slackNotify(ctx, 'budgetClose', {
+        title: `Run budget close — $${cost.toFixed(2)} of $${config.maxCostUsdPerRun.toFixed(2)}`,
+        lines: [`${Math.round(BUDGET_CLOSE_FRACTION * 100)}% of maxCostUsdPerRun reached; the run halts at the cap`],
+      });
+    }
+    return undefined;
   };
 
   const runLoop = async (): Promise<number> => {
@@ -1140,6 +1190,13 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   // The pipeline has kicked off: arm the periodic, read-only progress/health watcher now. It is
   // advisory — a missing provider or a failed check updates the TUI panel and watch log only.
   const watcher = startPipelineWatch(ctx);
+  await slackNotify(ctx, 'runStart', {
+    title: `Run started — ${todo.length} task${todo.length === 1 ? '' : 's'} queued`,
+    lines: [
+      `queue ${todo.slice(0, 12).map((t) => t.id).join(' ')}${todo.length > 12 ? ` … +${todo.length - 12} more` : ''}`,
+      ctx.startBranch ? `branch ${ctx.startBranch}` : '',
+    ],
+  });
   let code: number;
   try {
     code = await runLoop();

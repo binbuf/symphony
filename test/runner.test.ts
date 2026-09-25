@@ -15,6 +15,17 @@ import type { Task } from '../src/tasks.js';
 const silent: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner() {} };
 const flags: RunFlags = { retry: false, continueOnFailure: false, dryRun: false, clearHalt: false };
 
+/** A fetch double that records the `text` of each Slack `chat.postMessage` and answers `ok: true`. */
+function slackSink(): { fetchImpl: typeof fetch; texts: string[] } {
+  const texts: string[] = [];
+  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const text = new URLSearchParams(String(init?.body)).get('text');
+    if (text) texts.push(text);
+    return new Response(JSON.stringify({ ok: true, ts: '1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+  return { fetchImpl, texts };
+}
+
 const claudeResult = (status: string, summary: string) =>
   JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 's', result: `SYMPHONY_RESULT\nstatus: ${status}\nsummary: ${summary}\nEND_SYMPHONY_RESULT` });
 
@@ -75,6 +86,33 @@ test('a task that reports continue is re-run in a fresh session until done, comm
     assert.match(log, /T01: Do the thing \[continue\]/);
     assert.match(log, /T01: Do the thing \[done\]/);
   } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('taskStart posts once when a task begins, before its terminal event', async () => {
+  const { paths, task } = project();
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 3, slack: { ...DEFAULTS.slack, enabled: true, channel: 'C123ABC', project: 'symphony' } };
+  const bodies: string[] = [];
+  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+    bodies.push(new URLSearchParams(String(init?.body)).get('text') ?? '');
+    return new Response(JSON.stringify({ ok: true, ts: '1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl };
+  process.env.SLACK_BOT_TOKEN = 'xoxb-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    const starts = bodies.filter((b) => b.includes('T01 started —'));
+    assert.equal(starts.length, 1, `expected one taskStart, got ${starts.length}: ${bodies.join(' | ')}`);
+    assert.match(starts[0], /:rocket: \*\[symphony\] T01 started —/);
+    // The start leads the task's terminal event, so a watcher hears about work before the outcome.
+    assert.ok(bodies.findIndex((b) => b.includes('T01 started —')) < bodies.findIndex((b) => b.includes('T01 DONE —')));
+    // No run budget is configured, so no budget event may fire even with Slack on.
+    assert.ok(!bodies.some((b) => b.includes('Run budget')), `unexpected budget message: ${bodies.join(' | ')}`);
+  } finally {
+    delete process.env.SLACK_BOT_TOKEN;
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
 });
@@ -466,6 +504,57 @@ test('run halts when reported session cost crosses maxCostUsdPerRun', async () =
   }
 });
 
+test('run announces its start, then a budget close notice and the budget halt', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-budget-'));
+  execFileSync('git', ['-C', dir, 'init', '-q']);
+  execFileSync('git', ['-C', dir, 'config', 'user.email', 't@t']);
+  execFileSync('git', ['-C', dir, 'config', 'user.name', 't']);
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.tasksDir, { recursive: true });
+  writeFileSync(paths.roadmap, '# R\n\n## Phase 1\n\n- [ ] T01 — One\n- [ ] T02 — Two\n');
+  writeFileSync(paths.progress, '# Progress notes\n');
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  const costResult = (id: string) => JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, session_id: `s-${id}`, total_cost_usd: 1,
+    result: `SYMPHONY_RESULT\nstatus: done\nsummary: ${id} done\nEND_SYMPHONY_RESULT`,
+  });
+  for (const id of ['T01', 'T02']) {
+    writeFileSync(join(fixtures, `${id}.task.jsonl`), [
+      JSON.stringify({ type: 'system', subtype: 'init', session_id: `s-${id}` }),
+      costResult(id),
+    ].join('\n') + '\n');
+  }
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+  process.env.SLACK_BOT_TOKEN = 'xoxb-test';
+  const tasks: Task[] = [
+    { id: 'T01', num: 1, title: 'One', phase: 'Phase 1', order: 0, meta: { provider: 'fake' } },
+    { id: 'T02', num: 2, title: 'Two', phase: 'Phase 1', order: 1, meta: { provider: 'fake' } },
+  ];
+  const state: State = loadState(paths);
+  // $1.25 cap: T01's $1.00 crosses 80% (close), T02's $2.00 total crosses the cap (halt).
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxCostUsdPerRun: 1.25, slack: { ...DEFAULTS.slack, enabled: true, channel: 'C123ABC', project: 'symphony' } };
+  const { fetchImpl, texts } = slackSink();
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks, state, interrupted: false, abort: new AbortController(), fetchImpl };
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 3);
+    assert.equal(state.halted?.category, 'budget');
+    assert.equal(texts.filter((t) => t.includes('Run started')).length, 1, texts.join(' | '));
+    assert.match(texts.find((t) => t.includes('Run started'))!, /2 tasks queued/);
+    const close = texts.filter((t) => t.includes('Run budget close'));
+    assert.equal(close.length, 1, texts.join(' | '));
+    assert.match(close[0], /\$1\.00 of \$1\.25/);
+    const exceeded = texts.filter((t) => t.includes('Run budget exceeded'));
+    assert.equal(exceeded.length, 1, texts.join(' | '));
+    assert.match(exceeded[0], /\$2\.00 of \$1\.25/);
+    assert.ok(texts.indexOf(close[0]) < texts.indexOf(exceeded[0]), 'close before exceeded');
+  } finally {
+    delete process.env.SLACK_BOT_TOKEN;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
 test('--dry-run previews the plan while halted without clearing the halt or running', async () => {
   const { paths, task } = project();
   const state: State = loadState(paths);
@@ -617,9 +706,12 @@ test('a task the workhorse fails is escalated to the configured model and can th
     ...DEFAULTS,
     provider: 'fake' as const,
     nudge: false,
+    slack: { ...DEFAULTS.slack, enabled: true, channel: 'C123ABC', project: 'symphony' },
     escalation: { ...DEFAULTS.escalation, enabled: true, provider: 'fake' as const, model: 'strong-model', onCategories: ['task'] },
   };
-  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  const { fetchImpl, texts } = slackSink();
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl };
+  process.env.SLACK_BOT_TOKEN = 'xoxb-test';
   try {
     const out = await runTask(ctx, task);
     assert.equal(out.status, 'done');
@@ -628,12 +720,17 @@ test('a task the workhorse fails is escalated to the configured model and can th
     assert.equal(state.tasks.T01.model, 'strong-model');
     assert.ok(readFileSync(join(dir, 'escalated.txt'), 'utf8').includes('strong model'));
     assert.match(readFileSync(paths.roadmap, 'utf8'), /\[x\] T01/);
+    // The escalation is announced, naming the model that took over.
+    const escalation = texts.find((t) => t.includes('T01 escalated'));
+    assert.ok(escalation, `expected a taskEscalated message, got: ${texts.join(' | ')}`);
+    assert.match(escalation!, /fake · strong-model/);
     // The committed run log records which model ran each session.
     const taskLog = readFileSync(join(paths.logsDir, 'T01.md'), 'utf8');
     assert.match(taskLog, /summary: gave up/);
     assert.match(taskLog, /summary: finished after escalation/);
     assert.match(taskLog, /- model: fake · strong-model/);
   } finally {
+    delete process.env.SLACK_BOT_TOKEN;
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
 });

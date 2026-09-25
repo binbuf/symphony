@@ -594,10 +594,10 @@ test('slack config is off by default with agnostic values, parses overrides, and
   assert.equal(DEFAULTS.slack.channel, '');
   assert.equal(DEFAULTS.slack.user, '');
   assert.equal(DEFAULTS.slack.mention, true);
-  assert.deepEqual(DEFAULTS.slack.events, { taskDone: true, taskContinue: true, taskFailed: true, taskBlocked: true, halt: true, runEnd: true });
+  assert.deepEqual(DEFAULTS.slack.events, { runStart: true, taskStart: true, taskSplit: true, taskEscalated: true, taskDone: true, taskContinue: true, taskFailed: true, taskBlocked: true, budgetClose: true, budgetExceeded: true, halt: true, runEnd: true });
   assert.equal(loadConfig(paths, {}).config.slack.enabled, false);
 
-  writeFileSync(paths.config, JSON.stringify({ slack: { enabled: true, apiKeyEnv: 'SLACK_API_KEY', project: 'symphony', channel: '#eng', user: '@ada', mention: false, timeoutMs: 5000, events: { taskDone: true, taskContinue: false, taskFailed: true, taskBlocked: true, halt: false, runEnd: true } } }));
+  writeFileSync(paths.config, JSON.stringify({ slack: { enabled: true, apiKeyEnv: 'SLACK_API_KEY', project: 'symphony', channel: '#eng', user: '@ada', mention: false, timeoutMs: 5000, events: { taskStart: false, taskDone: true, taskContinue: false, taskFailed: true, taskBlocked: true, halt: false, runEnd: true } } }));
   const { config, warnings } = loadConfig(paths, {});
   assert.equal(config.slack.enabled, true);
   assert.equal(config.slack.apiKeyEnv, 'SLACK_API_KEY');
@@ -606,7 +606,7 @@ test('slack config is off by default with agnostic values, parses overrides, and
   assert.equal(config.slack.user, '@ada');
   assert.equal(config.slack.mention, false);
   assert.equal(config.slack.timeoutMs, 5000);
-  assert.deepEqual(config.slack.events, { taskDone: true, taskContinue: false, taskFailed: true, taskBlocked: true, halt: false, runEnd: true });
+  assert.deepEqual(config.slack.events, { runStart: true, taskStart: false, taskSplit: true, taskEscalated: true, taskDone: true, taskContinue: false, taskFailed: true, taskBlocked: true, budgetClose: true, budgetExceeded: true, halt: false, runEnd: true });
   assert.equal(warnings.length, 0);
 
   // Enabled with no target cannot post anywhere: it is turned off with a warning.

@@ -117,10 +117,16 @@
     "user": "",
     "mention": true,
     "events": {
+      "runStart": true,
+      "taskStart": true,
+      "taskSplit": true,
+      "taskEscalated": true,
       "taskDone": true,
       "taskContinue": true,
       "taskFailed": true,
       "taskBlocked": true,
+      "budgetClose": true,
+      "budgetExceeded": true,
       "halt": true,
       "runEnd": true
     },

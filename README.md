@@ -650,10 +650,16 @@ An unattended run is easier to trust when something tells you the moment it need
   "user": "",
   "mention": true,
   "events": {
+    "runStart": true,
+    "taskStart": true,
+    "taskSplit": true,
+    "taskEscalated": true,
     "taskDone": true,
     "taskContinue": true,
     "taskFailed": true,
     "taskBlocked": true,
+    "budgetClose": true,
+    "budgetExceeded": true,
     "halt": true,
     "runEnd": true
   },
@@ -679,12 +685,20 @@ An unattended run is easier to trust when something tells you the moment it need
 
 | event | when |
 |---|---|
+| `runStart` | the run acquired its lock and started its queue |
+| `taskStart` | a task started its first session this run (after any start-time breakdown) |
+| `taskSplit` | a breakdown replaced a task with subtasks |
+| `taskEscalated` | a failed task was handed to the escalation provider/model |
 | `taskDone` | a task finished `done` (after its verify, if one is configured) |
 | `taskContinue` | a task session reported `continue`; a fresh slice is starting |
 | `taskFailed` | a task finished `failed` |
 | `taskBlocked` | a task finished `blocked`, awaiting a human |
+| `budgetClose` | reported run cost reached 80% of `maxCostUsdPerRun` |
+| `budgetExceeded` | reported run cost reached `maxCostUsdPerRun` and the run halted |
 | `halt` | the run halted on a fatal error (auth, billing, attempts, consecutive failures, budget, …) |
 | `runEnd` | `run` finished, whatever its exit code |
+
+The two `budget*` events are the only ones that also depend on another setting: they never fire unless `maxCostUsdPerRun` is configured (greater than zero). `budgetClose` fires once per run at 80% of the cap; `budgetExceeded` fires at the cap, just before the run halts.
 
 **Messages.** Each headline carries the `[project]` tag, the task id and title (or the run/halt), and the resolved status; the detail lines add phase, provider/model/variant, duration, cost, summary and commit. For example:
 

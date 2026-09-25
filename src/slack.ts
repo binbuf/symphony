@@ -2,16 +2,34 @@ import type { SlackConfig } from './config.js';
 import { isRecord } from './util.js';
 
 /** Lifecycle events the Slack integration can post, matching `slack.events` in the config. */
-export type SlackEvent = 'taskDone' | 'taskContinue' | 'taskFailed' | 'taskBlocked' | 'halt' | 'runEnd';
+export type SlackEvent =
+  | 'runStart'
+  | 'taskStart'
+  | 'taskSplit'
+  | 'taskEscalated'
+  | 'taskDone'
+  | 'taskContinue'
+  | 'taskFailed'
+  | 'taskBlocked'
+  | 'budgetClose'
+  | 'budgetExceeded'
+  | 'halt'
+  | 'runEnd';
 
 const API_BASE = 'https://slack.com/api';
 
 /** A leading pictograph so a busy channel is scannable at a glance. */
 const EMOJI: Record<SlackEvent, string> = {
+  runStart: ':runner:',
+  taskStart: ':rocket:',
+  taskSplit: ':scissors:',
+  taskEscalated: ':arrow_up:',
   taskDone: ':white_check_mark:',
   taskContinue: ':arrow_forward:',
   taskFailed: ':x:',
   taskBlocked: ':hand:',
+  budgetClose: ':warning:',
+  budgetExceeded: ':money_with_wings:',
   halt: ':octagonal_sign:',
   runEnd: ':checkered_flag:',
 };

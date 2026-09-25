@@ -170,23 +170,36 @@ test('a continue boundary breaks the task down instead of starting another slice
   const loaded = loadProject(paths, silent);
   const config: Config = {
     ...DEFAULTS, provider: 'fake', maxContinuations: 3, nudge: false, watch: { ...DEFAULTS.watch, enabled: false },
+    slack: { ...DEFAULTS.slack, enabled: true, channel: 'C123ABC', project: 'symphony' },
     breakdown: { ...DEFAULTS.breakdown, enabled: true, decision: 'rules', rules: rules({ afterContinuations: 0 }) },
   };
   const seen: string[] = [];
+  const texts: string[] = [];
+  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const text = new URLSearchParams(String(init?.body)).get('text');
+    if (text) texts.push(text);
+    return new Response(JSON.stringify({ ok: true, ts: '1' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as unknown as typeof fetch;
   let splits = 0;
   const ctx: RunContext = {
     paths, config, cli: {}, flags, log: silent, roadmap: loaded.roadmap, tasks: loaded.tasks, state: loaded.state,
-    interrupted: false, abort: new AbortController(), autoSplits: new Map(),
+    interrupted: false, abort: new AbortController(), autoSplits: new Map(), fetchImpl,
     performSplit: async (id) => { splits += 1; return { code: 0, parentId: id, children: ['T01a', 'T01b'] }; },
     onPlanChanged: (id, kids) => seen.push(`${id} → ${kids.join(', ')}`),
   };
+  process.env.SLACK_BOT_TOKEN = 'xoxb-test';
   try {
     const out = await runTask(ctx, loaded.tasks[0]);
     assert.equal(out.split, true);
     assert.equal(splits, 1);
     assert.equal(ctx.state.tasks.T01.attempts, 1, 'the second session never starts');
     assert.deepEqual(seen, ['T01 → T01a, T01b']);
+    // The split is announced, naming the subtasks it was replaced with.
+    const split = texts.find((t) => t.includes('T01 split'));
+    assert.ok(split, `expected a taskSplit message, got: ${texts.join(' | ')}`);
+    assert.match(split!, /T01a, T01b/);
   } finally {
+    delete process.env.SLACK_BOT_TOKEN;
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
 });

@@ -30,6 +30,12 @@ test('slackEventEnabled requires both the master switch and the event flag', () 
 });
 
 test('formatSlackMessage renders an emoji, an optional [project] tag, a bold title and detail lines', () => {
+  assert.equal(formatSlackMessage({ event: 'runStart', title: 'Run started' }), ':runner: *Run started*');
+  assert.equal(formatSlackMessage({ event: 'taskStart', title: 'T01 started' }), ':rocket: *T01 started*');
+  assert.equal(formatSlackMessage({ event: 'taskSplit', title: 'T01 split' }), ':scissors: *T01 split*');
+  assert.equal(formatSlackMessage({ event: 'taskEscalated', title: 'T01 escalated' }), ':arrow_up: *T01 escalated*');
+  assert.equal(formatSlackMessage({ event: 'budgetClose', title: 'Close' }), ':warning: *Close*');
+  assert.equal(formatSlackMessage({ event: 'budgetExceeded', title: 'Over' }), ':money_with_wings: *Over*');
   assert.equal(formatSlackMessage({ event: 'taskDone', title: 'T01 DONE — ship it' }), ':white_check_mark: *T01 DONE — ship it*');
   assert.equal(formatSlackMessage({ event: 'taskDone', project: 'symphony', title: 'T01 DONE — ship it' }), ':white_check_mark: *[symphony] T01 DONE — ship it*');
   assert.equal(formatSlackMessage({ event: 'taskFailed', title: 'x', lines: ['a', '', '   ', 'b'] }), ':x: *x*\na\nb');

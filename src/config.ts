@@ -159,6 +159,14 @@ export interface WatchConfig {
  * switch and the event's own flag, so an integration can be armed without flooding a channel.
  */
 export interface SlackEvents {
+  /** The run acquired its lock and started its task queue. */
+  runStart: boolean;
+  /** A task started its first session this run (after any start-time breakdown). */
+  taskStart: boolean;
+  /** An automatic (or failure-time) breakdown replaced a task with subtasks. */
+  taskSplit: boolean;
+  /** A task failed and was handed to the escalation provider/model. */
+  taskEscalated: boolean;
   /** A task finished `done` (its verify passed, if one is configured). */
   taskDone: boolean;
   /** A task session reported `continue` (a fresh slice is about to start). */
@@ -167,6 +175,10 @@ export interface SlackEvents {
   taskFailed: boolean;
   /** A task finished `blocked` and needs a human. */
   taskBlocked: boolean;
+  /** Reported run cost crossed the warning fraction of `maxCostUsdPerRun` (only when that cap is set). */
+  budgetClose: boolean;
+  /** Reported run cost reached `maxCostUsdPerRun` and the run halted (only when that cap is set). */
+  budgetExceeded: boolean;
   /** The run halted on a fatal error (auth, billing, attempts, consecutive failures, …). */
   halt: boolean;
   /** `run` finished, whatever its exit code. */
@@ -448,10 +460,16 @@ export const DEFAULTS: Config = {
     user: '',
     mention: true,
     events: {
+      runStart: true,
+      taskStart: true,
+      taskSplit: true,
+      taskEscalated: true,
       taskDone: true,
       taskContinue: true,
       taskFailed: true,
       taskBlocked: true,
+      budgetClose: true,
+      budgetExceeded: true,
       halt: true,
       runEnd: true,
     },
@@ -853,10 +871,16 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         user,
         mention: boolOr(slackRaw.mention, DEFAULTS.slack.mention, 'slack.mention', warnings),
         events: {
+          runStart: boolOr(slackEventsRaw.runStart, DEFAULTS.slack.events.runStart, 'slack.events.runStart', warnings),
+          taskStart: boolOr(slackEventsRaw.taskStart, DEFAULTS.slack.events.taskStart, 'slack.events.taskStart', warnings),
+          taskSplit: boolOr(slackEventsRaw.taskSplit, DEFAULTS.slack.events.taskSplit, 'slack.events.taskSplit', warnings),
+          taskEscalated: boolOr(slackEventsRaw.taskEscalated, DEFAULTS.slack.events.taskEscalated, 'slack.events.taskEscalated', warnings),
           taskDone: boolOr(slackEventsRaw.taskDone, DEFAULTS.slack.events.taskDone, 'slack.events.taskDone', warnings),
           taskContinue: boolOr(slackEventsRaw.taskContinue, DEFAULTS.slack.events.taskContinue, 'slack.events.taskContinue', warnings),
           taskFailed: boolOr(slackEventsRaw.taskFailed, DEFAULTS.slack.events.taskFailed, 'slack.events.taskFailed', warnings),
           taskBlocked: boolOr(slackEventsRaw.taskBlocked, DEFAULTS.slack.events.taskBlocked, 'slack.events.taskBlocked', warnings),
+          budgetClose: boolOr(slackEventsRaw.budgetClose, DEFAULTS.slack.events.budgetClose, 'slack.events.budgetClose', warnings),
+          budgetExceeded: boolOr(slackEventsRaw.budgetExceeded, DEFAULTS.slack.events.budgetExceeded, 'slack.events.budgetExceeded', warnings),
           halt: boolOr(slackEventsRaw.halt, DEFAULTS.slack.events.halt, 'slack.events.halt', warnings),
           runEnd: boolOr(slackEventsRaw.runEnd, DEFAULTS.slack.events.runEnd, 'slack.events.runEnd', warnings),
         },
