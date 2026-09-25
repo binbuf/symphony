@@ -214,17 +214,9 @@ export async function main(argv: string[]): Promise<number> {
   const base = resolvePaths(v.root);
   const { config, warnings: cfgWarnings, fileExists: cfgExists } = loadConfig(base, cli);
   const paths = resolvePaths(v.root, effectiveOverrides(config, v.set, base.config));
-  const log = createLogger(paths.log);
-  cfgWarnings.forEach((w) => log.warn(w));
-  if (!cfgExists && cmd !== 'doctor') log.info(`no ${paths.config}; using defaults`);
-  if (cmd === 'lint') {
-    const report = lintDocs(paths, { design: config.designDocs, skipDirs: allDocsDirs(paths.root, config) });
-    formatLint(report).forEach((l) => log.plain(l));
-    return report.ok ? 0 : 2;
-  }
-
   // The vision tool is invoked by a task session through this same CLI. It needs the config (model,
-  // key, router) but not the roadmap/state, so it answers before the project is loaded.
+  // key, router) but not the roadmap/state. Return only its description on stdout: normal config
+  // warnings and run logging would otherwise become part of the agent's image evidence.
   if (cmd === 'vision') {
     const image = positionals[1];
     if (!image) throw new UsageError('vision: give an image path or URL, e.g. symphony vision shot.png [--prompt "..."] [--context "..."]');
@@ -233,6 +225,15 @@ export async function main(argv: string[]): Promise<number> {
     const result = await describeImage(config.vision, { image, prompt: v.prompt, context: v.context, cwd: paths.root });
     process.stdout.write(`${result.text}\n`);
     return 0;
+  }
+
+  const log = createLogger(paths.log);
+  cfgWarnings.forEach((w) => log.warn(w));
+  if (!cfgExists && cmd !== 'doctor') log.info(`no ${paths.config}; using defaults`);
+  if (cmd === 'lint') {
+    const report = lintDocs(paths, { design: config.designDocs, skipDirs: allDocsDirs(paths.root, config) });
+    formatLint(report).forEach((l) => log.plain(l));
+    return report.ok ? 0 : 2;
   }
 
   let loaded = loadProject(paths, log);

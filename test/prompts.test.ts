@@ -11,6 +11,7 @@ import { buildPreparePrompt } from '../src/prepare.js';
 import type { RunContext } from '../src/runner.js';
 import type { State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
+import { visionPromptNote } from '../src/vision.js';
 
 const PLACEHOLDER = /\{[a-zA-Z_]\w*\}/;
 
@@ -116,12 +117,21 @@ test('an explicit indexBody is inlined instead of the on-disk INDEX.md', () => {
   assert.doesNotMatch(text, /not generated yet/);
 });
 
-test('the vision note is injected into every task prompt only when set', () => {
+test('enabled vision is discoverable in every task prompt without displacing the final result block', () => {
   const { ctx } = fixture();
-  const note = 'Image analysis is available: run `./.symphony/symphony vision <image>` to describe an image.';
-  assert.doesNotMatch(buildTaskPrompt(ctx), /Image analysis is available/);
-  assert.match(buildTaskPrompt({ ...ctx, visionNote: note }), /Image analysis is available/);
-  assert.match(buildContinuePrompt({ ...ctx, visionNote: note }), /Image analysis is available/);
-  assert.match(buildNudgePrompt({ ...ctx, visionNote: note }), /Image analysis is available/);
-  assert.match(buildResumePrompt({ ...ctx, visionNote: note }, 'boom'), /Image analysis is available/);
+  const note = visionPromptNote();
+  assert.doesNotMatch(buildTaskPrompt(ctx), /Image analysis tool/);
+  const task = buildTaskPrompt({ ...ctx, visionNote: note });
+  assert.match(task, /## Image analysis tool \(enabled\)/);
+  assert.ok(task.indexOf('Attempt:') < task.indexOf('## Image analysis tool'));
+  assert.ok(task.indexOf('## Image analysis tool') < task.indexOf('## The planning contract'));
+  for (const prompt of [
+    buildContinuePrompt({ ...ctx, visionNote: note }),
+    buildNudgePrompt({ ...ctx, visionNote: note }, 'Keep the visual regression result'),
+    buildResumePrompt({ ...ctx, visionNote: note }, 'boom'),
+  ]) {
+    assert.match(prompt, /## Image analysis tool \(enabled\)/);
+    assert.ok(prompt.indexOf('## Image analysis tool') < prompt.indexOf('SYMPHONY_RESULT\nstatus:'), 'tool instructions precede the result format');
+    assert.ok(prompt.trimEnd().endsWith('END_SYMPHONY_RESULT'), 'the result block remains the last instruction');
+  }
 });

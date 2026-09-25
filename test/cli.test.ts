@@ -107,3 +107,25 @@ test('vision is rejected when disabled or missing a key, before any network call
     if (saved !== undefined) process.env.OPENROUTER_API_KEY = saved;
   }
 });
+
+test('vision prints only the image description even when config has warnings', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cli-vision-output-'));
+  mkdirSync(join(dir, '.symphony'), { recursive: true });
+  writeFileSync(join(dir, '.symphony', 'symphony.config.json'), JSON.stringify({ vision: { enabled: true }, unexpectedSetting: true }));
+  const originalWrite = process.stdout.write;
+  const originalFetch = globalThis.fetch;
+  const originalKey = process.env.OPENROUTER_API_KEY;
+  const output: string[] = [];
+  process.env.OPENROUTER_API_KEY = 'test-key';
+  process.stdout.write = ((chunk: unknown) => { output.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ choices: [{ message: { content: 'A red banner.' } }] }), { status: 200 })) as typeof fetch;
+  try {
+    assert.equal(await main(['vision', 'https://example.com/shot.png', '--root', dir]), 0);
+    assert.equal(output.join(''), 'A red banner.\n');
+  } finally {
+    process.stdout.write = originalWrite;
+    globalThis.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = originalKey;
+  }
+});

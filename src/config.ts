@@ -454,7 +454,7 @@ export const DEFAULTS: Config = {
     model: 'qwen/qwen3-vl-235b-a22b-instruct',
     apiKeyEnv: 'OPENROUTER_API_KEY',
     timeoutMs: 60_000,
-    prompt: 'Review this image deeply and describe everything about it in detail.',
+    prompt: 'Describe this image accurately for someone who cannot see it. If a specific question or focus follows, answer that first and include the visual evidence that supports it. Otherwise, describe the salient subjects, setting, visible actions, and spatial relationships; for screenshots, documents, charts, or diagrams, include important controls, labels, values, text, and connections as relevant. Quote only legible text, note uncertain or obscured details, and distinguish what is visible from inference. Do not claim identity, location, or behavior that the image does not establish.',
     maxImageBytes: 20 * 1024 * 1024,
   },
   slack: {

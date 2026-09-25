@@ -113,7 +113,7 @@ export async function describeImage(config: VisionConfig, input: VisionInput, de
 
   const base = input.prompt?.trim() || config.prompt;
   const context = input.context?.trim();
-  const text = context ? `${base}\n\n${context}` : base;
+  const text = context ? `${base}\n\nTask-specific question or context:\n${context}` : base;
   try {
     const res = await doFetch(`${visionBaseUrl(config)}/v1/chat/completions`, {
       method: 'POST',
@@ -151,19 +151,17 @@ export async function describeImage(config: VisionConfig, input: VisionInput, de
   }
 }
 
-/**
- * The launcher to name in a prompt, so a task session can invoke the tool from the project root.
- * Built with `String.raw` so the Windows backslashes survive as written.
- */
+/** The launcher to name in a task prompt, invoked from the project root. */
 export function visionCommand(): string {
   const launcher = process.platform === 'win32' ? String.raw`.\.symphony\symphony.cmd` : './.symphony/symphony';
-  return `${launcher} vision <image>`;
+  return `${launcher} vision`;
 }
 
 /**
- * One line added to a task prompt when the vision tool is enabled, so the session knows it can look
- * at an image rather than guessing from context. Kept to a single sentence on purpose.
+ * A task-facing capability note. The CLI command works with every provider and returns its answer
+ * through stdout, so the agent does not need provider-specific image or tool integration.
  */
 export function visionPromptNote(): string {
-  return `Image analysis is available: if you ever need to read or analyze an image (a screenshot you capture, a photo, a diagram, chart or mockup), save it to a file and run \`${visionCommand()}\` — it sends the image to a vision model and prints a text description you can use. Add \`--context "<what you are looking for>"\` to focus the description.`;
+  return `## Image analysis tool (enabled)
+If a photo, screenshot, mockup, diagram, or other image matters to this task, inspect it rather than guessing from its filename or surrounding text. From the project root, run \`${visionCommand()} "path/to/image.png" --context "Read the exact error text."\` (replace the path and question for your task). The command also accepts an http(s) image URL and prints a description to stdout. Use \`--context\` when you have a specific question or area of focus; omit it when you need a general description. \`--prompt\` replaces the configured base instruction when needed. Use the answer as evidence, and distinguish visible details from the model's inferences. Skip this tool when the task has no relevant image.`;
 }

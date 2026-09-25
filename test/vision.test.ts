@@ -48,6 +48,9 @@ test('describeImage reads a local image into a data URL and returns the descript
   const parts = body.messages[0].content;
   assert.equal(parts[0].type, 'text');
   assert.equal(parts[0].text, DEFAULTS.vision.prompt);
+  assert.match(parts[0].text ?? '', /salient subjects, setting, visible actions, and spatial relationships/);
+  assert.match(parts[0].text ?? '', /screenshots, documents, charts, or diagrams/);
+  assert.doesNotMatch(parts[0].text ?? '', /Task-specific question or context:/);
   assert.equal(parts[1].image_url?.url, `data:image/png;base64,${Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64')}`);
 });
 
@@ -71,10 +74,10 @@ test('describeImage appends additional context to the base prompt, not replaces 
   }) as unknown as typeof fetch;
 
   await describeImage(cfg(), { image: 'https://example.com/a.png', context: 'Focus on the red banner.' }, { fetchImpl, env: { OPENROUTER_API_KEY: 'k' } });
-  assert.equal(body?.messages[0].content[0].text, `${DEFAULTS.vision.prompt}\n\nFocus on the red banner.`);
+  assert.equal(body?.messages[0].content[0].text, `${DEFAULTS.vision.prompt}\n\nTask-specific question or context:\nFocus on the red banner.`);
 
   await describeImage(cfg(), { image: 'https://example.com/a.png', prompt: 'Transcribe the text.', context: 'Ignore the sidebar.' }, { fetchImpl, env: { OPENROUTER_API_KEY: 'k' } });
-  assert.equal(body?.messages[0].content[0].text, 'Transcribe the text.\n\nIgnore the sidebar.');
+  assert.equal(body?.messages[0].content[0].text, 'Transcribe the text.\n\nTask-specific question or context:\nIgnore the sidebar.');
 });
 
 test('describeImage rejects a missing key, a missing file, an oversized image and an API error', async () => {
@@ -107,6 +110,10 @@ test('describeImage turns an aborted request into a clear timeout error', async 
 });
 
 test('the prompt note names a launcher that matches the platform', () => {
-  assert.match(visionPromptNote(), /Image analysis is available/);
+  assert.equal(visionCommand(), process.platform === 'win32' ? String.raw`.\.symphony\symphony.cmd vision` : './.symphony/symphony vision');
+  assert.match(visionPromptNote(), /Image analysis tool \(enabled\)/);
   assert.ok(visionPromptNote().includes(visionCommand()));
+  assert.match(visionPromptNote(), /omit it when you need a general description/);
+  assert.match(visionPromptNote(), /--context.*--prompt/s);
+  assert.doesNotMatch(visionCommand(), /<image>/);
 });

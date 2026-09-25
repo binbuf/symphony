@@ -566,16 +566,16 @@ When the [`breakdown` block](#automatic-breakdowns) is enabled and one of its ga
 
 ## Vision tool
 
-Sometimes a task only makes sense if you can *look* at something — a screenshot of a failing UI, a photo of a whiteboard, a diagram, a chart, a mockup. A coding session's model may not accept images at all, so symphony can run a separate **vision model** on the session's behalf. When it is enabled, every task prompt gains one line telling the session the tool exists and how to call it; the session writes an image to a file and runs:
+Sometimes a task only makes sense if you can *look* at something — a screenshot of a failing UI, a photo of a whiteboard, a diagram, a chart, a mockup. A coding session's model may not accept images at all, so symphony can run a separate **vision model** on the session's behalf. When enabled, task, continuation, nudge, and resume prompts include a short image-analysis section with the command and when to use it. From the project root, the session can run:
 
 ```bash
-./.symphony/symphony vision shot.png                 # describe it with the configured model
-./.symphony/symphony vision shot.png --prompt "What error is on screen?"   # replace the base instruction
-./.symphony/symphony vision shot.png --context "The user says nothing happens when they click Save"
-./.symphony/symphony vision https://example.com/diagram.png
+./.symphony/symphony vision shot.png                 # general description when there is no specific question
+./.symphony/symphony vision shot.png --context "What error appears after clicking Save?"
+./.symphony/symphony vision shot.png --prompt "Transcribe the dialog text." --context "Check the failed upload dialog."
+./.symphony/symphony vision https://example.com/diagram.png --context "Which service consumes the queue?"
 ```
 
-The command encodes the file (or passes an `http(s)` URL straight through), sends it to the configured router/model, and prints the model's description to stdout, which the calling agent reads like any other command output. `--prompt` replaces the base instruction; `--context` appends extra detail (the task's own question, a symptom, what to focus on) to whichever base instruction is in play. It works for every provider because it is just a shell command the agent already knows how to run.
+On Windows, use `.\.symphony\symphony.cmd vision ...`. The command encodes a local file (or passes an `http(s)` URL straight through), sends it to the configured router/model, and prints the model's description to stdout. Task agents are encouraged to add a focused `--context` when they have a specific question; the CLI labels that context in the request. Without context, the default prompt asks for a standalone description adapted to the image: subjects and setting for photos, or controls, labels, values, and connections for screenshots and diagrams. In either case it asks the model to flag unclear details and separate observation from inference. `--prompt` replaces the base instruction when needed. The shell command works across task providers without a separate provider-specific tool registration.
 
 It is **off by default**. Turn it on with the `vision` block:
 
@@ -587,7 +587,7 @@ It is **off by default**. Turn it on with the `vision` block:
   "apiKeyEnv": "OPENROUTER_API_KEY",
   "timeoutMs": 60000,
   "maxImageBytes": 20971520,
-  "prompt": "Review this image deeply and describe everything about it in detail."
+  "prompt": "Describe this image accurately for someone who cannot see it. If a specific question or focus follows, answer that first and include the visual evidence that supports it. Otherwise, describe the salient subjects, setting, visible actions, and spatial relationships; for screenshots, documents, charts, or diagrams, include important controls, labels, values, text, and connections as relevant. Quote only legible text, note uncertain or obscured details, and distinguish what is visible from inference. Do not claim identity, location, or behavior that the image does not establish."
 }
 ```
 
@@ -599,7 +599,7 @@ It is **off by default**. Turn it on with the `vision` block:
 | `model` | `qwen/qwen3-vl-235b-a22b-instruct` | vision model id |
 | `apiKeyEnv` | `OPENROUTER_API_KEY` | environment variable holding the bearer token |
 | `timeoutMs` | `60000` | hard cap on one request |
-| `prompt` | `Review this image deeply and describe everything about it in detail.` | instruction sent with the image when `--prompt` is not given |
+| `prompt` | answer a focused question or give a standalone description; flag uncertainty | instruction sent with the image when `--prompt` is not given |
 | `maxImageBytes` | `20971520` (20 MB) | largest image accepted; a bigger file is rejected before upload |
 
 Configure the router with `provider` or addresses models as `vendor/model` on OpenRouter (browse <https://openrouter.ai/models> for vision-capable ids). `symphony doctor` reports the configured model and warns when the API key is missing; the tool itself fails fast with a clear message when disabled, misconfigured, or given an image that does not exist or is over the size limit.
@@ -781,7 +781,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
 | `escalation.enabled`, `.provider`, `.model`, `.modelProvider`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
-| `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, `Review this image deeply and describe everything about it in detail.`, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt mentions it (see [Vision tool](#vision-tool)) |
+| `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, adaptive image description, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt explains it (see [Vision tool](#vision-tool)) |
 | `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true` except `watch`, `10000` | post lifecycle events to a Slack channel or DM a user, threading a task's later events under its start (see [Slack notifications](#slack-notifications)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
 | `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.rules.*`, `.decision`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `16384`/`1`/`1`/`[task, verify]`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |

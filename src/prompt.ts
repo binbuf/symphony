@@ -37,7 +37,7 @@ export interface PromptCtx {
   maxTaskBytes?: number;
   /** Pre-generated repo map to inline instead of reading `paths.index` (used by `--dry-run`). */
   indexBody?: string;
-  /** One-line note about the vision tool, when it is enabled; omitted otherwise. */
+  /** Image-analysis capability note, when enabled; omitted otherwise. */
   visionNote?: string;
 }
 
@@ -150,7 +150,7 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
 
   const vars: Record<string, string | number> = {
     projectName: basename(paths.root),
-    visionNote: ctx.visionNote ? `${ctx.visionNote}\n` : '',
+    visionNote: ctx.visionNote ? `${ctx.visionNote}\n\n` : '',
     retryNote,
     continuationNote,
     root: paths.root,
@@ -192,9 +192,12 @@ function readProgress(ctx: PromptCtx, paths: Paths): string {
   });
 }
 
-/** Append the vision-tool note to the plain prompts (task.md carries it as a template variable). */
+/** Place the capability note after the opening paragraph, before the final result instructions. */
 function withVision(text: string, ctx: PromptCtx): string {
-  return ctx.visionNote ? `${text.trimEnd()}\n\n${ctx.visionNote}\n` : text;
+  if (!ctx.visionNote) return text;
+  const firstBreak = text.indexOf('\n\n');
+  if (firstBreak < 0) return `${text}\n\n${ctx.visionNote}\n`;
+  return `${text.slice(0, firstBreak)}\n\n${ctx.visionNote}${text.slice(firstBreak)}`;
 }
 
 export function buildContinuePrompt(ctx: PromptCtx): string {
@@ -223,7 +226,7 @@ export function buildNudgePrompt(ctx: PromptCtx, extraNote?: string): string {
   const rel0 = task.taskFileRel ?? defaultTaskFileRel(paths, task);
   return withVision(`Your previous turn ended without the required SYMPHONY_RESULT block, so the harness could not record ${task.id} — ${task.title}. This is a one-shot session: ending a turn exits the process, and any background job you were waiting on was killed at that moment; no notification will ever arrive.
 
-You have been resumed with your full context. Close ${task.id} out now, in this single turn:
+${extraNote ? `Also note:\n${extraNote}\n\n` : ''}You have been resumed with your full context. Close ${task.id} out now, in this single turn:
 1. Finish only what can be finished cheaply, running every command in the foreground. Anything else: drop it and list it under "## Hand-off" in ${rel0} as remaining work.
 2. Make sure ${rel0} has a complete "## Hand-off" with no placeholder text, and that ${d.progress} has your "## ${task.id}" section.
 3. Do not start new work. Do not push. If the harness already committed your files, leave that commit alone.
@@ -233,7 +236,7 @@ SYMPHONY_RESULT
 status: <exactly one word: done, continue, blocked, or failed>
 summary: <one line>
 END_SYMPHONY_RESULT
-${extraNote ? `\nAlso note:\n${extraNote}\n` : ''}`, ctx);
+`, ctx);
 }
 
 export function buildResumePrompt(ctx: PromptCtx, errorMessage: string): string {
