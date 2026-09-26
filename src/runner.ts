@@ -8,7 +8,7 @@ import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { commitAll, currentBranch, describeCommit } from './git.js';
 import { fireHook } from './hooks.js';
 import { classifyError, classifyEscalation, classifySessionResult, jevProblem } from './jev.js';
-import { createLogger, openRunSinks, type Logger } from './logger.js';
+import { createLogger, openRunSinks, type Logger, type RunSinks } from './logger.js';
 import { writeTaskLog } from './logs.js';
 import { mcpPromptNote, planMcp, resolveMcpProfile } from './mcp.js';
 import { placeStop, stopPresent, type Paths } from './paths.js';
@@ -16,7 +16,7 @@ import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskProm
 import { applyPlan, loadProject, retargetFlags } from './project.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { addUsage } from './providers/common.js';
-import type { Provider, SpawnSpec, TokenUsage } from './providers/types.js';
+import type { Provider, ResultEvent, SpawnSpec, TokenUsage } from './providers/types.js';
 import { generateIndex, writeIndex } from './repomap.js';
 import { parseResultBlock, type ResultBlock } from './result.js';
 import { canonicalId, patchRoadmapFile, type Roadmap } from './roadmap.js';
@@ -194,7 +194,13 @@ async function autoBreakdown(ctx: RunContext, task: Task, ev: BreakdownEvidence)
   const pct = verdict.confidence !== undefined ? ` ${Math.round(verdict.confidence * 100)}%` : '';
   ctx.log.warn(`${task.id}: ${ev.stage} breakdown (${verdict.source}${pct}): ${verdict.reason}`);
   ctx.autoSplits?.set(task.id, used + 1);
-  const result = await ctx.performSplit(task.id);
+  let result: SplitResult;
+  try {
+    result = await ctx.performSplit(task.id);
+  } catch (e) {
+    ctx.log.warn(`${task.id}: breakdown did not complete (${(e as Error).message}); carrying on with the task as it is`);
+    return { verdict, split: false };
+  }
   if (result.code !== 0) {
     ctx.log.warn(`${task.id}: breakdown did not complete (exit ${result.code}${result.error ? `: ${result.error}` : ''}); carrying on with the task as it is`);
     return { verdict, split: false };
@@ -317,58 +323,78 @@ interface SessionRun {
 
 async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provider: Provider, spec: SessionSpec, prompt: string, r: SessionRun): Promise<SessionOutcome> {
   const { paths, log, state } = ctx;
-  ensureDir(paths.runs);
-  const suffix = r.logKind === 'nudge' ? '-nudge' : r.attempt > 1 ? `-r${r.attempt}` : '';
-  const sinks = openRunSinks(paths.runs, `${task.id}-${stamp()}${suffix}`);
-  writeFileSync(sinks.promptPath, prompt);
-  const rel = (p: string) => relative(paths.root, p);
-  const entry: LogRef = { kind: r.logKind, jsonl: rel(sinks.jsonlPath), log: rel(sinks.logPath), prompt: rel(sinks.promptPath), started: nowIso(), provider: spec.providerName, model: spec.model, variant: spec.variant };
-  st.logs.push(entry);
+  let sinks: RunSinks | undefined;
+  let session: Session | undefined;
+  try {
+    ensureDir(paths.runs);
+    const suffix = r.logKind === 'nudge' ? '-nudge' : r.attempt > 1 ? `-r${r.attempt}` : '';
+    sinks = openRunSinks(paths.runs, `${task.id}-${stamp()}${suffix}`);
+    writeFileSync(sinks.promptPath, prompt);
+    const rel = (p: string) => relative(paths.root, p);
+    const entry: LogRef = { kind: r.logKind, jsonl: rel(sinks.jsonlPath), log: rel(sinks.logPath), prompt: rel(sinks.promptPath), started: nowIso(), provider: spec.providerName, model: spec.model, variant: spec.variant };
+    st.logs.push(entry);
 
-  const mcp = planMcp(ctx.config, r.kind === 'escalate' ? 'escalation' : 'task', task, ctx.cli, provider.name, join(paths.runs, sinks.base), (m) => log.warn(`${task.id}: mcp: ${m}`));
-  mcp?.notes.forEach((n) => log.warn(`${task.id}: mcp: ${n}`));
-  const cmd = provider.buildCommand({
-    bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: task.id, attempt: r.attempt, kind: r.kind,
-    resumeId: r.resumeId, model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd,
-    extraArgs: [...spec.extraArgs, ...(mcp?.args ?? [])], cwd: paths.root,
-  });
-  if (mcp?.env) cmd.env = { ...(cmd.env ?? {}), ...mcp.env };
-  log.info(`${task.id}: ${describeCmd(cmd)}`);
-  if (mcp) log.info(`${task.id}: ${mcp.label}`);
-  log.info(`${task.id}: streaming to ${rel(sinks.logPath)} (raw: ${rel(sinks.jsonlPath)})`);
+    const mcp = planMcp(ctx.config, r.kind === 'escalate' ? 'escalation' : 'task', task, ctx.cli, provider.name, join(paths.runs, sinks.base), (m) => log.warn(`${task.id}: mcp: ${m}`));
+    mcp?.notes.forEach((n) => log.warn(`${task.id}: mcp: ${n}`));
+    const cmd = provider.buildCommand({
+      bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: task.id, attempt: r.attempt, kind: r.kind,
+      resumeId: r.resumeId, model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd,
+      extraArgs: [...spec.extraArgs, ...(mcp?.args ?? [])], cwd: paths.root,
+    });
+    if (mcp?.env) cmd.env = { ...(cmd.env ?? {}), ...mcp.env };
+    log.info(`${task.id}: ${describeCmd(cmd)}`);
+    if (mcp) log.info(`${task.id}: ${mcp.label}`);
+    log.info(`${task.id}: streaming to ${rel(sinks.logPath)} (raw: ${rel(sinks.jsonlPath)})`);
 
-  const session = startSession({
-    spec: cmd, provider, cwd: paths.root,
-    timeoutMs: r.timeoutMin * 60_000, idleTimeoutMs: spec.idleTimeoutMin * 60_000,
-    sinks, liveMaxChars: LIVE_MAX, logMaxChars: LOG_MAX, color: process.stdout.isTTY === true,
-  });
-  ctx.active = session;
-  st.pid = session.pid;
-  saveState(paths, state);
-  if (ctx.interrupted) session.kill('interrupt');
+    session = startSession({
+      spec: cmd, provider, cwd: paths.root,
+      timeoutMs: r.timeoutMin * 60_000, idleTimeoutMs: spec.idleTimeoutMin * 60_000,
+      sinks, liveMaxChars: LIVE_MAX, logMaxChars: LOG_MAX, color: process.stdout.isTTY === true,
+    });
+    ctx.active = session;
+    st.pid = session.pid;
+    saveState(paths, state);
+    if (ctx.interrupted) session.kill('interrupt');
 
-  const outcome = await session.done;
-  ctx.active = undefined;
-  delete st.pid;
-  await sinks.close();
-  st.durationS += Math.round(outcome.durationMs / 1000);
-  if (outcome.costUsd !== undefined) st.costUsd = (st.costUsd ?? 0) + outcome.costUsd;
-  ctx.runCostUsd = (ctx.runCostUsd ?? 0) + (outcome.costUsd ?? 0);
-  if (outcome.usage) {
-    st.usage = addUsage(st.usage, outcome.usage);
-    ctx.runUsage = addUsage(ctx.runUsage, outcome.usage);
+    const outcome = await session.done;
+    ctx.active = undefined;
+    delete st.pid;
+    await sinks.close();
+    st.durationS += Math.round(outcome.durationMs / 1000);
+    if (outcome.costUsd !== undefined) st.costUsd = (st.costUsd ?? 0) + outcome.costUsd;
+    ctx.runCostUsd = (ctx.runCostUsd ?? 0) + (outcome.costUsd ?? 0);
+    if (outcome.usage) {
+      st.usage = addUsage(st.usage, outcome.usage);
+      ctx.runUsage = addUsage(ctx.runUsage, outcome.usage);
+    }
+    if (outcome.sessionId) st.sessionId = outcome.sessionId;
+    // Record what this session reported for the docs run log: the high-level result status + summary.
+    const reported = parseResultBlock(outcome.result.text) ?? parseResultBlock(outcome.allText);
+    entry.status = reported?.status ?? outcome.result.errorSubtype ?? (outcome.result.ok ? 'ok' : 'no-result');
+    entry.summary = reported?.summary || (outcome.result.ok ? snapshotText(outcome) : outcome.result.errorSubtype);
+    entry.durationS = Math.round(outcome.durationMs / 1000);
+    if (outcome.costUsd !== undefined) entry.costUsd = outcome.costUsd;
+    if (outcome.usage) entry.usage = outcome.usage;
+    if (mcp) entry.mcp = mcp.selected;
+    saveState(paths, state);
+    return outcome;
+  } catch (e) {
+    // An unexpected fault while setting up or driving a session (a bad prompt write, an adapter
+    // throw, a provider parser that lost its footing) must not take down the whole run. Surface it
+    // as a failed session so the ordinary classifier and exponential backoff retry it.
+    const message = e instanceof Error ? e.message : String(e);
+    try { session?.kill('interrupt'); } catch { /* already gone */ }
+    await sinks?.close().catch(() => {});
+    ctx.active = undefined;
+    delete st.pid;
+    log.error(`${task.id}: session error: ${message}`);
+    const result: ResultEvent = { kind: 'result', ok: false, text: '', errorSubtype: 'session_error', synthesized: true };
+    return {
+      result, allText: '', exitCode: 1, signal: null, timedOut: false, stalled: false, interrupted: false,
+      stderrTail: '', durationMs: 0,
+      hints: { apiErrorCategories: [], errorTexts: [message] }, sawResult: false, sawError: true,
+    };
   }
-  if (outcome.sessionId) st.sessionId = outcome.sessionId;
-  // Record what this session reported for the docs run log: the high-level result status + summary.
-  const reported = parseResultBlock(outcome.result.text) ?? parseResultBlock(outcome.allText);
-  entry.status = reported?.status ?? outcome.result.errorSubtype ?? (outcome.result.ok ? 'ok' : 'no-result');
-  entry.summary = reported?.summary || (outcome.result.ok ? snapshotText(outcome) : outcome.result.errorSubtype);
-  entry.durationS = Math.round(outcome.durationMs / 1000);
-  if (outcome.costUsd !== undefined) entry.costUsd = outcome.costUsd;
-  if (outcome.usage) entry.usage = outcome.usage;
-  if (mcp) entry.mcp = mcp.selected;
-  saveState(paths, state);
-  return outcome;
 }
 
 /** Last non-empty assistant line, a compact fallback when a session produced no result summary. */
@@ -1169,7 +1195,24 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       }
 
       attempted.add(task.id);
-      const out = await runTask(ctx, task);
+      let out: TaskOutcome;
+      try {
+        out = await runTask(ctx, task);
+      } catch (e) {
+        // A fault outside a session (state I/O, a doc write, a git helper) must not kill the whole
+        // run: record the task failed and let the ordinary failure policy decide whether to stop.
+        const message = `internal error: ${e instanceof Error ? e.message : String(e)}`;
+        ctx.log.error(`${task.id}: ${message}`);
+        const st = (state.tasks[task.id] ??= newTaskState(task.title));
+        st.status = 'failed';
+        st.summary = message;
+        st.finished = nowIso();
+        st.lastError = { category: 'crash', message, transient: false, fatal: false, at: nowIso() };
+        delete st.pid;
+        saveState(paths, state);
+        patchRoadmap(ctx, task.id, 'failed');
+        out = { status: 'failed' };
+      }
       if (out.split) { afterSplit(); continue; }
       if (out.stopped) return 0;
       if (out.halt) return setHalt(ctx, out.halt);

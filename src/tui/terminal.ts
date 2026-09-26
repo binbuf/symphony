@@ -32,6 +32,8 @@ export class AnsiTerminal {
   private readonly parser = new KeyParser();
   private keyListener?: (chunk: string) => void;
   private resizeListener?: () => void;
+  private entered = false;
+  private left = false;
 
   constructor(private readonly out: (s: string) => void) {}
 
@@ -41,26 +43,45 @@ export class AnsiTerminal {
     return { cols: Math.max(20, cols), rows: Math.max(6, rows) };
   }
 
+  /** Write to the terminal, swallowing an EPIPE/closed-stdout error so a dead pipe can't crash a frame. */
   write(s: string): void {
-    this.out(s);
+    try { this.out(s); } catch { /* terminal gone; nothing to restore */ }
   }
 
   enter(): void {
-    this.out(`${ALT_ON}${WRAP_OFF}${HIDE_CURSOR}${MOUSE_ON}${CLEAR}`);
-    if (process.stdin.isTTY) {
-      process.stdin.setEncoding('utf8');
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-    }
+    if (this.entered) return;
+    this.entered = true;
+    this.left = false;
+    this.write(`${ALT_ON}${WRAP_OFF}${HIDE_CURSOR}${MOUSE_ON}${CLEAR}`);
+    this.setRaw(true);
   }
 
+  /**
+   * Restore the terminal: show the cursor, re-enable autowrap, turn mouse reporting off and leave the
+   * alternate screen. Idempotent and throw-safe, because it is the last line of defence and may run
+   * from a signal, an `exit` handler, or both.
+   */
   leave(): void {
-    if (process.stdin.isTTY) {
-      try { process.stdin.setRawMode(false); } catch { /* already gone */ }
-      process.stdin.pause();
-    }
-    this.out(`${SHOW_CURSOR}${WRAP_ON}${MOUSE_OFF}${ALT_OFF}`);
+    if (this.left) return;
+    this.left = true;
+    this.setRaw(false);
+    this.write(`${SHOW_CURSOR}${WRAP_ON}${MOUSE_OFF}${ALT_OFF}`);
     this.prev = [];
+  }
+
+  /** Toggle raw mode defensively; a terminal that is already torn down must not throw. */
+  private setRaw(on: boolean): void {
+    if (!process.stdin.isTTY) return;
+    try {
+      if (on) {
+        process.stdin.setEncoding('utf8');
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+      } else {
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+      }
+    } catch { /* stream already closed */ }
   }
 
   onKey(cb: (k: Key) => void): void {
@@ -91,7 +112,7 @@ export class AnsiTerminal {
     const { cols } = this.size();
     const full = cols !== this.prevCols || lines.length !== this.prev.length;
     if (full) {
-      this.out(CLEAR);
+      this.write(CLEAR);
       this.prev = [];
       this.prevCols = cols;
     }
@@ -102,7 +123,7 @@ export class AnsiTerminal {
       buf += `\x1b[${i + 1};1H\x1b[2K${lines[i]}`;
     }
     buf += SYNC_OFF;
-    if (buf !== SYNC_ON + SYNC_OFF) this.out(buf);
+    if (buf !== SYNC_ON + SYNC_OFF) this.write(buf);
     this.prev = lines.slice();
   }
 }

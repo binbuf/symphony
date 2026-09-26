@@ -119,6 +119,18 @@ export class TuiApp {
   private streamVersion = 0;
   private haltResolve?: (d: 'clear' | 'quit') => void;
   private stopped = false;
+  /** Set once a render/key handler throws; the wrapper restores the terminal and continues plain. */
+  private fatal?: Error;
+  /**
+   * Called when the view can no longer render safely (a bug in a frame or a key handler, a terminal
+   * that has gone away). The wrapper restores the terminal and lets the run continue with plain
+   * streaming output, so a TUI fault can never take the harness down or leave the terminal dirty.
+   */
+  onFatal?: (error: Error) => void;
+  /** True once the view has degraded to plain output; the wrapper skips replaying the panel tail. */
+  get fatalError(): boolean {
+    return this.fatal !== undefined;
+  }
   /** Set once the user confirms quitting; the wrapper stops looping on it. */
   quitRequested = false;
 
@@ -126,14 +138,14 @@ export class TuiApp {
 
   start(): void {
     this.term.enter();
-    this.term.onKey((k) => this.handleKey(k));
-    this.term.onResize(() => this.render());
+    this.term.onKey((k) => this.safeKey(k));
+    this.term.onResize(() => this.safeRender());
     this.selected = this.initialSelection();
     this.snapshotStatuses();
     // Land on the task in flight (or the one the run halted on) rather than the top of the table.
     this.revealTask(this.currentTaskId() ?? this.selectedTaskId(), true);
-    this.render();
-    this.timer = setInterval(() => this.tick(), 1000);
+    this.safeRender();
+    this.timer = setInterval(() => this.safeTick(), 1000);
     this.timer.unref?.();
   }
 
@@ -143,6 +155,9 @@ export class TuiApp {
     this.timer = undefined;
     this.term.dispose();
     this.term.leave();
+    // A pending halt prompt must be released, or the run loop would await it forever after the view
+    // is torn down (a fatal degradation, a quit, or the terminal going away).
+    if (this.haltResolve) this.resolveHalt('quit');
   }
 
   /** Feed captured stdout (may hold several lines or a partial one) into the stream panel. */
@@ -151,6 +166,12 @@ export class TuiApp {
     const parts = this.partial.split('\n');
     this.partial = parts.pop() ?? '';
     for (const line of parts) this.stream.push(sanitizeLine(line));
+    // A provider that never emits a newline must not grow the partial buffer without bound: flush it
+    // as a (truncated) line once it is implausibly long.
+    if (this.partial.length > STREAM_MAX) {
+      this.stream.push(sanitizeLine(this.partial.slice(0, STREAM_MAX)));
+      this.partial = '';
+    }
     if (this.stream.length > STREAM_MAX) this.stream.splice(0, this.stream.length - STREAM_MAX);
     if (parts.length) this.streamVersion += 1;
     this.scheduleRender();
@@ -169,6 +190,8 @@ export class TuiApp {
 
   /** Keep the TUI open after a halt; resolves when the user clears the halt or quits. */
   awaitHaltAction(): Promise<'clear' | 'quit'> {
+    // Once the view is torn down there is nobody to answer the prompt; don't hang the run waiting.
+    if (this.stopped || this.fatal) return Promise.resolve('quit');
     this.haltMode = true;
     this.toast('halted: press c to clear the halt and retry, or q to exit');
     this.render();
@@ -188,6 +211,30 @@ export class TuiApp {
     if (this.renderScheduled) return;
     this.renderScheduled = true;
     setTimeout(() => { this.renderScheduled = false; this.render(); }, 33).unref?.();
+  }
+
+  private safeKey(k: Key): void {
+    if (this.stopped || this.fatal) return;
+    try { this.handleKey(k); } catch (e) { this.fail(e as Error); }
+  }
+
+  private safeRender(): void {
+    this.render();
+  }
+
+  private safeTick(): void {
+    if (this.stopped || this.fatal) return;
+    try { this.tick(); } catch (e) { this.fail(e as Error); }
+  }
+
+  /**
+   * The view hit an unrecoverable error. Record it once and hand off to the wrapper, which restores
+   * the terminal and continues the run with plain output; never re-enter the render path.
+   */
+  private fail(error: Error): void {
+    if (this.fatal) return;
+    this.fatal = error;
+    this.onFatal?.(error);
   }
 
   private tick(): void {
@@ -714,9 +761,13 @@ export class TuiApp {
   // ---------------------------------------------------------------- rendering
 
   render(): void {
-    if (this.stopped) return;
-    const { cols, rows } = this.term.size();
-    this.term.draw(this.renderLines(cols, rows));
+    if (this.stopped || this.fatal) return;
+    try {
+      const { cols, rows } = this.term.size();
+      this.term.draw(this.renderLines(cols, rows));
+    } catch (e) {
+      this.fail(e as Error);
+    }
   }
 
   renderLines(cols: number, rows: number): string[] {
@@ -944,7 +995,9 @@ export class TuiApp {
 
   private drawBox(out: string[], cols: number, rows: number, box: Box): void {
     const maxLine = Math.max(displayWidth(box.title), ...box.lines.map(displayWidth));
-    const width = clamp(maxLine + 4, 24, Math.max(24, cols - 4));
+    // Never let the overlay exceed the viewport, however small: an over-wide line would wrap and
+    // corrupt the frame (and the row diffing that follows).
+    const width = Math.min(Math.max(24, maxLine + 4), Math.max(10, cols));
     const boxLines = this.buildBoxLines(box.title, box.lines, width);
     const height = boxLines.length;
     const top = Math.max(0, Math.floor((rows - height) / 2));

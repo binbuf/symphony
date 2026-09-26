@@ -398,6 +398,22 @@ export class PipelineWatcher {
     this.timer = undefined;
     this.inFlight = true;
     this.checks += 1;
+    try {
+      await this.runCheck();
+    } catch (e) {
+      // The watcher is advisory and its timer callback is fire-and-forget, so a fault here must be
+      // contained: surface it in the panel/log and keep the timer alive.
+      const message = e instanceof Error ? e.message : String(e);
+      this.ctx.log.warn(`watch #${this.checks}: check failed: ${message}`);
+      const state = this.ctx.watch;
+      if (state && !this.stopped) { state.status = 'error'; state.error = message; }
+    } finally {
+      this.inFlight = false;
+      if (!this.stopped) this.arm(this.intervalMs);
+    }
+  }
+
+  private async runCheck(): Promise<void> {
     const w = this.ctx.watch;
     if (w) { w.status = 'running'; w.nextAt = undefined; }
     // Snapshot the window before the check: the previous start for what to inline, and the current
@@ -410,8 +426,6 @@ export class PipelineWatcher {
       result = await oneCheck(this.ctx, this.spec, this.provider, { sinceMs: this.windowFromMs, progressFrom: this.progressSections });
     } catch (e) {
       result = { status: 'error', error: (e as Error).message, sessionLog: '-', sessionJsonl: '-', sessionPrompt: '-' };
-    } finally {
-      this.inFlight = false;
     }
     // Advance the window only after a check we actually summarised, so a failed check's window is
     // retried next time instead of being silently dropped.
@@ -466,7 +480,6 @@ export class PipelineWatcher {
       }
     }
     this.ctx.log.info(`watch #${this.checks}: ${result.status}${result.summary ? ` · ${squash(result.summary, 160)}` : result.error ? ` · ${result.error}` : ''}`);
-    if (!this.stopped) this.arm(this.intervalMs);
   }
 }
 

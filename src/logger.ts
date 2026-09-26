@@ -55,6 +55,10 @@ export function openRunSinks(runsDir: string, base: string): RunSinks {
   const promptPath = join(runsDir, `${base}.prompt.md`);
   const jsonl = createWriteStream(jsonlPath, { flags: 'a' });
   const log = createWriteStream(logPath, { flags: 'a' });
+  // A write stream with no 'error' listener throws an uncaught exception on an async fault (a full
+  // disk, a removed directory). The run should survive a logging failure, so swallow it here.
+  jsonl.on('error', () => {});
+  log.on('error', () => {});
   const end = (s: WriteStream) => new Promise<void>((res) => { if (s.closed || s.destroyed) return res(); s.end(() => res()); });
   return { base, jsonlPath, logPath, promptPath, jsonl, log, close: async () => { await Promise.all([end(jsonl), end(log)]); } };
 }

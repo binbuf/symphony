@@ -1,7 +1,7 @@
 import { applyPlan, loadProject, retargetFlags } from '../project.js';
 import type { RunContext, SplitRequest } from '../runner.js';
 import { childIdSequence, splitCommand } from '../split.js';
-import { saveState, type Halted } from '../state.js';
+import { releaseLock, saveState, type Halted } from '../state.js';
 import { TuiApp } from './app.js';
 import { AnsiTerminal } from './terminal.js';
 import { UsageError } from '../util.js';
@@ -31,7 +31,7 @@ function captureStdout(app: TuiApp): () => void {
       : Buffer.isBuffer(chunk)
         ? chunk.toString(typeof enc === 'string' ? (enc as BufferEncoding) : 'utf8')
         : String(chunk);
-    app.pushOutput(text);
+    try { app.pushOutput(text); } catch { /* a capture fault must never break the writer */ }
     const done = typeof enc === 'function' ? enc : typeof cb === 'function' ? cb : undefined;
     if (done) (done as () => void)();
     return true;
@@ -140,7 +140,39 @@ export async function runWithTui(ctx: RunContext, run: () => Promise<number>, op
   const term = new AnsiTerminal((s) => realWrite(s));
   const app = new TuiApp(ctx, term);
   const restore = captureStdout(app);
-  const onExit = () => { try { term.leave(); } catch { /* exiting anyway */ } };
+  let restored = false;
+  const restoreStdout = () => {
+    if (restored) return;
+    restored = true;
+    try { restore(); } catch { /* stdout already restored */ }
+  };
+  const leaveTerminal = () => { try { app.stop(); } catch { try { term.leave(); } catch { /* exiting anyway */ } } };
+
+  // A TUI fault (a bug in a frame or key handler, a terminal that went away) degrades to plain
+  // streaming output instead of killing the harness. The run itself is untouched.
+  app.onFatal = (error: Error) => {
+    restoreStdout();
+    leaveTerminal();
+    realWrite(`\nsymphony: run view disabled after an error (${error.message}); continuing with plain output\n`);
+  };
+
+  // Last line of defense: whatever else throws — an async watcher bug, a provider parser fault, a
+  // stray rejection — restore the terminal and stop the active session before the process dies, so
+  // the terminal is never left in raw mode with mouse reporting on and the harness never hangs.
+  const fatal = (error: Error) => {
+    leaveTerminal();
+    try { ctx.active?.kill('force'); } catch { /* already gone */ }
+    // The run loop's finally never runs when a detached callback crashes, so drop the lock here too;
+    // otherwise the next run would refuse to start until the heartbeat goes stale.
+    try { releaseLock(ctx.paths); } catch { /* nothing we can do at exit */ }
+    try { realWrite(`\nsymphony: fatal error: ${error.stack ?? error.message}\n`); } catch { /* stdout gone */ }
+    process.exit(1);
+  };
+  const onUncaught = (error: Error) => fatal(error);
+  const onRejection = (reason: unknown) => fatal(reason instanceof Error ? reason : new Error(String(reason)));
+  const onExit = () => leaveTerminal();
+  process.on('uncaughtException', onUncaught);
+  process.on('unhandledRejection', onRejection);
   process.once('exit', onExit);
 
   let code = 1;
@@ -148,6 +180,7 @@ export async function runWithTui(ctx: RunContext, run: () => Promise<number>, op
     app.start();
     // An automatic breakdown inside the run rewrites the plan too: refresh the view when it does.
     ctx.onPlanChanged = (parentId, childIds) => {
+      if (app.fatalError) return;
       app.onPlanChanged();
       app.toast(`broke ${parentId} into ${childIds.join(', ')}; resuming`);
     };
@@ -162,11 +195,13 @@ export async function runWithTui(ctx: RunContext, run: () => Promise<number>, op
       },
     });
   } finally {
+    process.removeListener('uncaughtException', onUncaught);
+    process.removeListener('unhandledRejection', onRejection);
     process.removeListener('exit', onExit);
-    restore();
-    app.stop();
+    restoreStdout();
+    leaveTerminal();
     const tail = app.tail(10);
-    if (tail.length) realWrite(`${tail.join('\n')}\n`);
+    if (tail.length && !app.fatalError) realWrite(`${tail.join('\n')}\n`);
     realWrite(`symphony run finished (exit ${code}).\n`);
   }
   return code;

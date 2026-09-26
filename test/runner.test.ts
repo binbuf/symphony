@@ -1108,3 +1108,28 @@ test('--dry-run previews while Jev is misconfigured without leaving a halt', asy
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
 });
+
+test('an unexpected session-setup fault is contained and retried with backoff, never crashing the run', async () => {
+  const { paths, task } = project();
+  // Put a file where the per-session runs directory must go: ensureDir/openRunSinks then fail hard,
+  // standing in for any unexpected fault while setting a session up.
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.runs, 'not a directory');
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    retry: { ...DEFAULTS.retry, maxAttempts: 2, exponential: false, backoffSec: [0], jitter: 0 },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'failed', 'the task fails rather than taking down the process');
+    assert.equal(state.tasks.T01.status, 'failed');
+    assert.equal(state.tasks.T01.transientRetries, 2, 'each setup fault is retried with backoff');
+    assert.match(state.tasks.T01.lastError?.message ?? '', /not a directory|EEXIST|ENOTDIR|session error/i);
+  } finally {
+    rmSync(paths.runs, { force: true });
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});

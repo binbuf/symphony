@@ -167,7 +167,7 @@ export function startSession(o: SessionOpts): Session {
   };
 
   child.stdin?.on('error', () => { /* EPIPE when the child does not read stdin */ });
-  child.stdin?.end(o.spec.stdinPayload ?? '');
+  try { child.stdin?.end(o.spec.stdinPayload ?? ''); } catch { /* already closed */ }
 
   // Interfaces are created up front so a spawn failure can close them; a readline iterator over a
   // destroyed stream would otherwise never finish and the session promise would hang.
@@ -180,10 +180,17 @@ export function startSession(o: SessionOpts): Session {
     if (!rlOut) return;
     for await (const line of rlOut) {
       resetIdle();
-      o.sinks.jsonl.write(`${line}\n`);
+      try { o.sinks.jsonl.write(`${line}\n`); } catch { /* logging must never stop the read */ }
       if (!line.trim()) continue;
-      const events = line.trimStart().startsWith('{') ? parser.parse(line) : [{ kind: 'raw', text: line, stream: 'stdout' } satisfies NormalizedEvent];
-      for (const ev of events) emit(ev);
+      // A provider parser or renderer that throws on one malformed line must not stop reading: the
+      // child would block on a full stdout pipe and the session would hang until the wall timeout.
+      let events: NormalizedEvent[];
+      try {
+        events = line.trimStart().startsWith('{') ? parser.parse(line) : [{ kind: 'raw', text: line, stream: 'stdout' } satisfies NormalizedEvent];
+      } catch {
+        events = [{ kind: 'raw', text: line, stream: 'stdout' } satisfies NormalizedEvent];
+      }
+      for (const ev of events) { try { emit(ev); } catch { /* one bad event must not end the session */ } }
     }
   };
 
@@ -194,7 +201,7 @@ export function startSession(o: SessionOpts): Session {
       if (!line.trim()) continue;
       stderrTail = `${stderrTail}${line}\n`;
       if (stderrTail.length > STDERR_RING_BYTES) stderrTail = stderrTail.slice(-STDERR_RING_BYTES);
-      emit({ kind: 'raw', text: line, stream: 'stderr' });
+      try { emit({ kind: 'raw', text: line, stream: 'stderr' }); } catch { /* as above */ }
     }
   };
 

@@ -588,3 +588,83 @@ test('AnsiTerminal turns autowrap off while drawing and always repaints the bott
   assert.ok(out.join('').includes('\x1b[?7h'), 'autowrap restored on leave');
   assert.ok(out.join('').includes('\x1b[?1006l'), 'mouse reporting restored on leave');
 });
+
+test('AnsiTerminal.leave is idempotent and never throws even when the terminal has gone away', () => {
+  const out: string[] = [];
+  const term = new AnsiTerminal((s) => out.push(s));
+  term.enter();
+  out.length = 0;
+  term.leave();
+  const first = out.join('');
+  assert.ok(first.includes('\x1b[?1006l'), 'the first leave turns mouse reporting off');
+  out.length = 0;
+  term.leave();
+  assert.equal(out.length, 0, 'a second leave is a no-op');
+
+  // An out() that throws (EPIPE on a closed pipe) must not bubble out of leave/enter/draw.
+  const broken = new AnsiTerminal(() => { throw new Error('EPIPE'); });
+  assert.doesNotThrow(() => broken.enter());
+  assert.doesNotThrow(() => broken.leave());
+  assert.doesNotThrow(() => broken.draw(['x']));
+});
+
+test('KeyParser drops an unbounded unterminated escape instead of growing forever', () => {
+  const p = new KeyParser();
+  assert.deepEqual(p.feed('\x1b[' + '9'.repeat(10_000)), [], 'a malformed sequence is buffered, then dropped');
+  assert.equal((p as unknown as { buf: string }).buf.length, 0, 'the pending buffer is cleared at the cap');
+  // The parser is still usable after the drop.
+  assert.deepEqual(p.feed('q'), [{ type: 'char', char: 'q' }]);
+});
+
+test('TuiApp degrades safely: a render fault calls onFatal once and stops drawing', () => {
+  const tasks = [task('T01', 1)];
+  const ctx = makeCtx(tasks, { version: 1, tasks: {} });
+  const app = new TuiApp(ctx, new AnsiTerminal(() => {}));
+  const errors: Error[] = [];
+  app.onFatal = (e) => errors.push(e);
+  (app as unknown as { renderLines(): string[] }).renderLines = () => { throw new Error('frame blew up'); };
+
+  assert.doesNotThrow(() => app.render(), 'a render throw is contained');
+  assert.equal(errors.length, 1, 'onFatal is told once');
+  app.render();
+  assert.equal(errors.length, 1, 'further renders are suppressed after the fault');
+  assert.equal(app.fatalError, true);
+});
+
+test('TuiApp.stop releases a pending halt prompt so the run loop cannot hang', async () => {
+  const app = new TuiApp(makeCtx([task('T01', 1)], { version: 1, tasks: {} }), new AnsiTerminal(() => {}));
+  const decision = app.awaitHaltAction();
+  app.stop();
+  assert.equal(await decision, 'quit', 'a torn-down view resolves the halt prompt');
+});
+
+test('runWithTui restores the terminal even when the run itself throws', async () => {
+  const written: string[] = [];
+  const realWrite = process.stdout.write;
+  const spy = ((chunk: unknown) => { written.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  const stdoutDesc = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+  const stdinDesc = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  const setRawMode = (process.stdin as { setRawMode?: unknown }).setRawMode;
+
+  process.stdout.write = spy;
+  Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+  Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+  (process.stdin as { setRawMode?: unknown }).setRawMode = () => {};
+
+  try {
+    const ctx = makeCtx([task('T01', 1)], { version: 1, tasks: {} });
+    await assert.rejects(
+      runWithTui(ctx, async () => { throw new Error('run exploded'); }, { enabled: true }),
+      /run exploded/,
+    );
+    const all = written.join('');
+    assert.ok(all.includes('\x1b[?1049l'), 'leaves the alternate screen after a run throw');
+    assert.ok(all.includes('\x1b[?1006l'), 'mouse reporting turned off after a run throw');
+  } finally {
+    process.stdout.write = realWrite;
+    if (stdoutDesc) Object.defineProperty(process.stdout, 'isTTY', stdoutDesc); else delete (process.stdout as { isTTY?: unknown }).isTTY;
+    if (stdinDesc) Object.defineProperty(process.stdin, 'isTTY', stdinDesc); else delete (process.stdin as { isTTY?: unknown }).isTTY;
+    if (setRawMode === undefined) delete (process.stdin as { setRawMode?: unknown }).setRawMode;
+    else (process.stdin as { setRawMode?: unknown }).setRawMode = setRawMode;
+  }
+});

@@ -33,6 +33,13 @@ export interface MouseKey {
 
 const CSI_FINAL = /[@-~]/;
 
+/**
+ * Upper bound on an unterminated escape sequence held between reads. A well-formed key or SGR mouse
+ * report is a handful of bytes; anything longer is malformed (or a terminal we did not negotiate a
+ * protocol with), so the buffer is dropped rather than allowed to grow without bound.
+ */
+const MAX_PENDING = 4096;
+
 function decodeSgrMouse(params: string, final: string): MouseKey | undefined {
   const [rawCb, rawX, rawY] = params.split(';');
   const cb = Number(rawCb);
@@ -107,7 +114,11 @@ export class KeyParser {
       if (this.buf[1] === '[') {
         const rest = this.buf.slice(2);
         const finalIdx = rest.search(CSI_FINAL);
-        if (finalIdx === -1) return false; // incomplete; wait for more bytes
+        if (finalIdx === -1) {
+          // Incomplete; wait for more bytes, but never hold an unbounded malformed sequence.
+          if (this.buf.length > MAX_PENDING) { this.buf = ''; return true; }
+          return false;
+        }
         const params = rest.slice(0, finalIdx);
         const final = rest[finalIdx];
         this.buf = this.buf.slice(2 + finalIdx + 1);
