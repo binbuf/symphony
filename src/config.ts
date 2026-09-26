@@ -219,6 +219,48 @@ export interface SlackConfig {
   timeoutMs: number;
 }
 
+/**
+ * One MCP server the harness can describe to a client. A `command` (stdio) or `url` (remote) is
+ * required for a client to be able to define the server inline; a name-only entry can still be
+ * allowlisted by name (Gemini) or left to the client's own configuration.
+ */
+export interface McpServerConfig {
+  /** Launcher plus arguments for a stdio server. */
+  command?: string[];
+  /** Endpoint for a remote/HTTP server, where the client supports one. */
+  url?: string;
+  /** Environment variables set for the server process, where the client supports them. */
+  env?: Record<string, string>;
+  /** Tool allowlist, where the client supports one (Codex `enabled_tools`). */
+  tools?: string[];
+  /** Tool denylist, where the client supports one (Codex `disabled_tools`). */
+  disabledTools?: string[];
+}
+
+export const MCP_SESSION_KINDS = ['task', 'watch', 'prepare', 'replan', 'split', 'breakdown', 'escalation'] as const;
+export type McpSessionKind = (typeof MCP_SESSION_KINDS)[number];
+
+/**
+ * Per-session MCP selection. Off by default: with `enabled: false` the harness never touches a
+ * client's MCP configuration. When on, each session is spawned with only the servers its selection
+ * names — clients that can express it get an allowlist, and servers the registry defines are
+ * disabled for the ones that need a full entry to be disabled. Sessions that are not tasks
+ * (pipeline watch, prepare/replan/split, breakdown, escalation) default to no servers unless
+ * `sessions.<kind>` says otherwise.
+ */
+export interface McpConfig {
+  /** Master switch. */
+  enabled: boolean;
+  /** Servers the harness can define to a client, keyed by the name the client uses. */
+  servers: Record<string, McpServerConfig>;
+  /** Capability name → server names, selectable from task front matter `capabilities:`. */
+  capabilities: Record<string, string[]>;
+  /** Servers a task runs with when it names neither `mcp:` nor `capabilities:`. */
+  defaultServers: string[];
+  /** Per session-kind selection; an unset `task` kind falls back to `defaultServers`, others to none. */
+  sessions: Partial<Record<McpSessionKind, string[]>>;
+}
+
 /** The deterministic triggers that open a breakdown decision, per stage. */
 export interface BreakdownRules {
   /** `onStart` trigger: only ask when the task file body is at least this many bytes (0 = every task). */
@@ -362,6 +404,8 @@ export interface Config {
   slack: SlackConfig;
   /** Periodic read-only progress/health summary in the TUI. See WatchConfig. */
   watch: WatchConfig;
+  /** Per-session MCP server selection. See McpConfig. */
+  mcp: McpConfig;
   /** Automatic task breakdown at task start, at a `continue` boundary, or instead of escalating. See BreakdownConfig. */
   breakdown: BreakdownConfig;
 }
@@ -375,6 +419,10 @@ export interface CliOverrides {
   timeoutMin?: number;
   budgetUsd?: number;
   maxCostUsd?: number;
+  /** `--mcp a,b`: explicit MCP server selection for this invocation (overrides task and config). */
+  mcp?: string[];
+  /** `--no-mcp`: run this invocation with no MCP servers at all. */
+  noMcp?: boolean;
   safe?: boolean;
   noNudge?: boolean;
   maxTasks?: number;
@@ -488,6 +536,13 @@ export const DEFAULTS: Config = {
     model: 'deepseek/deepseek-v4.1-flash',
     modelProvider: 'openrouter',
     timeoutMin: 5,
+  },
+  mcp: {
+    enabled: false,
+    servers: {},
+    capabilities: {},
+    defaultServers: [],
+    sessions: {},
   },
   breakdown: {
     enabled: false,
@@ -623,6 +678,76 @@ export function findTaskSet(config: Config, name: string): TaskSetConfig | undef
   return config.taskSets.find((s) => s.name === name);
 }
 
+/** A non-empty array of strings, else the fallback with a warning. */
+function mcpNames(x: unknown, fallback: string[], where: string, warnings: string[]): string[] {
+  return stringArray(x, fallback, where, warnings).map((s) => s.trim()).filter(Boolean);
+}
+
+/** One client-side MCP server definition; a malformed entry is dropped with a warning. */
+function mcpServer(where: string, x: unknown, warnings: string[]): McpServerConfig | undefined {
+  if (!isRecord(x)) { warnings.push(`${where}: expected an object; ignored`); return undefined; }
+  const out: McpServerConfig = {};
+  const command = x.command === undefined || x.command === null ? undefined : mcpNames(x.command, [], `${where}.command`, warnings);
+  if (command?.length) out.command = command;
+  if (typeof x.url === 'string' && x.url.trim()) out.url = x.url.trim();
+  if (x.env !== undefined && x.env !== null) {
+    if (isRecord(x.env) && Object.values(x.env).every((v) => typeof v === 'string')) out.env = x.env as Record<string, string>;
+    else warnings.push(`${where}.env: expected an object of strings; ignored`);
+  }
+  if (x.tools !== undefined && x.tools !== null) {
+    const tools = mcpNames(x.tools, [], `${where}.tools`, warnings);
+    if (tools.length) out.tools = tools;
+  }
+  if (x.disabledTools !== undefined && x.disabledTools !== null) {
+    const tools = mcpNames(x.disabledTools, [], `${where}.disabledTools`, warnings);
+    if (tools.length) out.disabledTools = tools;
+  }
+  if (!out.command?.length && !out.url) {
+    warnings.push(`${where}: no "command" or "url"; clients that define servers inline cannot enable or disable it by name alone (Gemini's allowlist still can)`);
+  }
+  return out;
+}
+
+function mcpServerList(x: unknown, warnings: string[]): Record<string, McpServerConfig> {
+  if (x === undefined || x === null) return {};
+  if (!isRecord(x)) { warnings.push('mcp.servers: expected an object; ignoring'); return {}; }
+  const out: Record<string, McpServerConfig> = {};
+  for (const [name, val] of Object.entries(x)) {
+    if (name.startsWith('_')) continue;
+    const parsed = mcpServer(`mcp.servers.${name}`, val, warnings);
+    if (parsed) out[name] = parsed;
+  }
+  return out;
+}
+
+function mcpCapabilityMap(x: unknown, warnings: string[]): Record<string, string[]> {
+  if (x === undefined || x === null) return {};
+  if (!isRecord(x)) { warnings.push('mcp.capabilities: expected an object; ignoring'); return {}; }
+  const out: Record<string, string[]> = {};
+  for (const [name, val] of Object.entries(x)) {
+    if (name.startsWith('_')) continue;
+    const servers = mcpNames(val, [], `mcp.capabilities.${name}`, warnings);
+    if (!servers.length) warnings.push(`mcp.capabilities.${name}: expected an array of server names; ignored`);
+    else out[name] = servers;
+  }
+  return out;
+}
+
+function mcpSessions(x: unknown, warnings: string[]): Partial<Record<McpSessionKind, string[]>> {
+  if (x === undefined || x === null) return {};
+  if (!isRecord(x)) { warnings.push('mcp.sessions: expected an object; ignoring'); return {}; }
+  const out: Partial<Record<McpSessionKind, string[]>> = {};
+  for (const [name, val] of Object.entries(x)) {
+    if (name.startsWith('_')) continue;
+    if (!(MCP_SESSION_KINDS as readonly string[]).includes(name)) {
+      warnings.push(`mcp.sessions.${name}: unknown session kind; expected one of ${MCP_SESSION_KINDS.join(', ')}`);
+      continue;
+    }
+    out[name as McpSessionKind] = mcpNames(val, [], `mcp.sessions.${name}`, warnings);
+  }
+  return out;
+}
+
 /** Merge defaults ← config file ← CLI flags. Missing file = defaults. */
 export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const warnings: string[] = [];
@@ -677,6 +802,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const slackRaw = isRecord(raw.slack) ? raw.slack : {};
   const slackEventsRaw = isRecord(slackRaw.events) ? slackRaw.events : {};
   const watchRaw = isRecord(raw.watch) ? raw.watch : {};
+  const mcpRaw = isRecord(raw.mcp) ? raw.mcp : {};
   const breakRaw = isRecord(raw.breakdown) ? raw.breakdown : {};
   const breakRulesRaw = isRecord(breakRaw.rules) ? breakRaw.rules : {};
 
@@ -930,6 +1056,13 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         timeoutMin: positiveOr(watchRaw.timeoutMin, DEFAULTS.watch.timeoutMin, 'watch.timeoutMin', warnings),
       };
     })(),
+    mcp: {
+      enabled: boolOr(mcpRaw.enabled, DEFAULTS.mcp.enabled, 'mcp.enabled', warnings),
+      servers: mcpServerList(mcpRaw.servers, warnings),
+      capabilities: mcpCapabilityMap(mcpRaw.capabilities, warnings),
+      defaultServers: mcpNames(mcpRaw.defaultServers, DEFAULTS.mcp.defaultServers, 'mcp.defaultServers', warnings),
+      sessions: mcpSessions(mcpRaw.sessions, warnings),
+    },
     breakdown: (() => {
       let provider: ProviderName | undefined;
       if (breakRaw.provider !== undefined && breakRaw.provider !== null) {

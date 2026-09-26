@@ -25,6 +25,7 @@ export const fakeProvider: Provider = {
   supportsBudget: true,
   supportsResume: true,
   supportsVariant: false,
+  supportsMcp: false,
   buildCommand(o) {
     const dir = process.env.SYMPHONY_FAKE_FIXTURES ?? join(o.cwd, '.symphony', 'fixtures');
     const candidates = [`${o.taskId}.${o.kind}.jsonl`, `${o.taskId}.jsonl`, `default.${o.kind}.jsonl`, 'default.jsonl'];

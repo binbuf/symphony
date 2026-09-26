@@ -4,9 +4,9 @@
 
 symphony lives in `<your target project>/.symphony/` (gitignored) and reads its plan from `<project>/docs/` and launches using your provider's LLM CLI tool.
 
-Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output.
+Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output. An optional [`mcp` block](#mcp-selection) can scope each session to a chosen subset of servers, so unrelated toolchains cost nothing.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Slack notifications](#slack-notifications) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [MCP selection](#mcp-selection) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Slack notifications](#slack-notifications) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -361,8 +361,8 @@ docs/
                         digest plus the most recent sections into each prompt
   INDEX.md              generated repo map: one-line design-doc summaries and a source-file map with
                         top-level symbols; rewritten before each task and committed with it
-  logs/TNN.md           the harness's per-task run log: status, provider/model, timing, cost and each
-                        session's reported status + summary; regenerated after every task
+  logs/TNN.md           the harness's per-task run log: status, provider/model, timing, cost, token
+                        usage and each session's reported status + summary; regenerated after every task
   tasks/NN-slug.md      one detail file per task: Goal / Context / Scope / Out of scope / Design notes /
                         Done when / Hand-off
   tasks/TEMPLATE.md     the template `init` writes
@@ -452,7 +452,51 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `--budget USD` | per-task budget (Claude only) |
 | `--max-cost USD` | stop the run once reported session cost reaches this (`maxCostUsdPerRun`; 0 = off) |
 | `--clear-halt` | clear a sticky halt and start |
+| `--mcp a,b` / `--no-mcp` | override the MCP selection for this invocation (see [MCP selection](#mcp-selection)) |
 | `--tui` / `--no-tui` | force / disable the full-screen run view (default: on when stdout and stdin are a terminal, off when piped or in CI; config `tui`) |
+
+## MCP selection
+
+MCP servers are configured inside each client, and symphony leaves them alone by default. An optional
+`mcp` block in `.symphony/symphony.config.json` scopes each **session** to only the servers its task
+needs, so the schemas and results of unrelated toolchains never enter the conversation:
+
+```json
+"mcp": {
+  "enabled": true,
+  "servers": {
+    "ghidra": { "command": ["ghidra-mcp"], "env": { "GHIDRA_HOME": "C:/ghidra" } },
+    "mesen":  { "command": ["mesen-mcp"] },
+    "blender": { "command": ["blender-mcp"] },
+    "unreal": { "url": "http://127.0.0.1:8080/mcp" }
+  },
+  "capabilities": {
+    "reverse_engineering": ["ghidra", "mesen"],
+    "3d_modeling": ["blender"]
+  },
+  "defaultServers": ["ghidra"],
+  "sessions": { "watch": [], "prepare": [], "split": [], "breakdown": [], "escalation": [] }
+}
+```
+
+A task picks servers from its front matter — `capabilities: reverse_engineering`, or
+`mcp: ghidra,mesen` (the two are unioned). Resolution order: `--mcp a,b` / `--no-mcp` on the run,
+then task front matter, then `mcp.sessions.<kind>`, then `mcp.defaultServers` for tasks and escalated
+sessions and none for the other session kinds (watch, prepare, split, replan, breakdown). An
+escalated session inherits the task's selection because it is the same work on a stronger model.
+`run --dry-run` prints the resolved selection and the exact command, and `doctor` reports what the
+selected clients can enforce.
+
+| client | mechanism | notes |
+|---|---|---|
+| `claude` | `--mcp-config <file> --strict-mcp-config` | the session sees exactly the selection; each selected server needs a `command`/`url` definition |
+| `codex` | `-c mcp_servers.<name>…` | defined servers are enabled/disabled inline (`enabled`, `enabled_tools`, `disabled_tools`); a name-only server cannot be disabled |
+| `opencode` (1.x) | `OPENCODE_CONFIG_CONTENT` | the 1.x `mcp` schema (`type: local\|remote`, `command`/`environment`/`url`, `enabled`) merged above global and project config |
+| `gemini` | `--allowed-mcp-server-names` | a complete allowlist, so a name alone is enough to include or exclude a configured server |
+| `cursor`, `antigravity` | — | no per-invocation MCP config; they keep their own configuration |
+
+Every session records its selection in `docs/logs/TNN.md`, and `status` sums the provider-reported
+token usage next to cost, so the saving stays measurable per task.
 
 ## Providers
 
@@ -845,7 +889,14 @@ npm run dev -- run --root /path/to/project       # run from source via tsx
 npm test                                          # node --test
 npm run typecheck && npm run build                # tsc → dist/
 node dist/tools/parse-check.js claude session.jsonl [--render]   # replay a provider log through the parser
+npm run bench:mcp -- --provider claude            # token usage for a trivial task, per MCP profile
 ```
+
+`bench:mcp` runs one no-tool task per `--profile "name=args"` (the args land on the CLI as
+`providers.<name>.extraArgs` would) and tabulates the token usage each client reports, so the cost
+of exposing a set of MCP servers can be compared without spending on a real task. It also accepts
+`--env KEY=VAL`, `--runs`, `--model`, `--bin`, `--root` and `--dry-run`; see
+`scripts/bench-mcp.mjs` for the full surface.
 
 ### Mock run (no LLM)
 
@@ -866,7 +917,7 @@ The `fake` provider replays Claude-format NDJSON fixtures from `SYMPHONY_FAKE_FI
 ## Notes
 
 - **Never pushes.** symphony commits to the current branch only, and refuses to commit at all if a session switched branches mid-run.
-- `--max-cost` and `maxCostUsdPerRun` can only enforce what a provider reports: Claude (per session) and OpenCode (per session) do; Codex reports tokens instead.
+- `--max-cost` and `maxCostUsdPerRun` can only enforce what a provider reports: Claude (per session) and OpenCode (per session) do; Codex reports tokens instead. Provider-reported token usage (input, cached, output, reasoning) is recorded per session in the task log, shown in the `status` footer and available in `status --json`, whichever client ran — clients that report none leave the fields empty.
 - `doctor` warns when neither `verifyCommand` nor a `package.json` test script exists, because then a task's `done` cannot be independently confirmed.
 - `--safe` on Claude denies every shell command outright (nobody can answer the prompt), so expect `blocked` results.
 - The Gemini and Antigravity adapters follow their documented CLI shapes but were not exercised against a live binary here; adjust `providers.<name>.bin`/`extraArgs` for your install. Claude Code is launched with its normal configuration, so MCP servers/connectors configured there keep working.

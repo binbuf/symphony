@@ -26,6 +26,7 @@ Usage
   symphony run     [--prepare] [--provider P] [--model M] [--model-provider P] [--variant V] [--from T03] [--to T10] [--only T05,T06] [--retry]
                    [--continue-on-failure] [--dry-run] [--safe] [--no-nudge] [--timeout-min N] [--max-tasks N]
                    [--max-iterations N] [--budget USD] [--max-cost USD] [--clear-halt] [--set NAME] [--tui|--no-tui]
+                   [--mcp a,b|--no-mcp]
   symphony status  [--json]              progress table (or JSON)
   symphony logs    [T05]                 print a task's per-run log (docs/logs/T05.md); with no id, list them
   symphony doctor                        preflight: binaries, auth, git, roadmap, verify, halt/STOP/lock
@@ -58,6 +59,11 @@ Every location (docs, tasks, progress, design, adr, logs, stop, state, runs, log
 Task sets: declare extra, independent task sets in the "taskSets" array of .symphony/symphony.config.json.
 --set NAME runs that set's own roadmap/tasks/progress/design instead of the base docs/ package; its state
 lives under .symphony/sets/NAME/. Every command accepts --set NAME.
+MCP: with "mcp": {"enabled": true, …} in the config, each session is spawned with only the servers its
+selection names (task front matter "mcp:"/"capabilities:", then mcp.sessions.<kind>, then mcp.defaultServers;
+--mcp a,b / --no-mcp override). Claude, Codex, OpenCode 1.x and Gemini are scoped per session; cursor and
+antigravity keep their own MCP config. Servers the registry defines can be disabled for a client; others
+are excluded only where the client supports an allowlist.
 
 Limits
   --max-tasks N            process at most N tasks this run (config maxTasksPerRun)
@@ -158,6 +164,8 @@ export async function main(argv: string[]): Promise<number> {
       'max-iterations': { type: 'string' },
       budget: { type: 'string' },
       'max-cost': { type: 'string' },
+      mcp: { type: 'string' },
+      'no-mcp': { type: 'boolean' },
       'clear-halt': { type: 'boolean' },
       prepare: { type: 'boolean' },
       tui: { type: 'boolean' },
@@ -189,6 +197,8 @@ export async function main(argv: string[]): Promise<number> {
     maxIterations: v['max-iterations'] !== undefined ? Number(v['max-iterations']) : undefined,
     budgetUsd: v.budget !== undefined ? Number(v.budget) : undefined,
     maxCostUsd: v['max-cost'] !== undefined ? Number(v['max-cost']) : undefined,
+    mcp: v.mcp !== undefined ? v.mcp.split(',').map((s) => s.trim()).filter(Boolean) : undefined,
+    noMcp: v['no-mcp'] === true,
     safe: v.safe,
     noNudge: v['no-nudge'],
   };

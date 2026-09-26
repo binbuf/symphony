@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import type { Paths } from './paths.js';
+import type { TokenUsage } from './providers/types.js';
 import { statusFromMarkers, type Roadmap } from './roadmap.js';
 import { UsageError, atomicWriteSync, ensureDir, isRecord, nowIso } from './util.js';
 
@@ -21,6 +22,10 @@ export interface LogRef {
   started?: string;
   durationS?: number;
   costUsd?: number;
+  /** Provider-reported token usage for this session, verbatim. */
+  usage?: TokenUsage;
+  /** MCP servers this session was scoped to; absent when MCP selection is off. Empty = none. */
+  mcp?: string[];
   /** Provider/model that ran this session; differs from the task-level pair when a task escalates. */
   provider?: string;
   model?: string;
@@ -47,6 +52,8 @@ export interface TaskState {
   finished?: string;
   durationS: number;
   costUsd?: number;
+  /** Provider-reported token usage summed across this task's sessions, when any reported it. */
+  usage?: TokenUsage;
   sessionId?: string;
   provider?: string;
   model?: string;

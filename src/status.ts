@@ -1,5 +1,7 @@
 import type { Config } from './config.js';
 import type { Logger } from './logger.js';
+import { addUsage } from './providers/common.js';
+import type { TokenUsage } from './providers/types.js';
 import { patchRoadmapStatus } from './roadmap.js';
 import type { Paths } from './paths.js';
 import { DONE_STATES, type State, type TaskState, type TaskStatus } from './state.js';
@@ -33,6 +35,8 @@ export interface StatusSummary {
   done: number;
   total: number;
   costUsd: number;
+  /** Token usage summed across tasks, when any provider reported it. */
+  usage?: TokenUsage;
   durationS: number;
   blocked: string[];
   /** The task currently in flight and how long it has been running. */
@@ -95,6 +99,7 @@ export function buildStatusTable(tasks: Task[], state: State, opts: StatusTableO
   const head = ['id', 'phase', 'title', 'status', 'att', 'duration', 'start', 'end', 'cost', 'provider', 'model', 'summary'];
   const done = tasks.filter((t) => DONE_STATES.includes(state.tasks[t.id]?.status ?? 'pending')).length;
   const costUsd = tasks.reduce((a, t) => a + (state.tasks[t.id]?.costUsd ?? 0), 0);
+  const usage = tasks.reduce<TokenUsage | undefined>((a, t) => addUsage(a, state.tasks[t.id]?.usage), undefined);
   const durationS = tasks.reduce((a, t) => {
     const s = state.tasks[t.id];
     return a + (s?.status === 'running' ? runningSeconds(s) : s?.durationS ?? 0);
@@ -110,6 +115,7 @@ export function buildStatusTable(tasks: Task[], state: State, opts: StatusTableO
       done,
       total: tasks.length,
       costUsd,
+      usage,
       durationS,
       blocked,
       running: active ? { id: active.id, elapsedS: runningSeconds(state.tasks[active.id]) } : undefined,

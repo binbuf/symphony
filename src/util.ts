@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+import type { TokenUsage } from './providers/types.js';
 
 export function nowIso(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -75,6 +76,30 @@ export function fmtDuration(seconds?: number): string {
 
 export function fmtCost(usd?: number): string {
   return usd === undefined || usd === null || !Number.isFinite(usd) ? '-' : `$${usd.toFixed(2)}`;
+}
+
+/** A token count as `820` / `12.3k` / `1.2M`. */
+export function fmtCount(n?: number): string {
+  if (n === undefined || n === null || !Number.isFinite(n)) return '-';
+  if (Math.abs(n) < 1000) return String(Math.round(n));
+  if (Math.abs(n) < 1_000_000) return `${(n / 1000).toFixed(Math.abs(n) < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/**
+ * A compact usage line (`12.3k in · 4.0k cached · 1.2k out`). Cached and reasoning counts are
+ * omitted when zero so a session that simply reports `0` stays terse; undefined when nothing at all
+ * was reported.
+ */
+export function fmtUsage(u?: TokenUsage): string | undefined {
+  if (!u) return undefined;
+  const parts = [
+    u.inputTokens !== undefined ? `${fmtCount(u.inputTokens)} in` : '',
+    u.cachedInputTokens !== undefined && u.cachedInputTokens > 0 ? `${fmtCount(u.cachedInputTokens)} cached` : '',
+    u.outputTokens !== undefined ? `${fmtCount(u.outputTokens)} out` : '',
+    u.reasoningTokens !== undefined && u.reasoningTokens > 0 ? `${fmtCount(u.reasoningTokens)} reasoning` : '',
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : undefined;
 }
 
 /**

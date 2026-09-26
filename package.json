@@ -16,6 +16,7 @@
     "dev": "node --import tsx src/cli.ts",
     "mock": "node scripts/mock.mjs",
     "mock:clean": "node scripts/mock.mjs --clean",
+    "bench:mcp": "node --import tsx scripts/bench-mcp.mjs",
     "test": "node --import tsx --test --test-timeout=60000 test/**/*.test.ts",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },

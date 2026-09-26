@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { RunSinks } from './logger.js';
-import type { ClassifyHints, NormalizedEvent, Provider, ResultEvent, SpawnSpec } from './providers/types.js';
+import type { ClassifyHints, NormalizedEvent, Provider, ResultEvent, SpawnSpec, TokenUsage } from './providers/types.js';
 import { renderEvent } from './render.js';
 import { resolveSpawn } from './spawn.js';
 import { fmtTime } from './util.js';
@@ -30,6 +30,8 @@ export interface SessionOutcome {
   /** All assistant text, in order. The result block is searched here when the result text lacks it. */
   allText: string;
   costUsd?: number;
+  /** Token usage reported by the provider for this session, when it reports any. */
+  usage?: TokenUsage;
   exitCode: number | null;
   signal: string | null;
   timedOut: boolean;
@@ -65,6 +67,7 @@ export function startSession(o: SessionOpts): Session {
   let sessionId: string | undefined;
   let model: string | undefined;
   let costUsd: number | undefined;
+  let usage: TokenUsage | undefined;
   let result: ResultEvent | undefined;
   let sawError = false;
   const texts: string[] = [];
@@ -150,6 +153,7 @@ export function startSession(o: SessionOpts): Session {
         result = ev;
         sessionId = ev.sessionId ?? sessionId;
         if (ev.costUsd !== undefined) costUsd = ev.costUsd;
+        if (ev.usage !== undefined) usage = ev.usage;
         break;
       default: break;
     }
@@ -218,6 +222,7 @@ export function startSession(o: SessionOpts): Session {
     const signal = child.signalCode;
     const hints = parser.hints();
     if (costUsd === undefined && hints.costUsd !== undefined) costUsd = hints.costUsd;
+    if (usage === undefined && hints.usage !== undefined) usage = hints.usage;
     const sawResult = result !== undefined;
     if (!result) {
       result = {
@@ -228,6 +233,7 @@ export function startSession(o: SessionOpts): Session {
         costUsd,
         errorSubtype: spawnError ? 'spawn_error' : flags.timedOut ? 'timeout' : flags.stalled ? 'stall' : flags.interrupted ? 'interrupted' : exitCode ? `exit_${exitCode}` : signal ?? undefined,
         synthesized: true,
+        ...(usage ? { usage } : {}),
       };
       emit(result);
     }
@@ -237,6 +243,7 @@ export function startSession(o: SessionOpts): Session {
       model,
       allText: texts.join('\n'),
       costUsd,
+      usage,
       exitCode,
       signal,
       timedOut: flags.timedOut,

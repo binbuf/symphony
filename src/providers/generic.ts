@@ -1,5 +1,5 @@
 import { isRecord, num, str } from '../util.js';
-import { newHints, toText, tryJson } from './common.js';
+import { addUsage, newHints, toText, tryJson, usageFrom } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent } from './types.js';
 
 /**
@@ -17,6 +17,11 @@ export class GenericParser implements LineParser {
     const out: NormalizedEvent[] = [];
     const sid = str(ev.session_id) ?? str(ev.sessionId) ?? str(ev.thread_id);
     if (sid && !this.sawSession) { this.sawSession = true; out.push({ kind: 'init', sessionId: sid, model: str(ev.model) }); }
+
+    // Best-effort token usage: Gemini-style `stats` (or a flat `usage`/`tokens` object) accumulates
+    // into hints, which session.ts falls back to when the terminal result event carries none.
+    const usage = usageFrom(ev.usage) ?? usageFrom(ev.stats) ?? usageFrom(ev.token_usage) ?? usageFrom(ev.tokens);
+    if (usage) this.h.usage = addUsage(this.h.usage, usage);
 
     const type = (str(ev.type) ?? str(ev.kind) ?? '').toLowerCase();
     if (type === 'error' || ev.error !== undefined) {

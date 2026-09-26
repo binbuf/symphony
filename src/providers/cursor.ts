@@ -1,5 +1,5 @@
 import { isRecord, num, str } from '../util.js';
-import { fileBootstrap, hintFromInput, newHints, toText, tryJson } from './common.js';
+import { fileBootstrap, hintFromInput, newHints, toText, tryJson, usageFrom } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
 
 /** Cursor CLI `agent -p --output-format stream-json`. */
@@ -54,7 +54,9 @@ export class CursorParser implements LineParser {
         const ok = subtype === 'success' && ev.is_error !== true;
         const text = toText(ev.result);
         if (!ok) this.h.errorTexts.push(text);
-        return [{ kind: 'result', ok, text, sessionId: str(ev.session_id), durationMs: num(ev.duration_ms), errorSubtype: ok ? undefined : subtype }];
+        const usage = usageFrom(ev.usage);
+        if (usage) this.h.usage = usage;
+        return [{ kind: 'result', ok, text, sessionId: str(ev.session_id), durationMs: num(ev.duration_ms), errorSubtype: ok ? undefined : subtype, ...(usage ? { usage } : {}) }];
       }
       case 'error': {
         const text = toText(ev.error ?? ev.message ?? ev);
@@ -72,6 +74,7 @@ export const cursorProvider: Provider = {
   supportsBudget: false,
   supportsResume: true,
   supportsVariant: false,
+  supportsMcp: false,
   authCheckArgs: ['status', '--format', 'json'],
   buildCommand(o) {
     // `-p` is a boolean (--print); the prompt is the trailing positional.

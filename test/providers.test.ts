@@ -5,6 +5,8 @@ import { ClaudeParser, claudeProvider } from '../src/providers/claude.js';
 import { CodexParser, codexProvider } from '../src/providers/codex.js';
 import { ATTACHED_BOOTSTRAP, fileBootstrap } from '../src/providers/common.js';
 import { CursorParser, cursorProvider } from '../src/providers/cursor.js';
+import { GenericParser } from '../src/providers/generic.js';
+import { geminiProvider } from '../src/providers/gemini.js';
 import { OpenCodeParser, opencodeProvider, opencodeVersionWarning, parseModelVariants } from '../src/providers/opencode.js';
 import type { BuildCommandOpts } from '../src/providers/types.js';
 
@@ -27,6 +29,15 @@ test('claude parser: init, thinking/text/tool_use, tool_result (string and block
   assert.equal(r.kind, 'result');
   assert.deepEqual(r, { kind: 'result', ok: true, text: 'final', sessionId: 's1', costUsd: 1.5, turns: 3, errorSubtype: undefined, durationMs: 10 });
   assert.equal(p.hints().costUsd, 1.5);
+});
+
+test('claude parser: result usage sums cache reads and creations; absent usage invents no key', () => {
+  const p = new ClaudeParser();
+  const r = p.parse(j({ type: 'result', subtype: 'success', is_error: false, result: 'final', usage: { input_tokens: 100, cache_read_input_tokens: 20, cache_creation_input_tokens: 5, output_tokens: 30 } }))[0] as { usage?: unknown };
+  assert.deepEqual(r.usage, { inputTokens: 100, cachedInputTokens: 25, outputTokens: 30 });
+  assert.deepEqual(p.hints().usage, { inputTokens: 100, cachedInputTokens: 25, outputTokens: 30 });
+  const bare = new ClaudeParser().parse(j({ type: 'result', subtype: 'success', is_error: false, result: 'x' }))[0] as Record<string, unknown>;
+  assert.ok(!('usage' in bare), 'no usage on the wire means no usage property on the event');
 });
 
 test('claude parser: api_retry hints and error result', () => {
@@ -115,6 +126,19 @@ test('opencode parser: an error event exposes HTTP status, retryable, and Retry-
   assert.equal(q.hints().retryAfterSec, 15);
 });
 
+test('opencode parser: step_finish tokens accumulate, cache read/write folds into cached', () => {
+  const p = new OpenCodeParser();
+  p.parse(j({ type: 'step_finish', sessionID: 'o1', part: { tokens: { input: 100, output: 20, reasoning: 5, cache: { read: 40, write: 10 } }, cost: 0.01 } }));
+  p.parse(j({ type: 'reasoning', sessionID: 'o1', part: { text: 'more' } }));
+  p.parse(j({ type: 'step_finish', sessionID: 'o1', part: { tokens: { total: 62, input: 50, output: 8, reasoning: 0, cache: { read: 4, write: 0 } }, cost: 0.02 } }));
+  assert.deepEqual(p.hints().usage, { inputTokens: 150, cachedInputTokens: 54, outputTokens: 28, reasoningTokens: 5, totalTokens: 62 });
+  assert.equal(p.hints().costUsd, 0.03);
+  // A step with no tokens (an error step) contributes nothing.
+  const q = new OpenCodeParser();
+  q.parse(j({ type: 'step_finish', sessionID: 'o2', part: { cost: 0.5 } }));
+  assert.equal(q.hints().usage, undefined);
+});
+
 test('opencode buildCommand: prompt attached via --file, --auto by default, --session on resume', () => {
   const c = opencodeProvider.buildCommand(opts({ model: 'anthropic/x', resumeId: 'sess' }));
   assert.equal(c.args[0], 'run');
@@ -149,6 +173,8 @@ test('codex parser: thread, items, turn.completed → result with last message; 
   assert.equal((done[0] as { ok: boolean }).ok, true);
   assert.equal((done[0] as { text: string }).text.includes('status: done'), true);
   assert.equal((done[0] as { sessionId?: string }).sessionId, 'th1');
+  assert.deepEqual((done[0] as { usage?: unknown }).usage, { inputTokens: 10, cachedInputTokens: 0, outputTokens: 5 });
+  assert.deepEqual(p.hints().usage, { inputTokens: 10, cachedInputTokens: 0, outputTokens: 5 });
   const q = new CodexParser();
   const failed = q.parse(j({ type: 'turn.failed', error: { message: 'You have exceeded your usage limit' } }));
   assert.deepEqual(failed.map((e) => e.kind), ['error', 'result']);
@@ -175,6 +201,17 @@ test('codex buildCommand: full bypass by default, sandbox in safe mode, resume s
   const big = codexProvider.buildCommand(opts({ prompt: 'x'.repeat(9000) }));
   assert.equal(big.args[big.args.length - 1], '-');
   assert.equal(big.stdinPayload?.length, 9000);
+});
+
+test('generic parser: gemini-style stats models fold into hints usage', () => {
+  const p = new GenericParser();
+  p.parse(j({ session_id: 'g1', response: 'hi', stats: { models: { 'gemini-3-pro': { tokens: { input: 100, output: 10, cached: 20, thoughts: 3, total: 133 } } } } }));
+  assert.deepEqual(p.hints().usage, { inputTokens: 100, cachedInputTokens: 20, outputTokens: 10, reasoningTokens: 3, totalTokens: 133 });
+  // Plain text lines and unrelated objects stay usage-free.
+  const q = new GenericParser();
+  q.parse('just text');
+  q.parse(j({ type: 'result', subtype: 'success', response: 'done' }));
+  assert.equal(q.hints().usage, undefined);
 });
 
 test('prompt channels: bootstrap names the prompt file, never the payload', () => {
@@ -221,4 +258,11 @@ test('provider capability flags: variant support matches the CLI', () => {
   assert.equal(cursorProvider.supportsVariant, false);
   assert.equal(typeof opencodeProvider.modelVariants, 'function');
   assert.equal(claudeProvider.modelVariants, undefined);
+  // MCP scoping: claude/codex/opencode/gemini accept per-session config; cursor/antigravity do not.
+  assert.equal(claudeProvider.supportsMcp, true);
+  assert.equal(codexProvider.supportsMcp, true);
+  assert.equal(opencodeProvider.supportsMcp, true);
+  assert.equal(geminiProvider.supportsMcp, true);
+  assert.equal(cursorProvider.supportsMcp, false);
+  assert.equal(antigravityProvider.supportsMcp, false);
 });

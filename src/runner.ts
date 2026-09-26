@@ -1,5 +1,5 @@
 import { existsSync, writeFileSync } from 'node:fs';
-import { relative } from 'node:path';
+import { join, relative } from 'node:path';
 import { decideBreakdown, type BreakdownEvidence, type BreakdownStage, type BreakdownVerdict } from './breakdown.js';
 import { classifyFailure, evidenceText, makeClassified, type Classified, type FailureEvidence } from './classify.js';
 import { resolveEscalation, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
@@ -10,11 +10,13 @@ import { fireHook } from './hooks.js';
 import { classifyError, classifyEscalation, classifySessionResult, jevProblem } from './jev.js';
 import { createLogger, openRunSinks, type Logger } from './logger.js';
 import { writeTaskLog } from './logs.js';
+import { mcpPromptNote, planMcp, resolveMcpProfile } from './mcp.js';
 import { placeStop, stopPresent, type Paths } from './paths.js';
 import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
 import { applyPlan, loadProject, retargetFlags } from './project.js';
 import { getProvider, variantSupported } from './providers/index.js';
-import type { Provider, SpawnSpec } from './providers/types.js';
+import { addUsage } from './providers/common.js';
+import type { Provider, SpawnSpec, TokenUsage } from './providers/types.js';
 import { generateIndex, writeIndex } from './repomap.js';
 import { parseResultBlock, type ResultBlock } from './result.js';
 import { canonicalId, patchRoadmapFile, type Roadmap } from './roadmap.js';
@@ -82,6 +84,8 @@ export interface RunContext {
   startBranch?: string;
   /** Session cost reported during this invocation, for the provider-agnostic run budget. */
   runCostUsd?: number;
+  /** Session token usage reported during this invocation, summed across sessions and decisions. */
+  runUsage?: TokenUsage;
   /**
    * The task id to pause *before* instead of at the next boundary. Set live from the TUI: the run
    * keeps going through the tasks ahead of it and the sentinel is placed when the pipeline reaches
@@ -293,10 +297,12 @@ function mergeOutcome(first: SessionOutcome, second: SessionOutcome): SessionOut
     ...second,
     sessionId: second.sessionId ?? first.sessionId,
     allText: `${first.allText}\n${second.allText}`,
+    usage: addUsage(first.usage, second.usage),
     hints: {
       apiErrorCategories: [...first.hints.apiErrorCategories, ...second.hints.apiErrorCategories],
       errorTexts: [...first.hints.errorTexts, ...second.hints.errorTexts],
       costUsd: (first.hints.costUsd ?? 0) + (second.hints.costUsd ?? 0) || undefined,
+      usage: addUsage(first.hints.usage, second.hints.usage),
     },
   };
 }
@@ -319,12 +325,16 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
   const entry: LogRef = { kind: r.logKind, jsonl: rel(sinks.jsonlPath), log: rel(sinks.logPath), prompt: rel(sinks.promptPath), started: nowIso(), provider: spec.providerName, model: spec.model, variant: spec.variant };
   st.logs.push(entry);
 
+  const mcp = planMcp(ctx.config, r.kind === 'escalate' ? 'escalation' : 'task', task, ctx.cli, provider.name, join(paths.runs, sinks.base), (m) => log.warn(`${task.id}: mcp: ${m}`));
+  mcp?.notes.forEach((n) => log.warn(`${task.id}: mcp: ${n}`));
   const cmd = provider.buildCommand({
     bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: task.id, attempt: r.attempt, kind: r.kind,
     resumeId: r.resumeId, model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd,
-    extraArgs: spec.extraArgs, cwd: paths.root,
+    extraArgs: [...spec.extraArgs, ...(mcp?.args ?? [])], cwd: paths.root,
   });
+  if (mcp?.env) cmd.env = { ...(cmd.env ?? {}), ...mcp.env };
   log.info(`${task.id}: ${describeCmd(cmd)}`);
+  if (mcp) log.info(`${task.id}: ${mcp.label}`);
   log.info(`${task.id}: streaming to ${rel(sinks.logPath)} (raw: ${rel(sinks.jsonlPath)})`);
 
   const session = startSession({
@@ -344,6 +354,10 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
   st.durationS += Math.round(outcome.durationMs / 1000);
   if (outcome.costUsd !== undefined) st.costUsd = (st.costUsd ?? 0) + outcome.costUsd;
   ctx.runCostUsd = (ctx.runCostUsd ?? 0) + (outcome.costUsd ?? 0);
+  if (outcome.usage) {
+    st.usage = addUsage(st.usage, outcome.usage);
+    ctx.runUsage = addUsage(ctx.runUsage, outcome.usage);
+  }
   if (outcome.sessionId) st.sessionId = outcome.sessionId;
   // Record what this session reported for the docs run log: the high-level result status + summary.
   const reported = parseResultBlock(outcome.result.text) ?? parseResultBlock(outcome.allText);
@@ -351,6 +365,8 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
   entry.summary = reported?.summary || (outcome.result.ok ? snapshotText(outcome) : outcome.result.errorSubtype);
   entry.durationS = Math.round(outcome.durationMs / 1000);
   if (outcome.costUsd !== undefined) entry.costUsd = outcome.costUsd;
+  if (outcome.usage) entry.usage = outcome.usage;
+  if (mcp) entry.mcp = mcp.selected;
   saveState(paths, state);
   return outcome;
 }
@@ -470,7 +486,8 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
 }
 
 function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError: string | undefined, continuation: number, indexBody?: string): PromptCtx {
-  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, variant: spec.variant, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody, visionNote: ctx.config.vision.enabled ? visionPromptNote() : undefined };
+  const mcpProfile = resolveMcpProfile(ctx.config, 'task', task, ctx.cli);
+  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, variant: spec.variant, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody, visionNote: ctx.config.vision.enabled ? visionPromptNote() : undefined, mcpNote: mcpProfile ? mcpPromptNote(mcpProfile) : undefined };
 }
 
 /** Abortable, STOP- and split-aware backoff. Returns true when the run should stop waiting. */
@@ -1026,9 +1043,13 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       const tProvider = getProvider(rs.spec.providerName);
       const st = state.tasks[t.id] ?? newTaskState(t.title);
       const prompt = buildTaskPrompt(promptCtx(ctx, t, { ...st, attempts: st.attempts + 1 }, rs.spec, st.lastError?.message, 0, previewIndex));
-      const cmd = tProvider.buildCommand({ bin: rs.spec.bin, prompt, promptFile: `${paths.runs}/${t.id}-<stamp>.prompt.md`, taskId: t.id, attempt: st.attempts + 1, kind: 'task', model: rs.spec.model, variant: rs.spec.variant, autoApprove: rs.spec.autoApprove, budgetUsd: rs.spec.budgetUsd, extraArgs: rs.spec.extraArgs, cwd: paths.root });
+      const mcp = planMcp(config, 'task', t, ctx.cli, rs.spec.providerName, join(paths.runs, `${t.id}-dry-run`), (m) => log.warn(`${t.id}: mcp: ${m}`));
+      mcp?.notes.forEach((n) => log.warn(`${t.id}: mcp: ${n}`));
+      const cmd = tProvider.buildCommand({ bin: rs.spec.bin, prompt, promptFile: `${paths.runs}/${t.id}-<stamp>.prompt.md`, taskId: t.id, attempt: st.attempts + 1, kind: 'task', model: rs.spec.model, variant: rs.spec.variant, autoApprove: rs.spec.autoApprove, budgetUsd: rs.spec.budgetUsd, extraArgs: [...rs.spec.extraArgs, ...(mcp?.args ?? [])], cwd: paths.root });
+      if (mcp?.env) cmd.env = { ...(cmd.env ?? {}), ...mcp.env };
       log.plain(`\n=== ${t.id} — ${t.title}`);
       log.plain(`provider: ${rs.spec.providerName} [${rs.spec.sources.provider}] · model: ${rs.spec.model ?? 'provider default'} [${rs.spec.sources.model}]${rs.spec.variant ? ` · variant: ${rs.spec.variant} [${rs.spec.sources.variant}]` : ''} · timeout ${rs.spec.timeoutMin} min · idle ${rs.spec.idleTimeoutMin} min · auto-approve ${rs.spec.autoApprove}`);
+      if (mcp) log.plain(mcp.label);
       const esc = resolveEscalation(config, rs.spec, (p) => getProvider(p).supportsBudget, variantSupported);
       if (esc) log.plain(`escalation: ${esc.spec.providerName} · ${esc.spec.model}${esc.spec.variant ? ` · variant ${esc.spec.variant}` : ''} if the task fails (${config.escalation.onCategories.join(', ')}; max ${config.escalation.maxAttempts} session${config.escalation.maxAttempts === 1 ? '' : 's'})`);
       const bd = config.breakdown;

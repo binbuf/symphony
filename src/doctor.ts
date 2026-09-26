@@ -8,7 +8,7 @@ import { opencodeVersionWarning } from './providers/opencode.js';
 import type { Provider } from './providers/types.js';
 import { haltResumeHint, liveLock, type State } from './state.js';
 import { resolveSpawn } from './spawn.js';
-import { isPathLike, resolveBinary } from './util.js';
+import { isPathLike, resolveBinary, resolveExecutable } from './util.js';
 import { visionProblem } from './vision.js';
 import { slackProblem } from './slack.js';
 
@@ -152,6 +152,20 @@ export function runDoctor(i: DoctorInput): Check[] {
     const problem = visionProblem(v, process.env);
     const detail = `vision tool via ${v.provider} · ${v.model} (key from ${v.apiKeyEnv})`;
     add('vision', problem ? 'warn' : 'ok', problem ? `vision is on but ${problem}; the tool will fail until this is fixed (set ${v.apiKeyEnv}, or vision.enabled=false). ${detail}` : detail);
+  }
+
+  if (i.config.mcp.enabled) {
+    const servers = Object.entries(i.config.mcp.servers);
+    const nameOnly = servers.filter(([, s]) => !s.command?.length && !s.url).map(([name]) => name);
+    const scoped = [i.provider, ...(i.extraProviders ?? []).map((e) => e.provider)].filter((p): p is Provider => p !== undefined);
+    const unsupported = [...new Set(scoped.filter((p) => !p.supportsMcp).map((p) => p.name))];
+    const detail = `sessions are scoped to the selected MCP servers · ${servers.length} server(s) defined/known`;
+    if (unsupported.length) add('mcp', 'warn', `${detail}; ${unsupported.join(', ')} cannot scope MCP per session and keeps its own config (list servers by name for Gemini's allowlist to still exclude them)`);
+    else add('mcp', 'ok', detail);
+    if (nameOnly.length) add('mcp', 'warn', `mcp.servers without a command/url cannot be enabled or disabled inline: ${nameOnly.join(', ')}; Gemini's allowlist can still exclude them by name`);
+    for (const [name, s] of servers) {
+      if (s.command?.length && !resolveExecutable(s.command[0])) add('mcp', 'warn', `mcp.servers.${name}: "${s.command[0]}" is not on PATH; the client will fail to connect unless it is configured elsewhere`);
+    }
   }
 
   if (i.config.slack.enabled) {

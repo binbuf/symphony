@@ -13,6 +13,7 @@ export const antigravityProvider: Provider = {
   supportsBudget: false,
   supportsResume: false,
   supportsVariant: true,
+  supportsMcp: false,
   buildCommand(o) {
     const args = ['-p', '--output-format', 'json', '--workspace', o.cwd];
     if (o.autoApprove) args.push('--dangerously-skip-permissions');

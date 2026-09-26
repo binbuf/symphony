@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import type { Paths } from './paths.js';
 import type { TaskState } from './state.js';
 import type { Task } from './tasks.js';
-import { atomicWriteSync, ensureDir, fmtCost, fmtDateTime, fmtDuration, type TimeZone } from './util.js';
+import { atomicWriteSync, ensureDir, fmtCost, fmtDateTime, fmtDuration, fmtUsage, type TimeZone } from './util.js';
 
 /** One markdown file per task in the docs logs dir: `T01.md`. */
 export function taskLogPath(paths: Paths, id: string): string {
@@ -33,6 +33,7 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
   lines.push(bullet('Provider', st.provider ? `${st.provider}${st.model ? ` · model: ${st.model}` : ''}${st.variant ? ` · variant: ${st.variant}` : ''}` : undefined));
   lines.push(bullet('Duration', fmtDuration(st.durationS || undefined)));
   lines.push(bullet('Cost', st.costUsd === undefined ? undefined : fmtCost(st.costUsd)));
+  lines.push(bullet('Tokens', fmtUsage(st.usage)));
   lines.push(bullet('Attempts', String(st.attempts)));
   lines.push(bullet('Commit', st.commit ?? opts.commitPreview));
   lines.push('');
@@ -65,11 +66,13 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
         l.started ? `started ${l.started}` : undefined,
         l.durationS !== undefined ? fmtDuration(l.durationS) : undefined,
         l.costUsd !== undefined ? fmtCost(l.costUsd) : undefined,
+        fmtUsage(l.usage),
       ].filter(Boolean);
       lines.push(`### ${i + 1} · ${l.kind}${parts.length ? ` · ${parts.join(' · ')}` : ''}`);
       lines.push('');
       lines.push(`- summary: ${l.summary?.trim() || '_(none)_'}`);
       if (l.provider) lines.push(`- model: ${l.provider}${l.model ? ` · ${l.model}` : ''}${l.variant ? ` · variant ${l.variant}` : ''}`);
+      if (l.mcp) lines.push(`- mcp: ${l.mcp.length ? l.mcp.join(', ') : 'none'}`);
       lines.push(`- raw: ${l.jsonl} · log: ${l.log} · prompt: ${l.prompt}`);
       lines.push('');
     });

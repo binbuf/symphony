@@ -1,6 +1,20 @@
 import { isRecord, num, str } from '../util.js';
-import { hintFromInput, newHints, toText, tryJson } from './common.js';
-import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
+import { compactUsage, hintFromInput, newHints, sumCounts, toText, tryJson } from './common.js';
+import type { ClassifyHints, LineParser, NormalizedEvent, Provider, TokenUsage } from './types.js';
+
+/**
+ * Claude Code's result `usage`: `input_tokens` excludes cache activity, and cache reads/creations
+ * are reported separately, so both are summed into `cachedInputTokens`.
+ */
+function claudeUsage(x: unknown): TokenUsage | undefined {
+  if (!isRecord(x)) return undefined;
+  return compactUsage({
+    inputTokens: num(x.input_tokens),
+    cachedInputTokens: sumCounts(num(x.cache_read_input_tokens), num(x.cache_creation_input_tokens)),
+    outputTokens: num(x.output_tokens),
+    totalTokens: num(x.total_tokens),
+  });
+}
 
 /**
  * Claude Code `claude -p --output-format stream-json --verbose`.
@@ -60,10 +74,13 @@ export class ClaudeParser implements LineParser {
         }
         const cost = num(ev.total_cost_usd);
         if (cost !== undefined) this.h.costUsd = cost;
+        const usage = claudeUsage(ev.usage);
+        if (usage) this.h.usage = usage;
         return [{
           kind: 'result', ok, text,
           sessionId: str(ev.session_id), costUsd: cost, turns: num(ev.num_turns),
           errorSubtype: ok ? undefined : subtype, durationMs: num(ev.duration_ms),
+          ...(usage ? { usage } : {}),
         }];
       }
       default:
@@ -77,6 +94,7 @@ export const claudeProvider: Provider = {
   supportsBudget: true,
   supportsResume: true,
   supportsVariant: true,
+  supportsMcp: true,
   authCheckArgs: ['auth', 'status'],
   buildCommand(o) {
     // Prompt goes over stdin (avoids argv limits; the predecessor harness ran ~70 sessions this way).

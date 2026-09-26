@@ -27,6 +27,21 @@ export interface SpawnSpec {
   env?: Record<string, string>;
 }
 
+/**
+ * Provider-reported token usage for one session, recorded as the provider spells it. Semantics
+ * differ (for OpenAI-style usage `inputTokens` includes cached tokens; for Anthropic-style it
+ * excludes cache reads/creations, which are summed into `cachedInputTokens`), so fields are never
+ * synthesised: a provider that does not report a distinction leaves the field undefined.
+ */
+export interface TokenUsage {
+  inputTokens?: number;
+  /** Input served from / written to the prompt cache, where the provider reports it separately. */
+  cachedInputTokens?: number;
+  outputTokens?: number;
+  reasoningTokens?: number;
+  totalTokens?: number;
+}
+
 export type NormalizedEvent =
   | { kind: 'init'; sessionId: string; model?: string }
   | { kind: 'thinking'; text: string }
@@ -47,6 +62,8 @@ export interface ResultEvent {
   errorSubtype?: string;
   durationMs?: number;
   synthesized?: boolean;
+  /** Token usage the provider reported with this result, when it reports it on the result event. */
+  usage?: TokenUsage;
 }
 
 export interface ClassifyHints {
@@ -59,6 +76,8 @@ export interface ClassifyHints {
   retryable?: boolean;
   /** Server-requested delay before the next attempt, in seconds (Retry-After). */
   retryAfterSec?: number;
+  /** Token usage accumulated across the session's events, when the provider reports it. */
+  usage?: TokenUsage;
 }
 
 export interface LineParser {
@@ -72,6 +91,8 @@ export interface Provider {
   readonly supportsResume: boolean;
   /** Whether the CLI has a reasoning-effort / variant knob the harness can set. */
   readonly supportsVariant: boolean;
+  /** Whether a session's MCP servers can be scoped per invocation by the adapter (see src/mcp.ts). */
+  readonly supportsMcp: boolean;
   /**
    * The variant ids a model advertises, when the provider exposes a per-model catalog (OpenCode
    * does). `undefined` means the catalog could not be read, so support is unknown; a provider with

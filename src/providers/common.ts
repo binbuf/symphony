@@ -1,5 +1,5 @@
-import { isRecord, squash, str } from '../util.js';
-import type { ClassifyHints } from './types.js';
+import { isRecord, num, squash, str } from '../util.js';
+import type { ClassifyHints, TokenUsage } from './types.js';
 
 export function tryJson(line: string): unknown {
   try { return JSON.parse(line); } catch { return undefined; }
@@ -37,6 +37,71 @@ export function hintFromInput(input: unknown): string {
 
 export function newHints(): ClassifyHints {
   return { apiErrorCategories: [], errorTexts: [] };
+}
+
+/** Sum two optional counts, treating undefined as zero; undefined only when both are missing. */
+export function sumCounts(a: number | undefined, b: number | undefined): number | undefined {
+  if (a === undefined && b === undefined) return undefined;
+  return (a ?? 0) + (b ?? 0);
+}
+
+/** Keep only the fields a provider actually reported; undefined when nothing was reported. */
+export function compactUsage(u: TokenUsage | undefined): TokenUsage | undefined {
+  if (!u) return undefined;
+  const out: TokenUsage = {};
+  if (u.inputTokens !== undefined) out.inputTokens = u.inputTokens;
+  if (u.cachedInputTokens !== undefined) out.cachedInputTokens = u.cachedInputTokens;
+  if (u.outputTokens !== undefined) out.outputTokens = u.outputTokens;
+  if (u.reasoningTokens !== undefined) out.reasoningTokens = u.reasoningTokens;
+  if (u.totalTokens !== undefined) out.totalTokens = u.totalTokens;
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** Field-wise sum of two usage records (e.g. per-step totals, or a nudge added to a session). */
+export function addUsage(a: TokenUsage | undefined, b: TokenUsage | undefined): TokenUsage | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return compactUsage({
+    inputTokens: sumCounts(a.inputTokens, b.inputTokens),
+    cachedInputTokens: sumCounts(a.cachedInputTokens, b.cachedInputTokens),
+    outputTokens: sumCounts(a.outputTokens, b.outputTokens),
+    reasoningTokens: sumCounts(a.reasoningTokens, b.reasoningTokens),
+    totalTokens: sumCounts(a.totalTokens, b.totalTokens),
+  });
+}
+
+/**
+ * Best-effort usage from a provider record, tolerant of the spellings the supported CLIs use:
+ * Anthropic `input_tokens`/`cache_read_input_tokens`, OpenAI `input_tokens`/`cached_input_tokens`,
+ * Gemini `*TokenCount`, and a Gemini-style stats object
+ * (`{ models: { <id>: { tokens: { input, output, cached, thoughts, total } } } }`). Nothing is
+ * synthesised, so a field the provider does not distinguish stays undefined.
+ */
+export function usageFrom(record: unknown): TokenUsage | undefined {
+  if (!isRecord(record)) return undefined;
+  const flat = compactUsage({
+    inputTokens: num(record.input_tokens) ?? num(record.inputTokens) ?? num(record.prompt_tokens) ?? num(record.promptTokens) ?? num(record.promptTokenCount),
+    cachedInputTokens: num(record.cached_input_tokens) ?? num(record.cachedInputTokens) ?? num(record.cache_read_input_tokens) ?? num(record.cacheReadInputTokens) ?? num(record.cachedContentTokenCount),
+    outputTokens: num(record.output_tokens) ?? num(record.outputTokens) ?? num(record.completion_tokens) ?? num(record.completionTokens) ?? num(record.candidatesTokenCount),
+    reasoningTokens: num(record.reasoning_tokens) ?? num(record.reasoningTokens) ?? num(record.reasoning_output_tokens) ?? num(record.thoughtsTokenCount),
+    totalTokens: num(record.total_tokens) ?? num(record.totalTokens) ?? num(record.totalTokenCount),
+  });
+  if (flat) return flat;
+  const models = record.models;
+  if (!isRecord(models)) return undefined;
+  let agg: TokenUsage | undefined;
+  for (const m of Object.values(models)) {
+    const tokens = isRecord(m) && isRecord(m.tokens) ? m.tokens : isRecord(m) ? m : undefined;
+    if (!tokens) continue;
+    agg = addUsage(agg, compactUsage({
+      inputTokens: num(tokens.input) ?? num(tokens.inputTokens) ?? num(tokens.promptTokenCount),
+      cachedInputTokens: num(tokens.cached) ?? num(tokens.cachedInputTokens) ?? num(tokens.cachedContentTokenCount),
+      outputTokens: num(tokens.output) ?? num(tokens.outputTokens) ?? num(tokens.candidatesTokenCount),
+      reasoningTokens: num(tokens.thoughts) ?? num(tokens.reasoningTokens) ?? num(tokens.thoughtsTokenCount),
+      totalTokens: num(tokens.total) ?? num(tokens.totalTokens) ?? num(tokens.totalTokenCount),
+    }));
+  }
+  return agg;
 }
 
 /**

@@ -2,13 +2,15 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join, relative } from 'node:path';
 import { classifyFailure } from './classify.js';
 import { scaffoldDocs } from './commands.js';
-import { resolveSession, type SessionSpec } from './config.js';
+import { resolveSession, type McpSessionKind, type SessionSpec } from './config.js';
 import { docsContract } from './contract.js';
 import { commitAll, currentBranch, describeCommit, ensureGitignore } from './git.js';
 import { docsTree, formatLint, lintDocs, type LintReport } from './lint.js';
 import { openRunSinks } from './logger.js';
+import { planMcp } from './mcp.js';
 import { rel, stopIgnoreEntry } from './paths.js';
 import { getProvider, variantSupported } from './providers/index.js';
+import { addUsage } from './providers/common.js';
 import type { Provider } from './providers/types.js';
 import { parseResultBlock, type ResultBlock } from './result.js';
 import { describeCmd, haltBanner, outcomeEvidence, preflight, type RunContext } from './runner.js';
@@ -87,11 +89,15 @@ export async function runDocsSession(
   ensureDir(paths.runs);
   const sinks = openRunSinks(paths.runs, `${opts.runName}-${stamp()}`);
   writeFileSync(sinks.promptPath, opts.prompt);
+  const mcpKind: McpSessionKind = opts.runName === 'replan' ? 'replan' : opts.runName.startsWith('split') ? 'split' : 'prepare';
+  const mcp = planMcp(config, mcpKind, undefined, ctx.cli, provider.name, join(paths.runs, sinks.base), (m) => log.warn(`${opts.taskId}: mcp: ${m}`));
+  mcp?.notes.forEach((n) => log.warn(`${opts.taskId}: mcp: ${n}`));
   const cmd = provider.buildCommand({
     bin: spec.bin, prompt: opts.prompt, promptFile: sinks.promptPath, taskId: opts.taskId, attempt: 1, kind: 'task',
-    model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd, extraArgs: spec.extraArgs, cwd: paths.root,
+    model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd, extraArgs: [...spec.extraArgs, ...(mcp?.args ?? [])], cwd: paths.root,
   });
-  log.info(`=== ${opts.label} with ${spec.providerName} · model ${spec.model ?? 'default'}${spec.variant ? ` · variant ${spec.variant}` : ''}`);
+  if (mcp?.env) cmd.env = { ...(cmd.env ?? {}), ...mcp.env };
+  log.info(`=== ${opts.label} with ${spec.providerName} · model ${spec.model ?? 'default'}${spec.variant ? ` · variant ${spec.variant}` : ''}${mcp ? ` · ${mcp.label}` : ''}`);
   log.info(`${opts.taskId}: ${describeCmd(cmd)}`);
   log.info(`${opts.taskId}: streaming to ${relative(paths.root, sinks.logPath)}`);
 
@@ -106,6 +112,7 @@ export async function runDocsSession(
   ctx.active = undefined;
   await sinks.close();
   ctx.runCostUsd = (ctx.runCostUsd ?? 0) + (out.costUsd ?? 0);
+  ctx.runUsage = addUsage(ctx.runUsage, out.usage);
 
   if (out.interrupted || ctx.interrupted) {
     log.warn(`${opts.label} interrupted; ${docsRel}/ may be half-written (check git status)`);

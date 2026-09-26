@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { resolveWatch, type Config, type SessionSpec } from './config.js';
 import { parseProgressSections } from './context.js';
 import { openRunSinks } from './logger.js';
+import { planMcp } from './mcp.js';
 import { rel, type Paths } from './paths.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import type { Provider } from './providers/types.js';
@@ -307,10 +308,14 @@ async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider, 
     sessionJsonl: rel(ctx.paths.root, sinks.jsonlPath),
     sessionPrompt: rel(ctx.paths.root, sinks.promptPath),
   };
+  const mcp = planMcp(ctx.config, 'watch', undefined, ctx.cli, provider.name, join(ctx.paths.runs, sinks.base), (m) => ctx.log.warn(`${WATCH_TASK_ID}: mcp: ${m}`));
+  mcp?.notes.forEach((n) => ctx.log.warn(`${WATCH_TASK_ID}: mcp: ${n}`));
   const cmd = provider.buildCommand({
     bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: WATCH_TASK_ID, attempt: 1, kind: 'task',
-    model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, readOnly: spec.readOnly, extraArgs: spec.extraArgs, cwd: ctx.paths.root,
+    model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, readOnly: spec.readOnly, extraArgs: [...spec.extraArgs, ...(mcp?.args ?? [])], cwd: ctx.paths.root,
   });
+  if (mcp?.env) cmd.env = { ...(cmd.env ?? {}), ...mcp.env };
+  if (mcp) ctx.log.info(`${WATCH_TASK_ID}: ${mcp.label}`);
   const session = startSession({
     spec: cmd, provider, cwd: ctx.paths.root,
     timeoutMs: spec.timeoutMin * 60_000,

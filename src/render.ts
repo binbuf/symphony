@@ -1,5 +1,5 @@
 import type { NormalizedEvent } from './providers/types.js';
-import { clip, squash } from './util.js';
+import { clip, fmtUsage, squash } from './util.js';
 
 const C = { reset: '\x1b[0m', dim: '\x1b[2m', bold: '\x1b[1m', red: '\x1b[31m', green: '\x1b[32m', yellow: '\x1b[33m', magenta: '\x1b[35m', cyan: '\x1b[36m' };
 
@@ -31,6 +31,7 @@ export function renderEvent(ev: NormalizedEvent, o: RenderOpts): string | null {
       const head = ev.ok ? paint(C.green, '[result] ok') : paint(C.red, `[result] ERROR${ev.errorSubtype ? ` ${ev.errorSubtype}` : ''}`);
       const meta = [
         ev.costUsd !== undefined ? `$${ev.costUsd.toFixed(2)}` : '',
+        fmtUsage(ev.usage) ?? '',
         ev.turns !== undefined ? `${ev.turns} turns` : '',
         ev.durationMs !== undefined ? `${Math.round(ev.durationMs / 1000)}s` : '',
         ev.synthesized ? 'synthesized' : '',

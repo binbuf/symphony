@@ -54,6 +54,29 @@ test('normal session: events accumulate, result captured, files written', async 
   assert.equal(jsonl.length, 4);
 });
 
+test('provider-reported token usage lands on the outcome and the rendered result line', async () => {
+  const { s, sinks } = run(script([
+    { type: 'system', subtype: 'init', session_id: 'abc' },
+    { type: 'result', subtype: 'success', is_error: false, result: 'ok', usage: { input_tokens: 100, cache_read_input_tokens: 20, cache_creation_input_tokens: 5, output_tokens: 30 } },
+  ]));
+  const out = await s.done;
+  await sinks.close();
+  assert.deepEqual(out.usage, { inputTokens: 100, cachedInputTokens: 25, outputTokens: 30 });
+  assert.deepEqual(out.result.usage, { inputTokens: 100, cachedInputTokens: 25, outputTokens: 30 });
+  assert.match(readFileSync(sinks.logPath, 'utf8'), /\[result\] ok \(100 in · 25 cached · 30 out\)/);
+});
+
+test('SpawnSpec.env reaches the child (the OpenCode 1.x MCP content channel)', async () => {
+  const js = `
+    process.stdin.resume(); process.stdin.on('data', () => {});
+    process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: process.env.OPENCODE_CONFIG_CONTENT ?? 'MISSING' }) + '\\n');
+    process.exit(0);`;
+  const { s, sinks } = run(js, { spec: { bin: process.execPath, args: ['-e', js], stdinPayload: 'x', env: { OPENCODE_CONFIG_CONTENT: '{"mcp":{"ghidra":{"enabled":false}}}' } } });
+  const out = await s.done;
+  await sinks.close();
+  assert.equal(out.result.text, '{"mcp":{"ghidra":{"enabled":false}}}');
+});
+
 test('exit without result → synthesized error result, stderr captured', async () => {
   const { s, sinks } = run(script([{ type: 'system', subtype: 'init', session_id: 'x' }], 2, 'Error: Not logged in'));
   const out = await s.done;

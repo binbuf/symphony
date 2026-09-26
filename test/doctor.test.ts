@@ -64,6 +64,29 @@ test('doctor fails clearly when a configured binary path does not exist', () => 
   assert.match(fail?.detail ?? '', /configured binary .* not found at/);
 });
 
+test('doctor reports MCP scoping: defined servers, name-only entries and unsupported clients', () => {
+  const { paths, state } = project();
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    mcp: {
+      ...DEFAULTS.mcp,
+      enabled: true,
+      servers: { ghidra: { command: [process.execPath] }, ghost: {} },
+      defaultServers: ['ghidra'],
+    },
+  };
+  const spec = resolveSession(config, undefined, {}, {}).spec;
+  const checks = runDoctor({ paths, config, state, spec, provider: getProvider('fake') });
+  const mcp = checks.filter((c) => c.name === 'mcp');
+  assert.ok(mcp.length >= 2, `expected mcp checks, got ${JSON.stringify(checks)}`);
+  assert.ok(mcp.some((c) => /cannot scope MCP per session/.test(c.detail)), 'fake provider cannot scope MCP');
+  assert.ok(mcp.some((c) => /without a command\/url/.test(c.detail) && /ghost/.test(c.detail)));
+
+  const off = runDoctor({ paths, config: { ...config, mcp: { ...config.mcp, enabled: false } }, state, spec, provider: getProvider('fake') });
+  assert.equal(off.filter((c) => c.name === 'mcp').length, 0, 'nothing is reported while MCP selection is off');
+});
+
 test('doctor fails on a lock held by a live process and on a sticky halt', async () => {
   const { paths, state } = project();
   mkdirSync(paths.symphony, { recursive: true });

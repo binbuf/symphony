@@ -48,6 +48,12 @@ test('parseRoadmap finds tasks, normalises ids, keeps phases and links', () => {
   assert.equal(t6.tag, 'accepted');
 });
 
+test('parseRoadmap still finds tasks when one line ending differs from the rest', () => {
+  // A single CRLF among LF lines must not collapse the file into a single line.
+  const mixed = '# R\n\n## Phase 1\n\n- [ ] T01 - One\n- [ ] T02 - Two\r\n';
+  assert.deepEqual(parseRoadmap(mixed).bullets.map((b) => b.id), ['T01', 'T02']);
+});
+
 test('statusFromMarkers maps [x]/[~]/tags', () => {
   const rm = parseRoadmap(SAMPLE);
   assert.deepEqual(rm.bullets.map(statusFromMarkers), ['pending', 'done', 'failed', 'pending', 'accepted']);

@@ -11,7 +11,7 @@ import { canonicalId, patchRoadmapFile } from './roadmap.js';
 import { DONE_STATES, haltResumeHint, saveState, type State } from './state.js';
 import { buildStatusTable, formatStatusRow, statusColumnWidths, updatePipelineStatus } from './status.js';
 import type { Task } from './tasks.js';
-import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso } from './util.js';
+import { UsageError, ensureDir, fmtCost, fmtDuration, fmtUsage, nowIso } from './util.js';
 
 function writeIfMissing(path: string, content: string, created: string[]): void {
   if (existsSync(path)) return;
@@ -68,8 +68,9 @@ export function statusCommand(paths: Paths, config: Config, state: State, tasks:
   log.plain(widths.map((w) => '-'.repeat(w)).join('  '));
   table.rows.forEach((r) => log.plain(formatStatusRow(r, widths)));
 
-  const { done, costUsd, durationS, blocked } = table.summary;
-  log.plain(`\n${done}/${tasks.length} done · ${fmtDuration(durationS || undefined)} · ${fmtCost(costUsd || undefined)} · default provider ${config.provider}${activeSet ? ` · task set ${activeSet}` : ''}${blocked.length ? ` · awaiting a human: ${blocked.join(' ')}` : ''}${stopPresent(paths) ? ` · STOP present (${rel(paths.root, paths.stop)})` : ''}`);
+  const { done, costUsd, durationS, blocked, usage } = table.summary;
+  const tokens = fmtUsage(usage);
+  log.plain(`\n${done}/${tasks.length} done · ${fmtDuration(durationS || undefined)} · ${fmtCost(costUsd || undefined)}${tokens ? ` · ${tokens}` : ''} · default provider ${config.provider}${activeSet ? ` · task set ${activeSet}` : ''}${blocked.length ? ` · awaiting a human: ${blocked.join(' ')}` : ''}${stopPresent(paths) ? ` · STOP present (${rel(paths.root, paths.stop)})` : ''}`);
   return 0;
 }
 

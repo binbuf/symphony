@@ -1,7 +1,9 @@
 import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { resolveBreakdown, type BreakdownConfig, type Config } from './config.js';
 import { classifyBreakdown, jevProblem, type BreakdownStage } from './jev.js';
 import { openRunSinks, type Logger } from './logger.js';
+import { planMcp } from './mcp.js';
 import type { Paths } from './paths.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { startSession } from './session.js';
@@ -232,10 +234,13 @@ async function askBreakdownLlm(config: Config, ev: BreakdownEvidence, deps: Brea
     const sinks = openRunSinks(paths.runs, `breakdown-${ev.stage}-${ev.task.id}-${stamp()}`);
     const prompt = buildBreakdownPrompt(ev, breakdownGate(config.breakdown, ev).why);
     writeFileSync(sinks.promptPath, prompt);
+    const mcp = planMcp(config, 'breakdown', undefined, {}, provider.name, join(paths.runs, sinks.base), (m) => log?.warn(`${ev.task.id}: mcp: ${m}`));
+    mcp?.notes.forEach((n) => log?.warn(`${ev.task.id}: mcp: ${n}`));
     const cmd = provider.buildCommand({
       bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: `breakdown-${ev.stage}`, attempt: 1, kind: 'task',
-      model: spec.model, variant: spec.variant, autoApprove: false, extraArgs: spec.extraArgs, cwd: paths.root,
+      model: spec.model, variant: spec.variant, autoApprove: false, extraArgs: [...spec.extraArgs, ...(mcp?.args ?? [])], cwd: paths.root,
     });
+    if (mcp?.env) cmd.env = { ...(cmd.env ?? {}), ...mcp.env };
     log?.info(`${ev.task.id}: ${cmd.bin} ${cmd.args.join(' ')}`.slice(0, 400));
     const session = startSession({
       spec: cmd, provider, cwd: paths.root,

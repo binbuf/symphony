@@ -12,6 +12,7 @@ export const geminiProvider: Provider = {
   supportsBudget: false,
   supportsResume: false,
   supportsVariant: false,
+  supportsMcp: true,
   buildCommand(o) {
     const args = ['--output-format', 'json'];
     if (o.model) args.push('--model', o.model);

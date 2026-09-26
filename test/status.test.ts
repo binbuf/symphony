@@ -87,6 +87,23 @@ test('statusCommand shows start and end datetime stamps in the table', () => {
   assert.match(out, /1\/3 done · 50 min/);
 });
 
+test('statusCommand sums provider-reported token usage into the footer', () => {
+  const paths = resolvePaths(mkdtempSync(join(tmpdir(), 'symphony-status-usage-')));
+  const tasks = [task('T01', 1, 'Phase 1'), task('T02', 2, 'Phase 1')];
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: { ...newTaskState('t1'), status: 'done', usage: { inputTokens: 1000, cachedInputTokens: 200, outputTokens: 100 } },
+      T02: { ...newTaskState('t2'), status: 'done', usage: { inputTokens: 500, outputTokens: 50 } },
+    },
+  };
+  const table = buildStatusTable(tasks, state);
+  assert.deepEqual(table.summary.usage, { inputTokens: 1500, cachedInputTokens: 200, outputTokens: 150 });
+  const { log, lines } = captureLogger();
+  assert.equal(statusCommand(paths, DEFAULTS, state, tasks, log, false), 0);
+  assert.match(lines.join('\n'), /1\.5k in · 200 cached · 150 out/);
+});
+
 test('statusCommand splits a task into a parent line plus one line per session run', () => {
   const paths = resolvePaths(mkdtempSync(join(tmpdir(), 'symphony-status-split-')));
   const tasks = [task('T01', 1, 'Phase 1')];

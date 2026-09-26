@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { resolveSpawn } from '../spawn.js';
 import { isRecord, bool, num, str } from '../util.js';
-import { ATTACHED_BOOTSTRAP, hintFromInput, newHints, toText, tryJson } from './common.js';
+import { ATTACHED_BOOTSTRAP, addUsage, compactUsage, hintFromInput, newHints, sumCounts, toText, tryJson } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
 
 /**
@@ -43,6 +43,20 @@ export class OpenCodeParser implements LineParser {
       case 'step_finish': {
         const cost = num(part.cost);
         if (cost !== undefined) this.h.costUsd = (this.h.costUsd ?? 0) + cost;
+        // OpenCode 1.x `step-finish` part tokens: { total?, input, output, reasoning, cache: { read, write } }.
+        // `input` is already net of cache reads/writes (packages/opencode/src/session/session.ts getUsage),
+        // `output` excludes reasoning, and this part is emitted once per step, so the session sums them.
+        const tokens = isRecord(part.tokens) ? part.tokens : undefined;
+        if (tokens) {
+          const cache = isRecord(tokens.cache) ? tokens.cache : {};
+          this.h.usage = addUsage(this.h.usage, compactUsage({
+            inputTokens: num(tokens.input),
+            cachedInputTokens: sumCounts(num(cache.read), num(cache.write)),
+            outputTokens: num(tokens.output),
+            reasoningTokens: num(tokens.reasoning),
+            totalTokens: num(tokens.total),
+          }));
+        }
         break;
       }
       case 'error': {
@@ -205,6 +219,7 @@ export const opencodeProvider: Provider = {
   supportsBudget: false,
   supportsResume: true,
   supportsVariant: true,
+  supportsMcp: true,
   modelVariants: opencodeModelVariants,
   authCheckArgs: ['auth', 'list'],
   buildCommand(o) {

@@ -103,7 +103,8 @@ function cleanTitle(rest: string): { title: string; link?: string } {
 
 export function parseRoadmap(text: string): Roadmap {
   const eol: '\n' | '\r\n' = text.includes('\r\n') ? '\r\n' : '\n';
-  const lines = text.split(eol);
+  // Split on both endings: a single CRLF among LF lines must not collapse the file into one line.
+  const lines = text.split(/\r\n|\n/);
   const bullets: Bullet[] = [];
   const seen = new Map<string, number>();
   let phase = '(no phase)';

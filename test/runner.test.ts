@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -88,6 +88,23 @@ test('a task that reports continue is re-run in a fresh session until done, comm
     const log = execFileSync('git', ['-C', dir, 'log', '--oneline'], { encoding: 'utf8' });
     assert.match(log, /T01: Do the thing \[continue\]/);
     assert.match(log, /T01: Do the thing \[done\]/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('an mcp selection reaches the task prompt and the run log', async () => {
+  const { paths, task } = project();
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 3, mcp: { ...DEFAULTS.mcp, enabled: true, servers: { ghidra: { command: ['ghidra-mcp'] } }, defaultServers: ['ghidra'] } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    const prompts = readdirSync(paths.runs).filter((f) => f.endsWith('.prompt.md')).map((f) => readFileSync(join(paths.runs, f), 'utf8')).join('\n');
+    assert.match(prompts, /MCP: this session has 1 MCP server\(s\) enabled \(ghidra\)/);
+    assert.deepEqual(state.tasks.T01.logs.map((l) => l.mcp), [['ghidra'], ['ghidra']]);
+    assert.match(readFileSync(join(paths.logsDir, 'T01.md'), 'utf8'), /- mcp: ghidra/);
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

@@ -1,5 +1,5 @@
 import { isRecord, num, str } from '../util.js';
-import { hintFromInput, newHints, toText, tryJson } from './common.js';
+import { hintFromInput, newHints, toText, tryJson, usageFrom, addUsage } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
 
 /**
@@ -91,10 +91,11 @@ export class CodexParser implements LineParser {
       case 'item.updated': return isRecord(ev.item) ? this.itemEvents(ev.item, 'updated') : [];
       case 'item.completed': return isRecord(ev.item) ? this.itemEvents(ev.item, 'completed') : [];
       case 'turn.completed': {
-        // Cost is not reported; keep token usage in the log line instead.
-        const usage = isRecord(ev.usage) ? ev.usage : {};
-        const tokens = ['input_tokens', 'cached_input_tokens', 'output_tokens'].map((k) => `${k.replace('_tokens', '')}=${num(usage[k]) ?? 0}`).join(' ');
-        return [{ kind: 'result', ok: !this.failed, text: this.lastMessage, sessionId: this.threadId, errorSubtype: this.failed ? 'turn_failed' : undefined, turns: undefined, durationMs: undefined, costUsd: undefined, synthesized: false }, { kind: 'raw', text: `usage ${tokens}`, stream: 'stdout' }];
+        // Cost is not reported; token usage goes to the result event and stays in the log line too.
+        const raw = isRecord(ev.usage) ? ev.usage : {};
+        this.h.usage = addUsage(this.h.usage, usageFrom(raw));
+        const tokens = ['input_tokens', 'cached_input_tokens', 'output_tokens'].map((k) => `${k.replace('_tokens', '')}=${num(raw[k]) ?? 0}`).join(' ');
+        return [{ kind: 'result', ok: !this.failed, text: this.lastMessage, sessionId: this.threadId, errorSubtype: this.failed ? 'turn_failed' : undefined, turns: undefined, durationMs: undefined, costUsd: undefined, synthesized: false, ...(this.h.usage ? { usage: this.h.usage } : {}) }, { kind: 'raw', text: `usage ${tokens}`, stream: 'stdout' }];
       }
       case 'turn.failed': {
         this.failed = true;
@@ -119,6 +120,7 @@ export const codexProvider: Provider = {
   supportsBudget: false,
   supportsResume: true,
   supportsVariant: true,
+  supportsMcp: true,
   authCheckArgs: ['login', 'status'],
   buildCommand(o) {
     // `codex exec [resume <id>] [flags] <prompt>`; `-` reads the prompt from stdin.

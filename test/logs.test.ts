@@ -20,13 +20,15 @@ test('writeTaskLog opens with the start stamp and closes with the finish stamp',
     finished: '2026-01-02T03:34:05Z',
     durationS: 1800,
     summary: 'all done',
-    logs: [{ kind: 'task', jsonl: 'r.jsonl', log: 'r.log', prompt: 'r.prompt.md', status: 'done', started: '2026-01-02T03:04:05Z', summary: 'all done' }],
+    usage: { inputTokens: 1200, outputTokens: 300 },
+    logs: [{ kind: 'task', jsonl: 'r.jsonl', log: 'r.log', prompt: 'r.prompt.md', status: 'done', started: '2026-01-02T03:04:05Z', summary: 'all done', usage: { inputTokens: 1200, outputTokens: 300 } }],
   };
   writeTaskLog(paths, task, st, { timeZone: 'utc' });
   const lines = readFileSync(taskLogPath(paths, 'T01'), 'utf8').trimEnd().split('\n');
   assert.equal(lines[0], '# T01 — Do the thing');
   assert.equal(lines[2], '**Started:** 2026-01-02 03:04:05Z');
   assert.equal(lines.at(-1), '**Finished:** 2026-01-02 03:34:05Z');
+  assert.match(lines.join('\n'), /^- Tokens: 1\.2k in · 300 out$/m);
   // The stamps live only at the top and bottom, not duplicated in the metadata bullets.
   assert.equal(lines.filter((l) => l.startsWith('**Started:**')).length, 1);
   assert.equal(lines.filter((l) => l.startsWith('**Finished:**')).length, 1);

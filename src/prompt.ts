@@ -39,6 +39,8 @@ export interface PromptCtx {
   indexBody?: string;
   /** Image-analysis capability note, when enabled; omitted otherwise. */
   visionNote?: string;
+  /** MCP capability note for a session with servers selected; omitted otherwise. */
+  mcpNote?: string;
 }
 
 export const PROGRESS_HEADER = `# Progress notes
@@ -150,6 +152,7 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
 
   const vars: Record<string, string | number> = {
     projectName: basename(paths.root),
+    mcpNote: ctx.mcpNote ? `${ctx.mcpNote}\n\n` : '',
     visionNote: ctx.visionNote ? `${ctx.visionNote}\n\n` : '',
     retryNote,
     continuationNote,
@@ -192,19 +195,20 @@ function readProgress(ctx: PromptCtx, paths: Paths): string {
   });
 }
 
-/** Place the capability note after the opening paragraph, before the final result instructions. */
-function withVision(text: string, ctx: PromptCtx): string {
-  if (!ctx.visionNote) return text;
+/** Place the capability notes after the opening paragraph, before the final result instructions. */
+function withNotes(text: string, ctx: PromptCtx): string {
+  const note = [ctx.mcpNote, ctx.visionNote].filter(Boolean).join('\n\n');
+  if (!note) return text;
   const firstBreak = text.indexOf('\n\n');
-  if (firstBreak < 0) return `${text}\n\n${ctx.visionNote}\n`;
-  return `${text.slice(0, firstBreak)}\n\n${ctx.visionNote}${text.slice(firstBreak)}`;
+  if (firstBreak < 0) return `${text}\n\n${note}\n`;
+  return `${text.slice(0, firstBreak)}\n\n${note}${text.slice(firstBreak)}`;
 }
 
 export function buildContinuePrompt(ctx: PromptCtx): string {
   const { paths, task } = ctx;
   const d = docPaths(paths);
   const rel0 = task.taskFileRel ?? defaultTaskFileRel(paths, task);
-  return withVision(`This is a continuation session for ${task.id} — ${task.title}. A previous session completed part of this task and reported status "continue"; the harness has started you in a fresh session to finish it.
+  return withNotes(`This is a continuation session for ${task.id} — ${task.title}. A previous session completed part of this task and reported status "continue"; the harness has started you in a fresh session to finish it.
 
 Nobody can answer questions. Work only on what remains:
 1. Read ${rel0} (especially "## Hand-off"), the "## ${task.id}" section in ${d.progress}, and run \`git status\` and \`git log -5\` to see what already landed.
@@ -224,7 +228,7 @@ export function buildNudgePrompt(ctx: PromptCtx, extraNote?: string): string {
   const { task, paths } = ctx;
   const d = docPaths(paths);
   const rel0 = task.taskFileRel ?? defaultTaskFileRel(paths, task);
-  return withVision(`Your previous turn ended without the required SYMPHONY_RESULT block, so the harness could not record ${task.id} — ${task.title}. This is a one-shot session: ending a turn exits the process, and any background job you were waiting on was killed at that moment; no notification will ever arrive.
+  return withNotes(`Your previous turn ended without the required SYMPHONY_RESULT block, so the harness could not record ${task.id} — ${task.title}. This is a one-shot session: ending a turn exits the process, and any background job you were waiting on was killed at that moment; no notification will ever arrive.
 
 ${extraNote ? `Also note:\n${extraNote}\n\n` : ''}You have been resumed with your full context. Close ${task.id} out now, in this single turn:
 1. Finish only what can be finished cheaply, running every command in the foreground. Anything else: drop it and list it under "## Hand-off" in ${rel0} as remaining work.
@@ -241,7 +245,7 @@ END_SYMPHONY_RESULT
 
 export function buildResumePrompt(ctx: PromptCtx, errorMessage: string): string {
   const { task } = ctx;
-  return withVision(`The previous turn of this session was cut short by an infrastructure error (${errorMessage}), not by anything you did. You have been resumed with the same context.
+  return withNotes(`The previous turn of this session was cut short by an infrastructure error (${errorMessage}), not by anything you did. You have been resumed with the same context.
 
 Continue ${task.id} — ${task.title} from where you left off under the same rules. Check \`git status\` and \`git log -3\` first to see what is already in place. Run everything in the foreground, finish the progress section and the Hand-off, and end your final message with the SYMPHONY_RESULT block exactly as instructed:
 
