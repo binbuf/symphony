@@ -1,7 +1,6 @@
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { resolveWatch, type Config, type SessionSpec } from './config.js';
-import { parseProgressSections } from './context.js';
 import { openRunSinks } from './logger.js';
 import { planMcp } from './mcp.js';
 import { rel, type Paths } from './paths.js';
@@ -11,19 +10,17 @@ import type { RunContext } from './runner.js';
 import { notifyTaskSlack, slackEventEnabled, slackProject } from './slack.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
 import { buildStatusTable } from './status.js';
-import { DONE_STATES, type State } from './state.js';
+import { type State } from './state.js';
 import type { Task } from './tasks.js';
 import { renderPrompt } from './templates.js';
-import { ensureDir, fmtCost, fmtDateTime, fmtDuration, nowIso, resolveBinary, resolveExecutable, squash, stamp } from './util.js';
+import { ensureDir, fmtCost, fmtDuration, nowIso, resolveBinary, resolveExecutable, squash, stamp } from './util.js';
 
 /**
  * Pipeline watch: a separate, read-only LLM session the harness runs on a timer while `run` is in
- * flight. It reads a self-contained snapshot of the pipeline (current task, phase progress, task
- * outcomes, PROGRESS.md, counts) and adds the interpretation the TUI's live status table cannot show
- * — what the snapshot means for the run, where it looks fragile, what to expect next — rather than
- * restating the visible status. The latest answer is shown in the TUI's top panel and every
- * check is appended to a dedicated watch log. It is advisory: an unavailable provider or a failed
- * check only updates the panel, never the run.
+ * flight. Each check asks how the current task is doing and points the model at the harness log to
+ * find out. The latest answer is shown in the TUI's top panel and every check is appended to a
+ * dedicated watch log. It is advisory: an unavailable provider or a failed check only updates the
+ * panel, never the run.
  */
 
 export type WatchStatus = 'waiting' | 'running' | 'ready' | 'error';
@@ -120,145 +117,13 @@ export function pipelineSnapshot(ctx: RunContext): string {
   return bits.join(' · ');
 }
 
-/** How many PROGRESS.md sections the first check inlines before switching to pure deltas. */
-const WATCH_BOOTSTRAP_SECTIONS = 3;
-/** Byte cap for the inlined new progress notes. */
-const WATCH_PROGRESS_BYTES = 5000;
-/** Cap on task outcomes inlined for one window. */
-const WATCH_MAX_OUTCOMES = 12;
-
 /**
- * The delta window for one watch check: only work that landed since the previous check is inlined, so
- * the prompt's size tracks the interval, not the length of the run. `sinceMs` bounds task outcomes;
- * `progressFrom` is the PROGRESS.md section index to resume from (earlier sections were already
- * summarised and are omitted). Omit either to fall back to the newest interval / newest few sections.
+ * The watcher prompt: ask how the current task is doing and hand over the relative path of the
+ * harness log. Everything else the watcher once received (deltas, phase gates, progress notes,
+ * task outcomes) was removed so a check stays tiny and the model reads the log directly.
  */
-export interface WatchWindow {
-  /** Epoch ms: tasks that finished after this are inlined. Defaults to one watch interval ago. */
-  sinceMs?: number;
-  /** First PROGRESS.md section (0-based) to inline; earlier ones are treated as already summarised. */
-  progressFrom?: number;
-}
-
-/** Number of PROGRESS.md sections, used to resume the next check's progress delta. */
-export function progressSectionCount(path: string): number {
-  try {
-    return existsSync(path) ? parseProgressSections(readFileSync(path, 'utf8')).length : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/** Keep the newest `maxBytes` of an append-only text (the tail), so a long window stays bounded. */
-function capTailBytes(text: string, maxBytes: number): string {
-  const t = text.trim();
-  if (Buffer.byteLength(t, 'utf8') <= maxBytes) return t;
-  const buf = Buffer.from(t, 'utf8');
-  return buf.subarray(buf.length - maxBytes).toString('utf8').trim();
-}
-
-/**
- * The watcher prompt: a compact current-status header plus what changed since the previous check —
- * the tasks that finished in that window, the progress notes written in it, and the relative path of
- * the latest task's own session log, which the watcher is asked to read (its one permitted action) —
- * so a check costs about the same whether the run is five minutes or five hours old. The instructions
- * frame the header as context the operator can already see. The previous panel text lets this fresh
- * session distinguish a new insight from a repeat.
- */
-export function buildWatchPrompt(ctx: RunContext, window: WatchWindow = {}): string {
-  const { paths, tasks, state } = ctx;
-  const intervalMs = Math.max(1, ctx.config.watch.intervalMin) * 60_000;
-  const sinceMs = window.sinceMs ?? Date.now() - intervalMs;
-  const sinceLabel = fmtDateTime(new Date(sinceMs).toISOString(), ctx.config.timeZone);
-
-  const finished = tasks
-    .filter((t) => state.tasks[t.id]?.finished)
-    .sort((a, b) => (Date.parse(state.tasks[b.id]?.finished ?? '') || 0) - (Date.parse(state.tasks[a.id]?.finished ?? '') || 0));
-
-  // Status only, no summaries: summaries are the logs, and older ones were already reported by an
-  // earlier check, so repeating them would grow the prompt with the length of the run.
-  const taskLines = tasks.slice(0, 40).map((t) => {
-    const st = state.tasks[t.id];
-    return `- ${t.id} [${st?.status ?? 'pending'}] ${squash(t.title, 60)}`;
-  });
-
-  // Only outcomes that finished inside this window are inlined; the rest were already summarised.
-  const recent = finished.filter((t) => (Date.parse(state.tasks[t.id]?.finished ?? '') || 0) > sinceMs).slice(0, WATCH_MAX_OUTCOMES);
-  const outcomeLines = recent.map((t) => {
-    const st = state.tasks[t.id];
-    return `- ${t.id} [${st?.status ?? '?'}] ${squash(t.title, 80)}${st?.summary ? ` — ${squash(st.summary, 240)}` : ''}`;
-  });
-
-  // The ticket in flight, or the most recently finished when nothing is running.
-  const currentTask = tasks.find((t) => statusOf(state, t) === 'running') ?? finished[0];
-  const currentLine = (() => {
-    if (!currentTask) return undefined;
-    const st = state.tasks[currentTask.id];
-    const status = st?.status ?? 'pending';
-    const bits: string[] = [status];
-    if (status === 'running') {
-      const started = st?.started ? Date.parse(st.started) : NaN;
-      const elapsedS = Number.isFinite(started) ? Math.max(0, (Date.now() - started) / 1000) : undefined;
-      if (elapsedS !== undefined) bits.push(`running ${fmtDuration(elapsedS)}`);
-      if (st?.attempts && st.attempts > 1) bits.push(`attempt ${st.attempts}`);
-    } else if (st?.durationS) {
-      bits.push(`took ${fmtDuration(st.durationS)}`);
-    }
-    if (st?.summary) bits.push(squash(st.summary, 300));
-    if (st?.transientRetries) bits.push(`transient retries ${st.transientRetries}`);
-    if (st?.lastError) bits.push(`last error ${st.lastError.category}${st.lastError.transient ? ' (transient)' : ''}: ${squash(st.lastError.message, 140)}`);
-    if (st?.verify && !st.verify.ok) bits.push(`verify FAILED (${st.verify.command})`);
-    return `- ${currentTask.id} — ${squash(currentTask.title, 100)} · phase: ${currentTask.phase} · ${bits.join(' · ')}`;
-  })();
-
-  // The relative path of the latest session log (the running task's, or the most recently finished
-  // one's). The watcher is asked to read that one file rather than have its contents inlined, which
-  // keeps the prompt small no matter how long the session runs.
-  const latestLogTask = tasks.find((t) => statusOf(state, t) === 'running') ?? finished[0];
-  const refs = latestLogTask ? state.tasks[latestLogTask.id]?.logs ?? [] : [];
-  const latestRef = refs[refs.length - 1];
-  const latestLogPath = latestLogTask && latestRef?.log ? latestRef.log : undefined;
-  const latestLogLabel = latestLogPath
-    ? `${latestLogTask!.id}'s latest session`
-    : 'no task session yet';
-
-  // Per-phase progress, with the current phase flagged, so the model can judge the gate we are in.
-  const phaseStats = new Map<string, { done: number; total: number; remaining: string[] }>();
-  for (const t of tasks) {
-    const s = phaseStats.get(t.phase) ?? { done: 0, total: 0, remaining: [] };
-    s.total += 1;
-    if ((DONE_STATES as string[]).includes(state.tasks[t.id]?.status ?? 'pending')) s.done += 1;
-    else s.remaining.push(t.id);
-    phaseStats.set(t.phase, s);
-  }
-  const phaseLines = [...phaseStats.entries()].map(([name, s]) => {
-    const mark = name === currentTask?.phase ? '▶ ' : '  ';
-    return `${mark}${name}: ${s.done}/${s.total} done${s.remaining.length ? ` · remaining ${s.remaining.join(', ')}` : ' · complete'}`;
-  });
-
-  // Only PROGRESS.md sections written since the last check; the first check seeds the newest few.
-  const sections = parseProgressSections(existsSync(paths.progress) ? readFileSync(paths.progress, 'utf8') : '');
-  const from = window.progressFrom ?? Math.max(0, sections.length - WATCH_BOOTSTRAP_SECTIONS);
-  const fresh = sections.slice(Math.max(0, from));
-  const progress = fresh.length
-    ? capTailBytes(fresh.map((s) => `## ${s.heading}\n\n${s.body}`).join('\n\n'), WATCH_PROGRESS_BYTES)
-    : '(no new progress notes since the last check)';
-
-  return renderPrompt('watch.md', {
-    previousSummary: ctx.watch?.summary ? squash(ctx.watch.summary, 500) : '(no previous update)',
-    currentLine: currentLine ?? '- (nothing running and nothing finished yet)',
-    latestLogLabel,
-    latestLog: latestLogPath
-      ? `Read this file (relative to the project root): ${latestLogPath}`
-      : '- (no session log yet — nothing to read)',
-    phases: phaseLines.join('\n') || '- (no tasks)',
-    sinceLabel,
-    outcomes: outcomeLines.join('\n') || '- (no task finished in this window)',
-    progressPath: rel(paths.root, paths.progress),
-    progress,
-    pipeline: pipelineSnapshot(ctx),
-    taskList: taskLines.join('\n') || '- (no tasks)',
-  });
+export function buildWatchPrompt(ctx: RunContext): string {
+  return renderPrompt('watch.md', { symphonyLog: rel(ctx.paths.root, ctx.paths.log) });
 }
 
 /** Append one check's result to the dedicated watch log. Never throws at the caller. */
@@ -298,10 +163,10 @@ interface CheckResult {
 }
 
 /** Run one read-only watcher session and capture its answer. */
-async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider, window: WatchWindow): Promise<CheckResult> {
+async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider): Promise<CheckResult> {
   ensureDir(ctx.paths.runs);
   const sinks = openRunSinks(ctx.paths.runs, `${WATCH_TASK_ID}-${stamp()}`);
-  const prompt = buildWatchPrompt(ctx, window);
+  const prompt = buildWatchPrompt(ctx);
   writeFileSync(sinks.promptPath, prompt);
   const paths = {
     sessionLog: rel(ctx.paths.root, sinks.logPath),
@@ -356,10 +221,6 @@ export class PipelineWatcher {
   private inFlight = false;
   private stopped = false;
   private checks = 0;
-  /** Start of the current delta window: when the previous prompt was built. */
-  private windowFromMs = Date.now();
-  /** PROGRESS.md sections present at the previous summarised check, to resume the progress delta. */
-  private progressSections?: number;
 
   constructor(private readonly ctx: RunContext, private readonly spec: SessionSpec, private readonly provider: Provider) {}
 
@@ -416,22 +277,11 @@ export class PipelineWatcher {
   private async runCheck(): Promise<void> {
     const w = this.ctx.watch;
     if (w) { w.status = 'running'; w.nextAt = undefined; }
-    // Snapshot the window before the check: the previous start for what to inline, and the current
-    // progress-section count so the next check resumes exactly here. Read synchronously so the count
-    // matches what the prompt inlines in the same tick.
-    const firedAt = Date.now();
-    const sectionsAtBuild = progressSectionCount(this.ctx.paths.progress);
     let result: CheckResult;
     try {
-      result = await oneCheck(this.ctx, this.spec, this.provider, { sinceMs: this.windowFromMs, progressFrom: this.progressSections });
+      result = await oneCheck(this.ctx, this.spec, this.provider);
     } catch (e) {
       result = { status: 'error', error: (e as Error).message, sessionLog: '-', sessionJsonl: '-', sessionPrompt: '-' };
-    }
-    // Advance the window only after a check we actually summarised, so a failed check's window is
-    // retried next time instead of being silently dropped.
-    if (result.status === 'ready') {
-      this.windowFromMs = firedAt;
-      this.progressSections = sectionsAtBuild;
     }
     const state = this.ctx.watch;
     const entry: WatchLogEntry = {

@@ -84,8 +84,8 @@ Controls
                            sentinel is placed when the pipeline reaches that task
   touch .symphony/STOP     legacy alias for the above
   Ctrl-C                   stop the current session, record it as unfinished, exit 130
-  pipeline watch           while the run is in flight, a separate read-only model summarizes recent
-                           progress and pipeline health into the TUI's top strip and
+  pipeline watch           while the run is in flight, a separate read-only model reads the harness
+                           log and summarizes progress into the TUI's top strip and
                            .symphony/watch.log every watch.intervalMin (default 5 min, on by default;
                            press w in the TUI to check now). Configure via the "watch" config block.
   automatic breakdowns     with "breakdown": {"enabled": true} in the config, one decision (Jev, then

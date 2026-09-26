@@ -650,22 +650,15 @@ Configure the router with `provider` or addresses models as `vendor/model` on Op
 
 ## Pipeline watch
 
-While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: the harness assembles a self-contained snapshot — the currently running ticket (or the one that just finished), **the relative path of that task's own session log** (which the watcher is allowed to read), per-phase progress with the current phase flagged, **only the task outcomes and `PROGRESS.md` sections that landed since the previous check**, the pipeline counts and a status-only task list, and the halted banner if any — and asks the watcher model to **read how it is actually going**. The log is referenced by path rather than inlined, and each check's window starts where the previous one stopped, so a check costs about the same whether the run is five minutes or five hours old. The TUI already shows the running ticket and its elapsed time, the phase, the counts and the cost, so the watcher is told not to restate any of that. It is asked to answer whichever of these matters most right now, not all of them every time:
+While a run is in flight, a **separate, read-only** LLM session can summarize how it is going. It is on by default: each check asks how the current task is doing, hands over **the relative path of the harness log** (`.symphony/symphony.log`), which the watcher is allowed to read, and asks for a **finalized summary of 4-5 sentences max** on what's going on.
 
-1. **Is the task in flight healthy or struggling?** It reads the log: is the session working one thread to completion, or looping, erroring, retrying, or fighting the same failing command?
-2. **Is the current phase or milestone on track?** Are its tasks landing as expected, or is one stubborn and likely to hold the gate open?
-3. **What does the latest task log actually show?** A plain-language read of what the session is doing — not a transcript, and not a reworded version of its reported summary.
-4. **Is the run as a whole likely to finish as anticipated?** If the pace, retries, or outcomes point elsewhere, say so and why.
+It is asked for a short answer that fits the four-line strip. A stray conversational opener like "I looked into…" is stripped before display. Before any summary exists, the panel shows a dim `No update yet — watching for a meaningful change.` placeholder.
 
-When a task is struggling, a phase is at risk, or completion no longer looks likely, that is what leads.
-
-It is asked for **one compact paragraph of two to three short sentences** that fits the four-line strip. Each fresh check also receives the previous panel text, so it can report a meaningful change without repeating itself. It begins with the observation rather than a preamble like "I looked into…" (a stray conversational opener is stripped before display), and avoids raw status, timing, generic reassurance, and unsupported predictions. Before any summary exists, the panel shows a dim `No update yet — watching for a meaningful change.` placeholder.
-
-A check runs every `watch.intervalMin`, **and again each time a task ends**, so a summary reflects the ticket that just moved rather than the pipeline as of the last timer tick. The delta window advances only after a check that actually ran, so a failed or timed-out check's work is folded into the next prompt rather than dropped.
+A check runs every `watch.intervalMin`, **and again each time a task ends**, so a summary reflects the ticket that just moved rather than the pipeline as of the last timer tick.
 
 The latest answer is shown in the TUI's **Pipeline watch** strip (above the status table) and every check is appended to `.symphony/watch.log` with the snapshot and a link to the session's raw files. The strip shows `Waiting for updates` until the first check returns, with the countdown to the first check on the right of the title; press `w` to run one immediately. A ready check replaces the summary and refreshes the count and update time in the title.
 
-The watcher is *advisory only*: it never edits the tree (the harness pins `autoApprove: false`, and its sole permitted action is reading the one log file named in the prompt), a failed or timed-out check just updates the panel, and a missing watcher binary disables it with a warning — the run is never blocked or halted by it.
+The watcher is *advisory only*: it never edits the tree (the harness pins `autoApprove: false`, and its sole permitted action is reading the log file named in the prompt), a failed or timed-out check just updates the panel, and a missing watcher binary disables it with a warning — the run is never blocked or halted by it.
 
 Configure it with the `watch` block; the provider and model are independent of the run's, so the watcher can be a cheaper model:
 
