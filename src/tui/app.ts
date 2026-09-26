@@ -1,8 +1,6 @@
-import { acceptCommand } from '../commands.js';
-import { clearStop, placeStop, stopPresent } from '../paths.js';
 import type { RunContext } from '../runner.js';
-import { saveState } from '../state.js';
 import { buildStatusTable, formatStatusRow, statusColumnWidths, type StatusTable } from '../status.js';
+import { asTuiModel, type TuiModel } from './model.js';
 import type { Key, MouseKey } from './keys.js';
 import { AnsiTerminal } from './terminal.js';
 import { displayWidth, fit, padTo, sanitizeLine, sliceColumns, splice, wrapColumns, wrapText } from './text.js';
@@ -133,8 +131,15 @@ export class TuiApp {
   }
   /** Set once the user confirms quitting; the wrapper stops looping on it. */
   quitRequested = false;
+  /** Called when the user confirms quitting, so an attach client can tear down and return. */
+  onQuit?: () => void;
 
-  constructor(private readonly ctx: RunContext, private readonly term: AnsiTerminal) {}
+  constructor(ctxOrModel: RunContext | TuiModel, private readonly term: AnsiTerminal) {
+    this.model = asTuiModel(ctxOrModel);
+  }
+
+  /** The view's data/action source: a live run context, or a remote attach client. */
+  private readonly model: TuiModel;
 
   start(): void {
     this.term.enter();
@@ -145,7 +150,7 @@ export class TuiApp {
     // Land on the task in flight (or the one the run halted on) rather than the top of the table.
     this.revealTask(this.currentTaskId() ?? this.selectedTaskId(), true);
     this.safeRender();
-    this.timer = setInterval(() => this.safeTick(), 1000);
+    this.timer = setInterval(() => this.safeTick(), this.model.tickMs);
     this.timer.unref?.();
   }
 
@@ -238,19 +243,22 @@ export class TuiApp {
   }
 
   private tick(): void {
+    this.model.poll();
+    const output = this.model.takeOutput();
+    if (output) this.pushOutput(output);
     this.checkTransitions();
     this.render();
   }
 
   private checkTransitions(): void {
-    for (const t of this.ctx.tasks) {
-      const status = this.ctx.state.tasks[t.id]?.status ?? 'pending';
+    for (const t of this.model.tasks) {
+      const status = this.model.state.tasks[t.id]?.status ?? 'pending';
       const prev = this.lastStatuses.get(t.id);
       if (prev !== undefined && prev !== status) this.toast(`${t.id} → ${status}`);
       this.lastStatuses.set(t.id, status);
     }
-    const halted = !!this.ctx.state.halted;
-    if (halted && !this.lastHalted) this.toast(`halted: ${this.ctx.state.halted!.category}`);
+    const halted = !!this.model.state.halted;
+    if (halted && !this.lastHalted) this.toast(`halted: ${this.model.state.halted!.category}`);
     this.lastHalted = halted;
     // Follow the pipeline: when it moves to a new task, recenter the status table on it.
     const currentId = this.currentTaskId();
@@ -259,28 +267,28 @@ export class TuiApp {
   }
 
   private snapshotStatuses(): void {
-    for (const t of this.ctx.tasks) this.lastStatuses.set(t.id, this.ctx.state.tasks[t.id]?.status ?? 'pending');
-    this.lastHalted = !!this.ctx.state.halted;
+    for (const t of this.model.tasks) this.lastStatuses.set(t.id, this.model.state.tasks[t.id]?.status ?? 'pending');
+    this.lastHalted = !!this.model.state.halted;
     this.lastCurrentTaskId = this.currentTaskId();
   }
 
   private initialSelection(): number {
-    const running = this.ctx.tasks.findIndex((t) => this.ctx.state.tasks[t.id]?.status === 'running');
+    const running = this.model.tasks.findIndex((t) => this.model.state.tasks[t.id]?.status === 'running');
     if (running >= 0) return running;
-    const held = this.ctx.tasks.findIndex((t) => ['blocked', 'failed'].includes(this.ctx.state.tasks[t.id]?.status ?? ''));
+    const held = this.model.tasks.findIndex((t) => ['blocked', 'failed'].includes(this.model.state.tasks[t.id]?.status ?? ''));
     return held >= 0 ? held : 0;
   }
 
   private table(): StatusTable {
     const now = Date.now();
     if (!this.tableCache || now - this.tableCache.at > TABLE_TTL_MS) {
-      this.tableCache = { at: now, table: buildStatusTable(this.ctx.tasks, this.ctx.state, { expand: this.expand, timeZone: this.ctx.config.timeZone }) };
+      this.tableCache = { at: now, table: buildStatusTable(this.model.tasks, this.model.state, { expand: this.expand, timeZone: this.model.config.timeZone }) };
     }
     return this.tableCache.table;
   }
 
   private selectedTaskId(): string | undefined {
-    return this.ctx.tasks[this.selected]?.id;
+    return this.model.tasks[this.selected]?.id;
   }
 
   /**
@@ -289,10 +297,10 @@ export class TuiApp {
    * past a failure) are not current and so are not flagged.
    */
   private currentTaskId(): string | undefined {
-    const running = this.ctx.tasks.find((t) => this.ctx.state.tasks[t.id]?.status === 'running');
+    const running = this.model.tasks.find((t) => this.model.state.tasks[t.id]?.status === 'running');
     if (running) return running.id;
-    const halted = this.ctx.state.halted?.taskId;
-    if (halted && this.ctx.state.tasks[halted]?.status === 'failed') return halted;
+    const halted = this.model.state.halted?.taskId;
+    if (halted && this.model.state.tasks[halted]?.status === 'failed') return halted;
     return undefined;
   }
 
@@ -384,7 +392,7 @@ export class TuiApp {
         const maxOff = Math.max(0, table.rows.length - bodyArea);
         const off = this.statusPanel.follow ? maxOff : clamp(this.statusPanel.vOffset, 0, maxOff);
         const id = table.rowTask[off + bodyRow];
-        const idx = id ? this.ctx.tasks.findIndex((t) => t.id === id) : -1;
+        const idx = id ? this.model.tasks.findIndex((t) => t.id === id) : -1;
         if (idx >= 0) {
           this.selected = idx;
           this.statusPanel.follow = false;
@@ -400,19 +408,27 @@ export class TuiApp {
   }
 
   private openQuit(): void {
+    const attached = this.model.detachOnQuit;
     this.dialog = {
-      title: 'Quit symphony run?',
-      lines: [
-        'The current session is stopped and recorded unfinished,',
-        'exactly like pressing Ctrl-C. The task is retried next run.',
-        '',
-        'y / Enter  quit now        n / Esc  keep running',
-      ],
+      title: attached ? 'Detach from the run?' : 'Quit symphony run?',
+      lines: attached
+        ? [
+            'The harness keeps running in the background; you can',
+            're-attach later with `symphony attach`. Stop it with',
+            '`symphony stop`.',
+            '',
+            'y / Enter  detach now      n / Esc  stay attached',
+          ]
+        : [
+            'The current session is stopped and recorded unfinished,',
+            'exactly like pressing Ctrl-C. The task is retried next run.',
+            '',
+            'y / Enter  quit now        n / Esc  keep running',
+          ],
       confirm: () => {
         this.quitRequested = true;
-        this.ctx.interrupted = true;
-        this.ctx.abort.abort();
-        this.ctx.active?.kill('interrupt');
+        this.model.quit();
+        if (attached) { this.onQuit?.(); return; }
         if (this.haltResolve) { this.resolveHalt('quit'); return; }
         this.toast('quitting: stopping the current session…');
       },
@@ -423,7 +439,7 @@ export class TuiApp {
   private openAccept(): void {
     const id = this.selectedTaskId();
     if (!id) return this.toast('no task selected');
-    const status = this.ctx.state.tasks[id]?.status ?? 'pending';
+    const status = this.model.state.tasks[id]?.status ?? 'pending';
     if (status !== 'blocked' && status !== 'failed') return this.toast(`${id} is ${status}; only blocked/failed tasks can be accepted`);
     this.dialog = {
       title: `Accept ${id}?`,
@@ -434,12 +450,8 @@ export class TuiApp {
         'y / Enter  accept          n / Esc  cancel',
       ],
       confirm: () => {
-        try {
-          acceptCommand(this.ctx.paths, this.ctx.state, this.ctx.tasks, [id], undefined, this.ctx.log);
-          this.toast(`${id} accepted`);
-        } catch (e) {
-          this.toast(`${id}: ${(e as Error).message}`);
-        }
+        this.model.accept(id);
+        this.toast(`${id} accepted`);
         this.tableCache = undefined;
       },
     };
@@ -455,12 +467,12 @@ export class TuiApp {
   private openSplit(): void {
     const id = this.selectedTaskId();
     if (!id) return this.toast('no task selected');
-    const status = this.ctx.state.tasks[id]?.status ?? 'pending';
+    const status = this.model.state.tasks[id]?.status ?? 'pending';
     if (status === 'done' || status === 'accepted') return this.toast(`${id} is ${status}; nothing to split`);
-    if (this.ctx.splitRequest) {
-      return this.toast(this.ctx.splitRequest.id === id
+    if (this.model.splitRequest) {
+      return this.toast(this.model.splitRequest.id === id
         ? `${id} is already queued for a split`
-        : `a split of ${this.ctx.splitRequest.id} is already queued`);
+        : `a split of ${this.model.splitRequest.id} is already queued`);
     }
     const running = status === 'running';
     this.dialog = {
@@ -476,8 +488,7 @@ export class TuiApp {
         'y / Enter  split           n / Esc  cancel',
       ],
       confirm: () => {
-        this.ctx.splitRequest = { id };
-        if (running) this.ctx.active?.kill('interrupt');
+        this.model.requestSplit(id, running);
         this.toast(running ? `${id}: stopping the session, then splitting…` : `split queued: run stops at the next boundary, then splits ${id}`);
         // The view is in halt mode (the run loop has already returned): release it so the wrapper
         // can pick the request up and act on it.
@@ -491,13 +502,13 @@ export class TuiApp {
   onPlanChanged(): void {
     this.tableCache = undefined;
     this.wrapCache = undefined;
-    this.selected = clamp(this.selected, 0, Math.max(0, this.ctx.tasks.length - 1));
+    this.selected = clamp(this.selected, 0, Math.max(0, this.model.tasks.length - 1));
     this.snapshotStatuses();
     this.render();
   }
 
   private openClearHalt(): void {
-    const h = this.ctx.state.halted;
+    const h = this.model.state.halted;
     if (!h) return this.toast('not halted');
     this.dialog = {
       title: 'Clear the halt?',
@@ -509,8 +520,7 @@ export class TuiApp {
       ].filter((l) => l !== ''),
       confirm: () => {
         if (this.haltResolve) { this.resolveHalt('clear'); return; }
-        delete this.ctx.state.halted;
-        saveState(this.ctx.paths, this.ctx.state);
+        this.model.clearHalt();
         this.toast('halt cleared');
       },
     };
@@ -518,13 +528,12 @@ export class TuiApp {
   }
 
   private togglePause(): void {
-    const { paths } = this.ctx;
     try {
-      if (stopPresent(paths)) {
-        clearStop(paths);
+      if (this.model.stopPresent()) {
+        this.model.clearStop();
         this.toast('resumed: pause sentinel removed');
       } else {
-        placeStop(paths);
+        this.model.placeStop();
         this.toast('pausing at the next task/continuation boundary');
       }
     } catch (e) {
@@ -542,17 +551,17 @@ export class TuiApp {
     if (this.layout === 'bottom') return this.toast('status panel hidden (press z)');
     const id = this.selectedTaskId();
     if (!id) return this.toast('no task selected');
-    if (this.ctx.pauseAt === id) {
-      delete this.ctx.pauseAt;
+    if (this.model.pauseAt === id) {
+      this.model.setPauseAt(undefined);
       this.toast(`pause target cleared: ${id}`);
       this.render();
       return;
     }
-    if (stopPresent(this.ctx.paths)) {
+    if (this.model.stopPresent()) {
       this.toast('already paused (.stop present); press p to resume first');
       return this.render();
     }
-    const status = this.ctx.state.tasks[id]?.status ?? 'pending';
+    const status = this.model.state.tasks[id]?.status ?? 'pending';
     if (status === 'done' || status === 'accepted' || status === 'blocked') {
       this.toast(`${id} is ${status}; it will not run again`);
       return this.render();
@@ -561,17 +570,16 @@ export class TuiApp {
       this.toast(`${id} is already running; pause will not apply to it`);
       return this.render();
     }
-    this.ctx.pauseAt = id;
+    this.model.setPauseAt(id);
     this.toast(`pause queued: run stops before ${id}`);
     this.render();
   }
 
   /** Ask the pipeline watcher to run a check immediately (the next scheduled one is unchanged). */
   private refreshWatch(): void {
-    if (!this.ctx.watch) return this.toast('pipeline watch is off');
-    if (!this.ctx.watchRefresh) return this.toast('pipeline watch is not running');
+    if (!this.model.watch) return this.toast('pipeline watch is off');
     this.toast('pipeline watch: checking now…');
-    this.ctx.watchRefresh();
+    this.model.refreshWatch();
     this.render();
   }
 
@@ -652,7 +660,7 @@ export class TuiApp {
     if (this.layout === 'bottom') return this.toast('status panel hidden (press z)');
     this.focus = 'status';
     this.statusPanel.follow = false;
-    this.selected = clamp(this.selected + delta, 0, Math.max(0, this.ctx.tasks.length - 1));
+    this.selected = clamp(this.selected + delta, 0, Math.max(0, this.model.tasks.length - 1));
     this.ensureSelectionVisible();
     this.render();
   }
@@ -805,10 +813,10 @@ export class TuiApp {
         // is otherwise shown inverted, and a queued pause target in yellow.
         const isTaskRow = table.taskRow[rowId] === idx;
         if (rowId === currentId && isTaskRow) {
-          const bg = this.ctx.state.tasks[rowId]?.status === 'failed' ? C.bgFailed : C.bgRunning;
+          const bg = this.model.state.tasks[rowId]?.status === 'failed' ? C.bgFailed : C.bgRunning;
           line = `${bg}${C.bold}${line}${C.reset}`;
         } else if (rowId === selectedId) line = `${C.inv}${line}${C.reset}`;
-        else if (this.ctx.pauseAt !== undefined && rowId === this.ctx.pauseAt) line = `${C.yellow}${line}${C.reset}`;
+        else if (this.model.pauseAt !== undefined && rowId === this.model.pauseAt) line = `${C.yellow}${line}${C.reset}`;
         out[y++] = line;
       }
       y = statusTop + top;
@@ -875,7 +883,7 @@ export class TuiApp {
 
   /** The watch panel only exists once the watcher is running (or has failed to start). */
   private watchRows(rows = this.term.size().rows): number {
-    if (!this.ctx.watch) return 0;
+    if (!this.model.watch) return 0;
     // Never let the strip crowd out the status table on a very short terminal.
     return Math.max(0, Math.min(WATCH_ROWS, rows - BAR_ROWS - 2));
   }
@@ -888,7 +896,7 @@ export class TuiApp {
   }
 
   private watchPanelLines(cols: number): string[] {
-    const w = this.ctx.watch!;
+    const w = this.model.watch!;
     const lines = [this.panelTitle('Pipeline watch', this.watchTitleRight(w), cols, false)];
     const bodyRows = WATCH_ROWS - 1;
     const bodyWidth = Math.max(1, cols - 1);
@@ -925,8 +933,8 @@ export class TuiApp {
   private metricsLine(table: StatusTable): string {
     const s = table.summary;
     const pct = s.total > 0 ? Math.round((s.done / s.total) * 100) : 0;
-    const st = s.running ? this.ctx.state.tasks[s.running.id] : undefined;
-    const provider = st?.provider ?? this.ctx.config.provider;
+    const st = s.running ? this.model.state.tasks[s.running.id] : undefined;
+    const provider = st?.provider ?? this.model.config.provider;
     const model = st?.model ? ` · ${st.model}${st.variant ? `#${st.variant}` : ''}` : '';
     const bits = [
       `${progressBar(s.done, s.total, 10)} ${s.done}/${s.total} ${pct}%`,
@@ -936,9 +944,9 @@ export class TuiApp {
       `${provider}${model}`,
     ];
     if (s.blocked.length) bits.push(`blocked ${s.blocked.join(',')}`);
-    if (this.ctx.pauseAt) bits.push(`pause@${this.ctx.pauseAt}`);
-    if (stopPresent(this.ctx.paths)) bits.push('PAUSED');
-    if (this.ctx.state.halted) bits.push(`HALTED ${this.ctx.state.halted.category}`);
+    if (this.model.pauseAt) bits.push(`pause@${this.model.pauseAt}`);
+    if (this.model.stopPresent()) bits.push('PAUSED');
+    if (this.model.state.halted) bits.push(`HALTED ${this.model.state.halted.category}`);
     return bits.join('  ·  ');
   }
 

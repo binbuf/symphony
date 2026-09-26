@@ -10,12 +10,14 @@ import { formatLint, lintDocs } from './lint.js';
 import { prepareCommand } from './prepare.js';
 import { loadProject } from './project.js';
 import { replanCommand } from './replan.js';
+import { runWithDaemon, startCommand, stopCommand } from './daemon.js';
 import { createLogger } from './logger.js';
 import { resolvePaths, taskSetOverrides, type PathOverrides } from './paths.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { nudgeCommand, runCommand, type RunContext, type RunFlags } from './runner.js';
 import { saveState } from './state.js';
 import { splitCommand, splitTask } from './split.js';
+import { runAttach } from './tui/attach.js';
 import { runWithTui } from './tui/index.js';
 import { UsageError } from './util.js';
 import { describeImage, visionProblem } from './vision.js';
@@ -41,6 +43,9 @@ Usage
   symphony reset   T05 [--revert]        clear a task's state (and revert its commits with --revert) so it runs again
   symphony reset   --all                 clear every task's state and the halt, so a replaced roadmap starts clean
   symphony nudge   T05 [--note "..."]    resume a task's last session and ask it to close out
+  symphony start   [run flags]           launch the harness detached in the background (headless); drive it later
+  symphony attach                        open the full run view against the running harness; q detaches, it keeps going
+  symphony stop                          ask a detached harness to stop (graceful, then a signal)
   symphony clear-halt                    lift a halt so run can start again
   symphony vision  <image> [--prompt "..."] [--context "..."]  analyze an image with the configured vision model and print its description
   symphony brief                         print a paste-ready prompt that makes any LLM client emit the docs package in this format
@@ -78,6 +83,11 @@ Controls
                            with scrolling, follow, pause/pause-at, accept and clear-halt keys. Default
                            on when stdout and stdin are a terminal; off when piped, in CI, or with
                            --no-tui. Set "tui": false in the config to disable it by default.
+  detached runs            symphony start launches the harness headless in the background; symphony
+                           attach opens the run view as a client (q detaches, leaving it running);
+                           symphony stop stops it. pause/pause-at/accept/split/clear-halt all work
+                           from an attached view. The daemon publishes .symphony/runtime.json and
+                           services .symphony/control/.
   touch .stop              pause at the next boundary: a task start or a continuation session end
                            (nothing is killed); configurable via paths.stop
   P (in the TUI)           queue a pause before the selected task: the run continues and the .stop
@@ -113,7 +123,7 @@ export const VERSION: string = (() => {
   }
 })();
 
-const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'split', 'init', 'accept', 'reset', 'nudge', 'clear-halt', 'vision', 'brief', 'help']);
+const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'split', 'init', 'accept', 'reset', 'nudge', 'clear-halt', 'vision', 'brief', 'start', 'stop', 'attach', 'help']);
 
 /**
  * The effective path overrides for this invocation: the base `paths`, or — with `--set NAME` — a
@@ -170,6 +180,7 @@ export async function main(argv: string[]): Promise<number> {
       prepare: { type: 'boolean' },
       tui: { type: 'boolean' },
       'no-tui': { type: 'boolean' },
+      daemon: { type: 'boolean' },
       direction: { type: 'string' },
       'allow-id-reuse': { type: 'boolean' },
       'reset-state': { type: 'boolean' },
@@ -240,6 +251,16 @@ export async function main(argv: string[]): Promise<number> {
   const log = createLogger(paths.log);
   cfgWarnings.forEach((w) => log.warn(w));
   if (!cfgExists && cmd !== 'doctor') log.info(`no ${paths.config}; using defaults`);
+  // Detached runs are their own front-ends: start never loads the plan (the daemon does), stop and
+  // attach talk to a running one through files only.
+  if (cmd === 'start') {
+    const forwarded = argv.filter((a) => a !== 'start');
+    return startCommand(paths, ['run', '--daemon', '--no-tui', ...forwarded], log);
+  }
+  if (cmd === 'stop') return await stopCommand(paths, log);
+  if (cmd === 'attach') {
+    return runAttach({ paths, provider: config.provider, timeZone: config.timeZone, log });
+  }
   if (cmd === 'lint') {
     const report = lintDocs(paths, { design: config.designDocs, skipDirs: allDocsDirs(paths.root, config) });
     formatLint(report).forEach((l) => log.plain(l));
@@ -332,6 +353,9 @@ export async function main(argv: string[]): Promise<number> {
       // Automatic breakdowns (config `breakdown`) run the `split` machinery from inside the run,
       // sharing this run's lock and branch instead of acquiring its own.
       ctx.performSplit = (taskId) => splitTask(ctx, { id: taskId, dryRun: false, keepLock: true });
+      // `symphony start` re-invokes this process with --daemon: run headless, serviced by the control
+      // channel, with no local view. `symphony attach` in another terminal drives it.
+      if (v.daemon === true) return runWithDaemon(ctx, () => runCommand(ctx));
       // The full-screen view is the default on a real terminal; --no-tui (or config tui:false, CI, a
       // pipe) falls back to the plain stream. --tui forces it and warns when that is not possible.
       // --dry-run prints prompts meant to be read or piped, so it always stays plain.

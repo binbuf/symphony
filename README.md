@@ -166,7 +166,7 @@ Pressing `b` on a selected task is the one key that rewrites the plan: the run p
 
 | key | action |
 |---|---|
-| `q` / `Ctrl-C` | quit — asks for confirmation, then stops the current session (like today's Ctrl-C) |
+| `q` / `Ctrl-C` | quit — asks for confirmation, then stops the current session (like today's Ctrl-C). In an attached view (`symphony attach`) it detaches instead, leaving the run going |
 | `?` | help overlay (any key closes it) |
 | `Tab` / `Shift-Tab` | move focus between the status and output panels |
 | `↑ ↓` / `PgUp` / `PgDn` / `Home` / `End` / `g` / `G` | scroll the focused panel; scrolling the output up pauses tailing |
@@ -184,6 +184,21 @@ Pressing `b` on a selected task is the one key that rewrites the plan: the run p
 | `[` `]` (or `-` `+`) | adjust the panel split |
 
 On exit the terminal is restored and the last lines are replayed to normal scrollback, so the outcome survives in your history.
+
+### Detached runs and attaching
+
+The harness and its view need not live in the same process. `symphony start` launches the run detached and headless; `symphony attach` opens the same full-screen view as a client; `symphony stop` ends it.
+
+```bash
+./.symphony/symphony start              # run in the background, no terminal needed
+./.symphony/symphony start --only T05   # any `run` flag is forwarded
+./.symphony/symphony attach             # open the run view against the live (or finished) run
+./.symphony/symphony stop               # graceful stop, then a signal if it does not answer
+```
+
+Detaching is safe: the daemon owns the same lock, heartbeat and git branch a foreground run does, writes its output to `.symphony/daemon.log`, and publishes a heartbeat in `.symphony/runtime.json` (phase, current task, live stream path, watch panel, queued pause target). `attach` polls that plus `state.json`, tails the session log the daemon names, and routes commands back through `.symphony/control/` — a directory of request/response files, so there are no ports or sockets. Pressing `q` in an attached view **detaches**, leaving the run going; use `symphony stop` to end it. `pause` (`p`), `pause-at` (`P`), `accept` (`a`), `split` (`b`), `clear-halt` (`c`) and `watch` (`w`) all work from an attached view exactly as they do in a foreground run. Attaching after the run has already finished is a read-only browse of the final state (and can still `accept` or `clear-halt`, since nothing else is writing).
+
+The previous behaviour is unchanged: `symphony run` (or `symphony run --no-tui`) is a foreground run, and `run` with no console still refuses to start a second harness while one is live.
 
 ### Mid-run: how the harness keeps going
 
@@ -416,6 +431,9 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | command | what it does |
 |---|---|
 | `run` | run every unfinished task in roadmap order, committing after each; resumes where it left off |
+| `start` | launch the harness detached in the background (any `run` flag is forwarded); output goes to `.symphony/daemon.log` |
+| `attach` | open the full-screen run view as a client against a running (or finished) harness; `q` detaches and leaves it running |
+| `stop` | ask a detached harness to stop gracefully, falling back to a signal |
 | `run --prepare` | run `prepare` first, then start only if `docs/` lints clean |
 | `status [--json]` | progress table with each task's duration and start/end datetime stamps (a live `(running)` elapsed time while one is in flight), or machine-readable JSON. Tasks split across sessions or retried (attempts ≥ 2) list each session run beneath the parent line with its own start/end, duration and summary |
 | `logs [T05]` | print a task's per-run log (`docs/logs/T05.md`); with no id, list the log files |
@@ -854,6 +872,10 @@ docs/INDEX.md                                  generated repo map, rewritten bef
 .symphony/runs/watch-<stamp>.*                 each pipeline-watch check, same three files
 .symphony/watch.log                            append-only pipeline-watch summaries: one section per check, with its snapshot
 .symphony/symphony.log                         harness events: task start/finish, retries, halts, commits
+.symphony/runtime.json                         live heartbeat for `attach`: phase, current task, stream path, watch panel, pause target
+.symphony/daemon.json                          pid of a `symphony start` daemon (cleared when it exits)
+.symphony/daemon.log                           stdout/stderr of a detached run
+.symphony/control/                             request/response files between `attach`/`stop` and the daemon
 .symphony/state.json                           per-task state and the halt flag; delete it and progress is rebuilt from the roadmap markers
 ```
 
