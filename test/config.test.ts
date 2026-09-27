@@ -507,13 +507,13 @@ test('breakdown config is off by default, parses overrides, and validates keys',
   assert.equal(DEFAULTS.breakdown.onContinue, true);
   assert.equal(DEFAULTS.breakdown.onFailure, true);
   assert.equal(DEFAULTS.breakdown.onBlocked, true);
-  assert.deepEqual(DEFAULTS.breakdown.rules, { afterContinuations: 1, afterFailedAttempts: 1, onCategories: ['task', 'verify'] });
+  assert.deepEqual(DEFAULTS.breakdown.rules, { afterContinuations: 1, afterFailedAttempts: 1, onCategories: ['task', 'verify'], blockedAction: 'proceed' });
   assert.equal(loadConfig(paths, {}).config.breakdown.enabled, false);
 
   writeFileSync(paths.config, JSON.stringify({
     breakdown: {
       enabled: true, onStart: true, onContinue: false, onFailure: false, onBlocked: false, decision: 'rules', preferOverEscalation: false, maxPerTask: 3,
-      rules: { afterContinuations: 0, afterFailedAttempts: 2, onCategories: ['verify'] },
+      rules: { afterContinuations: 0, afterFailedAttempts: 2, onCategories: ['verify'], blockedAction: 'split' },
     },
   }));
   const config = loadConfig(paths, {}).config;
@@ -525,15 +525,17 @@ test('breakdown config is off by default, parses overrides, and validates keys',
   assert.equal(config.breakdown.decision, 'rules');
   assert.equal(config.breakdown.preferOverEscalation, false);
   assert.equal(config.breakdown.maxPerTask, 3);
-  assert.deepEqual(config.breakdown.rules, { afterContinuations: 0, afterFailedAttempts: 2, onCategories: ['verify'] });
+  assert.deepEqual(config.breakdown.rules, { afterContinuations: 0, afterFailedAttempts: 2, onCategories: ['verify'], blockedAction: 'split' });
 
-  writeFileSync(paths.config, JSON.stringify({ breakdown: { provider: 'nope', decision: 'maybe', maxPerTask: -1 } }));
+  writeFileSync(paths.config, JSON.stringify({ breakdown: { provider: 'nope', decision: 'maybe', maxPerTask: -1, rules: { blockedAction: 'maybe' } } }));
   const bad = loadConfig(paths, {});
   assert.equal(bad.config.breakdown.provider, undefined);
   assert.equal(bad.config.breakdown.decision, DEFAULTS.breakdown.decision);
   assert.equal(bad.config.breakdown.maxPerTask, 0);
+  assert.equal(bad.config.breakdown.rules.blockedAction, 'proceed');
   assert.ok(bad.warnings.some((w) => /breakdown\.provider/.test(w)));
   assert.ok(bad.warnings.some((w) => /breakdown\.decision/.test(w)));
+  assert.ok(bad.warnings.some((w) => /breakdown\.rules\.blockedAction/.test(w)));
 
   // resolveBreakdown builds a read-only spec, defaulting to the watch block's provider/model.
   writeFileSync(paths.config, JSON.stringify({ breakdown: { enabled: true, decision: 'llm', model: '' }, watch: { provider: 'fake', model: 'watch-model' } }));

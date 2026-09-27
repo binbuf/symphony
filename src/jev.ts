@@ -352,10 +352,10 @@ const BREAKDOWN_QUESTIONS: Record<BreakdownStage, { instructions: string; criter
     },
   },
   blocked: {
-    instructions: 'A coding agent reported this task blocked: it finished what it could and left items needing a human in its Hand-off. The run is about to stop for that human. Should the task be broken into smaller subtasks first, should the upcoming plan be rewritten, or is the block the real unit of work?',
+    instructions: 'A coding agent reported this task blocked: it finished what it could and left items needing a human in its Hand-off. The run is about to stop for that human. Should the task be broken into smaller subtasks first, should the upcoming plan be rewritten (for example to add a prerequisite the block names), or is the block the real unit of work?',
     criteria: {
-      split: 'The task bundles work a model could do with a decision or input that needs a human; splitting it lets the automatable parts run now and leaves a smaller, clear item for the human.',
-      replan: 'The block showed the plan around this task is wrong: upcoming work depends on the blocked decision, is mis-sized or mis-ordered; rewrite the upcoming plan so the human item is isolated and the rest can proceed.',
+      split: 'The task bundles work a model could do with a decision or input that needs a human; splitting it lets the automatable parts run now and leaves a smaller, clear item for the human. Splitting cannot create a missing prerequisite, so do not choose it for that case.',
+      replan: 'The block shows the plan around this task is wrong. Either upcoming work depends on the blocked decision, or the blocked task itself depends on a prerequisite or missing piece of work that is not in the plan (for example a prerequisite ticket that does not exist yet), or the upcoming work is mis-sized or mis-ordered around the block. Rewrite the upcoming plan to add or reorder that work so the human item is isolated and the rest can proceed.',
       proceed: 'The block is the real unit of work — it needs a human decision before anything more can proceed; leave the ordinary blocked path alone.',
     },
   },

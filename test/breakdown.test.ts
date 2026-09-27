@@ -83,8 +83,12 @@ test('rulesVerdict splits at start/continue and prefers the split over escalatio
   assert.equal(rulesVerdict(b, evidence({ stage: 'failure' }), 'why').action, 'split');
   assert.match(rulesVerdict(b, evidence({ stage: 'failure' }), 'why').reason, /instead of escalating/);
   assert.equal(rulesVerdict({ ...b, preferOverEscalation: false }, evidence({ stage: 'failure' }), 'why').action, 'proceed');
-  assert.equal(rulesVerdict(b, evidence({ stage: 'blocked' }), 'the task reported blocked').action, 'split');
-  assert.match(rulesVerdict(b, evidence({ stage: 'blocked' }), 'the task reported blocked').reason, /instead of stopping for the human/);
+  assert.equal(rulesVerdict(b, evidence({ stage: 'blocked' }), 'the task reported blocked').action, 'proceed');
+  assert.match(rulesVerdict(b, evidence({ stage: 'blocked' }), 'the task reported blocked').reason, /ordinary blocked path/);
+  // An operator can opt back into the old "split off the automatable parts" floor.
+  const splitFloor = { ...b, rules: rules({ blockedAction: 'split' }) };
+  assert.equal(rulesVerdict(splitFloor, evidence({ stage: 'blocked' }), 'the task reported blocked').action, 'split');
+  assert.match(rulesVerdict(splitFloor, evidence({ stage: 'blocked' }), 'the task reported blocked').reason, /instead of stopping for the human/);
 });
 
 test('decideBreakdown is silent while the gate is closed and answers with the rules when nothing else can', async () => {
@@ -134,6 +138,25 @@ test('decideBreakdown carries a discarded Jev call cost onto the answer that win
   const viaRules = await decideBreakdown(config, evidence(), { fetchImpl: jev('split', 0.3), env: { OPENROUTER_API_KEY: 'k' }, askLlm: async () => undefined });
   assert.equal(viaRules?.source, 'rules');
   assert.equal(viaRules?.costUsd, 0.00002);
+});
+
+test('decideBreakdown hands a below-threshold Jev lean to the fallback LLM as a hint', async () => {
+  const config: Config = { ...cfg({ enabled: true, decision: 'auto' }), jev: { ...DEFAULTS.jev, enabled: true } };
+  const jev = (async () => jsonResponse({ model: 'typesafe/jev-1.13', answers: { decision: { type: 'choice', choice: 'replan', confidence: 0.24 } }, usage: { cost: 0.00002 } })) as unknown as typeof fetch;
+  let seen: string | undefined;
+  const askLlm = async (_ev: BreakdownEvidence, hint?: string) => { seen = hint; return { action: 'replan' as const, reason: 'the block names a missing prerequisite ticket' }; };
+  const v = await decideBreakdown(config, evidence({ stage: 'blocked', status: 'blocked', reason: 'blocked on a prerequisite ticket that does not exist' }), { fetchImpl: jev, env: { OPENROUTER_API_KEY: 'k' }, askLlm });
+  assert.equal(v?.source, 'llm');
+  assert.equal(v?.action, 'replan');
+  assert.match(seen ?? '', /leaned "replan" \(24% confident\)/);
+  // A confident Jev answer still ends the chain and carries no hint.
+  let asked = 0;
+  const confident = await decideBreakdown(config, evidence({ stage: 'blocked', status: 'blocked' }), {
+    fetchImpl: (async () => jsonResponse({ model: 'typesafe/jev-1.13', answers: { decision: { type: 'choice', choice: 'replan', confidence: 0.9 } } })) as unknown as typeof fetch,
+    env: { OPENROUTER_API_KEY: 'k' }, askLlm: async () => { asked += 1; return undefined; },
+  });
+  assert.equal(confident?.source, 'jev');
+  assert.equal(asked, 0);
 });
 
 test('decideBreakdown says why Jev returned no usable answer', async () => {
@@ -216,6 +239,10 @@ test('buildBreakdownPrompt is self-contained and stage-specific', () => {
   assert.match(blocked, /reported blocked/);
   assert.match(blocked, /- split: the task mixes automatable work/);
   assert.match(blocked, /needs a human decision on the API shape/);
+  assert.match(blocked, /missing prerequisite/);
+  // A below-threshold earlier lean is carried into the prompt, not discarded.
+  const hinted = buildBreakdownPrompt(evidence({ stage: 'blocked', status: 'blocked', reason: 'blocked on a prerequisite ticket' }), 'the task reported blocked', 'a fast classifier leaned "replan" (24% confident)');
+  assert.match(hinted, /prior signal: a fast classifier leaned "replan"/);
 });
 
 test('a continue boundary breaks the task down instead of starting another slice', async () => {
@@ -308,7 +335,7 @@ test('a blocked report can break the task down instead of stopping for the human
   ].join('\n') + '\n');
   const config: Config = {
     ...DEFAULTS, provider: 'fake', nudge: false, watch: { ...DEFAULTS.watch, enabled: false },
-    breakdown: { ...DEFAULTS.breakdown, enabled: true, decision: 'rules' },
+    breakdown: { ...DEFAULTS.breakdown, enabled: true, decision: 'rules', rules: rules({ blockedAction: 'split' }) },
   };
   const loaded = loadProject(paths, silent);
   let splits = 0;
@@ -386,6 +413,59 @@ test('run: a failure can replan the upcoming work and the run resumes on the new
     const log = execFileSync('git', ['-C', dir, 'log', '--oneline'], { encoding: 'utf8' });
     assert.match(log, /docs: auto-replan after T02 \(failure\) \[replan\]/);
     assert.match(log, /T03: Later, rescoped \[done\]/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('run: a blocked report whose block names a missing prerequisite can replan and resume', async () => {
+  const { dir, paths } = project(
+    '# Roadmap\n\n## Phase 1\n\n- [x] T01 — Done → [tasks/01-done.md](tasks/01-done.md)\n- [ ] T02 — Blocked → [tasks/02-blocked.md](tasks/02-blocked.md)\n- [ ] T03 — Later → [tasks/03-later.md](tasks/03-later.md)\n',
+    { 'docs/tasks/01-done.md': '# T01\n', 'docs/tasks/02-blocked.md': '# T02\n', 'docs/tasks/03-later.md': '# T03\n' },
+  );
+  const fixtures = join(dir, 'fixtures');
+  writeFileSync(join(fixtures, 'T02.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    claudeResult('blocked', 'blocked on a prerequisite ticket (the port builders) that must run before this'),
+  ].join('\n') + '\n');
+  // The blocked-stage fallback LLM sees the prerequisite and re-plans rather than stopping for a human.
+  writeFileSync(join(fixtures, 'breakdown-blocked.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-bd' }),
+    JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 's-bd', result: 'SYMPHONY_BREAKDOWN\ndecision: replan\nreason: the block names a missing prerequisite; the plan must add it before T02\nEND_SYMPHONY_BREAKDOWN' }),
+  ].join('\n') + '\n');
+  writeFileSync(join(fixtures, 'replan-T02.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-rp' }),
+    JSON.stringify({ type: 'fake_rm', path: 'docs/tasks/02-blocked.md' }),
+    JSON.stringify({ type: 'fake_write', path: 'docs/tasks/02a-prereq.md', content: '# T02a\n' }),
+    JSON.stringify({ type: 'fake_write', path: 'docs/ROADMAP.md', content: '# Roadmap\n\n## Phase 1\n\n- [x] T01 — Done → [tasks/01-done.md](tasks/01-done.md)\n- [ ] T02a — Prerequisite → [tasks/02a-prereq.md](tasks/02a-prereq.md)\n- [ ] T03 — Later → [tasks/03-later.md](tasks/03-later.md)\n' }),
+    claudeResult('done', 'replaced the blocked task with its missing prerequisite T02a'),
+  ].join('\n') + '\n');
+  for (const id of ['T02a', 'T03']) {
+    writeFileSync(join(fixtures, `${id}.jsonl`), [JSON.stringify({ type: 'system', subtype: 'init', session_id: `s-${id}` }), claudeResult('done', `${id} finished`)].join('\n') + '\n');
+  }
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+
+  const loaded = loadProject(paths, silent);
+  const config: Config = {
+    ...DEFAULTS, provider: 'fake', nudge: false, watch: { ...DEFAULTS.watch, enabled: false },
+    breakdown: { ...DEFAULTS.breakdown, enabled: true, decision: 'llm', provider: 'fake', model: '' },
+  };
+  const ctx: RunContext = {
+    paths, config, cli: {}, flags, log: silent, roadmap: loaded.roadmap, tasks: loaded.tasks, state: loaded.state,
+    interrupted: false, abort: new AbortController(), autoSplits: new Map(),
+  };
+  ctx.performReplan = (_id, ev, decisionReason) => replanForBreakdown(ctx, ev, { decisionReason });
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    const roadmap = readFileSync(paths.roadmap, 'utf8');
+    assert.doesNotMatch(roadmap, /T02 — Blocked/);
+    assert.match(roadmap, /- \[x\] T02a — Prerequisite/, 'the missing prerequisite was added by the replan and ran');
+    assert.equal(ctx.state.tasks.T02, undefined, 'the removed blocked task row is pruned');
+    assert.equal(ctx.state.tasks.T01.status, 'done', 'finished work is preserved');
+    assert.equal(ctx.state.tasks.T03.status, 'done', 'the run resumed on the rewritten plan');
+    const log = execFileSync('git', ['-C', dir, 'log', '--oneline'], { encoding: 'utf8' });
+    assert.match(log, /docs: auto-replan after T02 \(blocked\) \[replan\]/);
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

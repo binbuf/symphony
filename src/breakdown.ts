@@ -53,8 +53,8 @@ export interface BreakdownDeps {
   abort?: AbortSignal;
   fetchImpl?: typeof fetch;
   env?: NodeJS.ProcessEnv;
-  /** Overridable for tests: answer the decision with a fallback LLM session. */
-  askLlm?: (ev: BreakdownEvidence) => Promise<LlmBreakdownAnswer | undefined>;
+  /** Overridable for tests: answer the decision with a fallback LLM session. `hint` is an earlier source's below-threshold lean, if any. */
+  askLlm?: (ev: BreakdownEvidence, hint?: string) => Promise<LlmBreakdownAnswer | undefined>;
 }
 
 /**
@@ -82,8 +82,11 @@ export function breakdownGate(b: BreakdownConfig, ev: BreakdownEvidence): { open
   return { open: true, why: `${ev.attempts} session${ev.attempts === 1 ? '' : 's'}, category ${ev.category ?? 'task'}` };
 }
 
-/** The deterministic answer once a gate is open: split (the preferred path) unless configured otherwise. */
+/** The deterministic answer once a gate is open: split (the preferred path), except that at `blocked` the floor is `proceed` by default (see `rules.blockedAction`). */
 export function rulesVerdict(b: BreakdownConfig, ev: BreakdownEvidence, why: string): BreakdownVerdict {
+  if (ev.stage === 'blocked' && b.rules.blockedAction === 'proceed') {
+    return { action: 'proceed', source: 'rules', reason: `${why}; leaving the ordinary blocked path (breakdown.rules.blockedAction is "proceed")` };
+  }
   const closing = ev.stage === 'start'
     ? 'split before running it'
     : ev.stage === 'continue'
@@ -126,6 +129,10 @@ export async function decideBreakdown(config: Config, ev: BreakdownEvidence, dep
   // Every source that actually answered has already spent money, even when its answer is discarded
   // for being below `minConfidence`; carry the spend onto whatever verdict finally wins.
   let spentUsd = 0;
+  // A below-threshold Jev lean is still a signal: hand it to the fallback LLM rather than discarding
+  // it, so the weaker decider is not asked cold (the T69b block: Jev said `replan` at 24%, the
+  // fallback then said `proceed` from scratch).
+  let hint: string | undefined;
 
   if (b.decision === 'auto' || b.decision === 'jev') {
     if (config.jev.enabled && config.jev.breakdownDecision) {
@@ -146,6 +153,7 @@ export async function decideBreakdown(config: Config, ev: BreakdownEvidence, dep
         if (decision && decision.confidence >= config.jev.minConfidence) {
           return { action: decision.action, source: 'jev', reason: `${gate.why} · Jev chose ${decision.action} (${pct}%)`, confidence: decision.confidence, costUsd: spentUsd || undefined };
         }
+        if (decision) hint = `a fast classifier leaned "${decision.action}" (${pct}% confident), below the confidence bar — weigh it, but decide for yourself`;
         deps.log?.warn(decision
           ? `${ev.task.id}: [jev] breakdown decision "${decision.action}" was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%); falling back`
           : `${ev.task.id}: [jev] breakdown decision returned no usable answer${note ? ` (${note})` : ''}; falling back`);
@@ -154,9 +162,9 @@ export async function decideBreakdown(config: Config, ev: BreakdownEvidence, dep
   }
 
   if (b.decision === 'auto' || b.decision === 'llm') {
-    const ask = deps.askLlm ?? (deps.paths ? (e: BreakdownEvidence) => askBreakdownLlm(config, e, deps) : undefined);
+    const ask = deps.askLlm ?? (deps.paths ? (e: BreakdownEvidence, h?: string) => askBreakdownLlm(config, e, deps, h) : undefined);
     if (ask) {
-      const answer = await ask(ev);
+      const answer = await ask(ev, hint);
       if (answer) {
         const costUsd = spentUsd + (answer.costUsd ?? 0);
         return { action: answer.action, source: 'llm', reason: `${gate.why} · fallback LLM chose ${answer.action}${answer.reason ? `: ${answer.reason}` : ''}`, confidence: answer.confidence, costUsd: costUsd || undefined };
@@ -200,18 +208,18 @@ const STAGE_LINES: Record<BreakdownStage, string> = {
   start: 'A coding agent is about to start this task in one unattended session. Is it sized for that, or is it really several pieces of work that should become smaller subtasks first?',
   continue: 'The task has used one or more sessions, each ending with "continue" (unfinished), and another slice is about to start. Should it keep going, or is the task too large for this approach?',
   failure: 'The task failed. Should the harness break it into smaller subtasks, retry it on a more capable model, or give up?',
-  blocked: 'The task reported blocked: the session finished what it could and left items that need a human. The run is about to stop for that human. Should the task be broken into smaller subtasks first, or is the block the real unit of work?',
+  blocked: 'The task reported blocked: the session finished what it could and left items that need a human. The run is about to stop for that human. Should the task be broken into smaller subtasks first, should the upcoming plan be rewritten (for example to add a prerequisite the block names), or is the block the real unit of work?',
 };
 
 const STAGE_DECISIONS: Record<BreakdownStage, string> = {
   start: '- run: the task is one coherent session of work; run it as it is.\n- split: it mixes several independent pieces of work, or is larger than one session; split it first.\n- replan: the plan around it is wrong (upcoming tasks mis-sized, mis-ordered, duplicative or missing); rewrite the upcoming plan first.',
   continue: '- continue: the work is converging; let the next slice run.\n- split: it is not converging, or is too large; break it into smaller subtasks.\n- replan: the slices show the plan itself is wrong; rewrite the upcoming plan instead of slicing on.',
   failure: '- split: smaller subtasks are more likely to succeed than a stronger model.\n- replan: the failure shows the plan around this task is wrong; rewrite the upcoming plan.\n- escalate: a more capable model would plausibly finish it from the same context.\n- stop: neither helps (missing context or a human decision).\n- proceed: unclear; take the ordinary failure path.',
-  blocked: '- split: the task mixes automatable work with the human item; split it so the automatable parts can land now and the human gets a smaller, clear block.\n- replan: upcoming work depends on the block or is mis-sized around it; rewrite the upcoming plan so the human item is isolated.\n- proceed: the block is the real unit of work; leave the ordinary blocked path (stop for the human, or continue past it as configured).',
+  blocked: '- split: the task mixes automatable work with the human item; split it so the automatable parts can land now and the human gets a smaller, clear block. Splitting cannot create a missing prerequisite, so do not choose it for that case.\n- replan: the plan around the task is wrong — either upcoming work depends on the block, or the blocked task depends on a prerequisite or missing piece of work that is not in the plan (for example a prerequisite ticket that does not exist yet), or the upcoming work is mis-sized/mis-ordered around it; rewrite the upcoming plan, adding or reordering that work so the human item is isolated.\n- proceed: the block is the real unit of work; leave the ordinary blocked path (stop for the human, or continue past it as configured).',
 };
 
-/** The fallback-LLM prompt: a self-contained snapshot so the read-only session answers without tools. */
-export function buildBreakdownPrompt(ev: BreakdownEvidence, gateReason: string): string {
+/** The fallback-LLM prompt: a self-contained snapshot so the read-only session answers without tools. `hint` is an earlier source's below-threshold lean. */
+export function buildBreakdownPrompt(ev: BreakdownEvidence, gateReason: string, hint?: string): string {
   const evidence: string[] = [];
   if (ev.stage === 'continue') {
     evidence.push(`- last slice reported: ${squash(ev.reason ?? 'continue', 300)}`);
@@ -222,6 +230,7 @@ export function buildBreakdownPrompt(ev: BreakdownEvidence, gateReason: string):
   } else if (ev.stage === 'blocked') {
     evidence.push(`- block summary: ${squash(ev.reason ?? '(none given)', 400)}`);
   }
+  if (hint) evidence.push(`- prior signal: ${hint}`);
   return renderPrompt('breakdown.md', {
     stage: ev.stage,
     stageLine: STAGE_LINES[ev.stage],
@@ -239,7 +248,7 @@ export function buildBreakdownPrompt(ev: BreakdownEvidence, gateReason: string):
 }
 
 /** Run one read-only fallback-LLM session and read its decision. Never throws; undefined on any problem. */
-async function askBreakdownLlm(config: Config, ev: BreakdownEvidence, deps: BreakdownDeps): Promise<LlmBreakdownAnswer | undefined> {
+async function askBreakdownLlm(config: Config, ev: BreakdownEvidence, deps: BreakdownDeps, hint?: string): Promise<LlmBreakdownAnswer | undefined> {
   const { paths, log } = deps;
   if (!paths) return undefined;
   try {
@@ -248,7 +257,7 @@ async function askBreakdownLlm(config: Config, ev: BreakdownEvidence, deps: Brea
     log?.info(`${ev.task.id}: breakdown decision (${ev.stage}) with ${spec.providerName}${spec.model ? ` · ${spec.model}` : ''} · timeout ${config.breakdown.timeoutMin} min`);
     const provider = getProvider(spec.providerName);
     const sinks = openRunSinks(paths.runs, `breakdown-${ev.stage}-${ev.task.id}-${stamp()}`);
-    const prompt = buildBreakdownPrompt(ev, breakdownGate(config.breakdown, ev).why);
+    const prompt = buildBreakdownPrompt(ev, breakdownGate(config.breakdown, ev).why, hint);
     writeFileSync(sinks.promptPath, prompt);
     const mcp = planMcp(config, 'breakdown', undefined, {}, provider.name, join(paths.runs, sinks.base), (m) => log?.warn(`${ev.task.id}: mcp: ${m}`));
     mcp?.notes.forEach((n) => log?.warn(`${ev.task.id}: mcp: ${n}`));

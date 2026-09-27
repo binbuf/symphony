@@ -271,6 +271,13 @@ export interface BreakdownRules {
   afterFailedAttempts: number;
   /** `onFailure` trigger: failure categories that open the decision. */
   onCategories: string[];
+  /**
+   * The deterministic floor at the `blocked` stage (used only when the model sources decline).
+   * `proceed` (the default) respects the block and stops for the human; `split` guesses that the
+   * task bundles automatable work and breaks it down. Neither can rewrite the plan — only the model
+   * sources choose `replan`.
+   */
+  blockedAction: 'split' | 'proceed';
 }
 
 /**
@@ -558,6 +565,7 @@ export const DEFAULTS: Config = {
       afterContinuations: 1,
       afterFailedAttempts: 1,
       onCategories: ['task', 'verify'],
+      blockedAction: 'proceed',
     },
     decision: 'auto',
     provider: undefined,
@@ -620,6 +628,14 @@ function stringArray(x: unknown, fallback: string[], where: string, warnings: st
   if (x === undefined || x === null) return fallback;
   if (Array.isArray(x) && x.every((v) => typeof v === 'string')) return x as string[];
   warnings.push(`${where}: expected an array of strings; using default`);
+  return fallback;
+}
+
+/** Like boolOr, but the value must be one of `allowed`; anything else falls back with a warning. */
+function enumOr<T extends string>(x: unknown, allowed: readonly T[], fallback: T, where: string, warnings: string[]): T {
+  if (x === undefined || x === null) return fallback;
+  if (typeof x === 'string' && (allowed as readonly string[]).includes(x)) return x as T;
+  warnings.push(`${where}: expected one of ${allowed.join(', ')}, got ${JSON.stringify(x)}; using ${fallback}`);
   return fallback;
 }
 
@@ -1094,6 +1110,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
           afterContinuations: Math.max(0, numberOr(breakRulesRaw.afterContinuations, DEFAULTS.breakdown.rules.afterContinuations, 'breakdown.rules.afterContinuations', warnings)),
           afterFailedAttempts: Math.max(0, numberOr(breakRulesRaw.afterFailedAttempts, DEFAULTS.breakdown.rules.afterFailedAttempts, 'breakdown.rules.afterFailedAttempts', warnings)),
           onCategories: stringArray(breakRulesRaw.onCategories, DEFAULTS.breakdown.rules.onCategories, 'breakdown.rules.onCategories', warnings),
+          blockedAction: enumOr(breakRulesRaw.blockedAction, ['split', 'proceed'] as const, DEFAULTS.breakdown.rules.blockedAction, 'breakdown.rules.blockedAction', warnings),
         },
         decision,
         provider,
