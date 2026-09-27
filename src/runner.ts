@@ -327,9 +327,10 @@ async function classifyOutcome(ctx: RunContext, task: Task, st: TaskState, ev: F
     log.warn(`${task.id}: [jev] failure is unclassified but Jev is unavailable (${problem})`);
     return base;
   }
-  const decision = await classifyError(config.jev, { evidence: evidenceText(ev), exitCode: ev.exitCode, resultSubtype: ev.resultSubtype }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal });
+  let note = '';
+  const decision = await classifyError(config.jev, { evidence: evidenceText(ev), exitCode: ev.exitCode, resultSubtype: ev.resultSubtype }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal, note: (m) => { note = m; } });
   if (!decision) {
-    log.warn(`${task.id}: [jev] failure is unclassified; Jev returned no usable category`);
+    log.warn(`${task.id}: [jev] failure is unclassified; Jev returned no usable category${note ? ` (${note})` : ''}`);
     return base;
   }
   // A call that answered was paid for even if the answer is then discarded for low confidence.
@@ -668,10 +669,11 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       if (problem) {
         log.warn(`${task.id}: [jev] escalation check unavailable (${problem}); escalating on ${category} as configured`);
       } else {
+        let note = '';
         const decision = await classifyEscalation(
           config.jev,
           { taskTitle: task.title, taskBody: taskFileBody(task, config.maxTaskBytes), failure: reason },
-          { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal },
+          { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal, note: (m) => { note = m; } },
         );
         const pct = decision ? Math.round(decision.confidence * 100) : 0;
         if (decision?.costUsd !== undefined) { st.costUsd = (st.costUsd ?? 0) + decision.costUsd; ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd; }
@@ -684,7 +686,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         } else if (decision) {
           log.warn(`${task.id}: [jev] Jev's escalation call was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%); escalating as configured`);
         } else {
-          log.warn(`${task.id}: [jev] Jev returned no usable escalation decision; escalating as configured`);
+          log.warn(`${task.id}: [jev] Jev returned no usable escalation decision${note ? ` (${note})` : ''}; escalating as configured`);
         }
       }
     }
@@ -803,7 +805,8 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       if (problem) {
         log.warn(`${task.id}: [jev] session ended without a SYMPHONY_RESULT block; Jev fallback unavailable (${problem})`);
       } else {
-        const decision = await classifySessionResult(config.jev, { taskTitle: task.title, output: outcome.allText }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal });
+        let note = '';
+        const decision = await classifySessionResult(config.jev, { taskTitle: task.title, output: outcome.allText }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal, note: (m) => { note = m; } });
         // Charge any answered call, even when the disposition is not accepted below.
         if (decision?.costUsd !== undefined) { st.costUsd = (st.costUsd ?? 0) + decision.costUsd; ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd; }
         const pct = decision ? Math.round(decision.confidence * 100) : 0;
@@ -815,7 +818,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         } else if (decision) {
           log.warn(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev's ${decision.status} was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)`);
         } else {
-          log.warn(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev returned no usable decision`);
+          log.warn(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev returned no usable decision${note ? ` (${note})` : ''}`);
         }
       }
     }

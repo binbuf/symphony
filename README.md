@@ -585,7 +585,7 @@ It runs up to four independent **workflows**, each behind its own flag:
   "escalationDecision": true,
   "breakdownDecision": true,
   "provider": "openrouter",
-  "model": "jev-latest",
+  "model": "typesafe/jev-1.13",
   "apiKeyEnv": "OPENROUTER_API_KEY",
   "timeoutMs": 4000,
   "minConfidence": 0.7,
@@ -602,7 +602,7 @@ It runs up to four independent **workflows**, each behind its own flag:
 | `breakdownDecision` | `true` | decide split / replan / carry on / escalate / stop for an open [automatic breakdown](#automatic-breakdowns) |
 | `provider` | `openrouter` | where the System One call goes; `baseUrl` overrides it |
 | `baseUrl` | – | override the provider's base URL (e.g. a self-hosted gateway) |
-| `model` | `jev-latest` | System One model id; `jev-latest` tracks the newest Jev release |
+| `model` | `typesafe/jev-1.13` | System One model id; pin a released version rather than a moving tag |
 | `apiKeyEnv` | `OPENROUTER_API_KEY` | environment variable holding the bearer token |
 | `timeoutMs` | `4000` | hard cap on one call; on timeout the deterministic path runs |
 | `minConfidence` | `0.7` | below this the answer is discarded and the deterministic path runs |
@@ -841,7 +841,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `retry.maxAttempts`, `retry.exponential`, `retry.baseSec`, `retry.factor`, `retry.maxSec`, `retry.jitter`, `retry.honorRetryAfter`, `retry.backoffSec` | `8`, `true`, `30`, `2`, `900`, `0.2`, `true`, `[30,120,300]` | transient-error retries: exponential by default (`baseSec × factor^n`, capped, jittered, a provider `Retry-After` honoured), or the fixed `backoffSec` schedule when `exponential` is false |
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
 | `escalation.enabled`, `.provider`, `.model`, `.modelProvider`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
-| `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `true`, `openrouter`, `jev-latest`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
+| `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `true`, `openrouter`, `typesafe/jev-1.13`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, adaptive image description, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt explains it (see [Vision tool](#vision-tool)) |
 | `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true` except `watch`, `10000` | post lifecycle events to a Slack channel or DM a user, threading a task's later events under its start (see [Slack notifications](#slack-notifications)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |

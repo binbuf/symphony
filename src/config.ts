@@ -90,7 +90,7 @@ export interface JevConfig {
   provider: JevProviderName;
   /** Overrides the provider's base URL (e.g. a self-hosted gateway). */
   baseUrl?: string;
-  /** System One model id; "jev-latest" tracks the newest Jev release. */
+  /** System One model id, e.g. "typesafe/jev-1.13". Pin a released version rather than a moving tag. */
   model: string;
   /** Environment variable holding the bearer token. */
   apiKeyEnv: string;
@@ -493,7 +493,7 @@ export const DEFAULTS: Config = {
     escalationDecision: true,
     breakdownDecision: true,
     provider: 'openrouter',
-    model: 'jev-latest',
+    model: 'typesafe/jev-1.13',
     apiKeyEnv: 'OPENROUTER_API_KEY',
     timeoutMs: 4000,
     minConfidence: 0.7,

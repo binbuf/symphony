@@ -54,7 +54,7 @@ test('classifySessionResult posts the System One request and parses the answer',
   assert.equal(seen?.url, 'https://openrouter.ai/api/v1/systemone');
   assert.equal((seen?.init.headers as Record<string, string>).Authorization, 'Bearer sk-or-test');
   const body = JSON.parse(String(seen?.init.body)) as { model: string; state: Record<string, string>; questions: { disposition: { type: string; criteria: Record<string, string> } } };
-  assert.equal(body.model, 'jev-latest');
+  assert.equal(body.model, 'typesafe/jev-1.13');
   assert.equal(body.questions.disposition.type, 'choice');
   assert.deepEqual(Object.keys(body.questions.disposition.criteria), ['done', 'continue', 'blocked', 'failed']);
   assert.equal(body.state.task_title, 'Do the thing');
@@ -68,6 +68,29 @@ test('classifySessionResult resolves undefined on a non-OK response, a thrown fe
   assert.equal(await classifySessionResult(cfg, { taskTitle: 't', output: 'x' }, { fetchImpl: boom, env: { OPENROUTER_API_KEY: 'k' } }), undefined);
   const never = (async () => jsonResponse({})) as unknown as typeof fetch;
   assert.equal(await classifySessionResult(cfg, { taskTitle: 't', output: 'x' }, { fetchImpl: never, env: {} }), undefined);
+});
+
+test('deps.note explains a failed call: HTTP status with body, and network errors', async () => {
+  const notes: string[] = [];
+  const cfg = jevConfig();
+  const notOk = (async () => new Response('{"error":"nope"}', { status: 401, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+  assert.equal(await classifySessionResult(cfg, { taskTitle: 't', output: 'x' }, { fetchImpl: notOk, env: { OPENROUTER_API_KEY: 'k' }, note: (m) => notes.push(m) }), undefined);
+  assert.match(notes[0] ?? '', /HTTP 401.*nope/);
+
+  const boom = (async () => { throw new Error('network down'); }) as unknown as typeof fetch;
+  assert.equal(await classifyError(cfg, { evidence: 'x' }, { fetchImpl: boom, env: { OPENROUTER_API_KEY: 'k' }, note: (m) => notes.push(m) }), undefined);
+  assert.match(notes[1] ?? '', /request failed: network down/);
+});
+
+test('deps.note explains an unusable answer shape', async () => {
+  const notes: string[] = [];
+  const wrongChoice = (async () => jsonResponse({ model: 'typesafe/jev-1.13', answers: { category: { type: 'choice', choice: 'made_up', confidence: 0.9 } } })) as unknown as typeof fetch;
+  assert.equal(await classifyError(jevConfig(), { evidence: 'x' }, { fetchImpl: wrongChoice, env: { OPENROUTER_API_KEY: 'k' }, note: (m) => notes.push(m) }), undefined);
+  assert.match(notes[0] ?? '', /unusable answer: answers category=made_up/);
+
+  const noAnswers = (async () => jsonResponse({ model: 'typesafe/jev-1.13', error: 'nope' })) as unknown as typeof fetch;
+  assert.equal(await classifySessionResult(jevConfig(), { taskTitle: 't', output: 'x' }, { fetchImpl: noAnswers, env: { OPENROUTER_API_KEY: 'k' }, note: (m) => notes.push(m) }), undefined);
+  assert.match(notes[1] ?? '', /no answers block \(keys: model,error\)/);
 });
 
 test('classifyError posts the error state and parses the category', async () => {

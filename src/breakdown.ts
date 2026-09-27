@@ -132,13 +132,14 @@ export async function decideBreakdown(config: Config, ev: BreakdownEvidence, dep
       const problem = jevProblem(config.jev, deps.env ?? process.env);
       if (problem) deps.log?.warn(`${ev.task.id}: [jev] breakdown decision unavailable (${problem}); falling back`);
       else {
+        let note = '';
         const decision = await classifyBreakdown(
           config.jev,
           {
             stage: ev.stage, taskTitle: ev.task.title, taskBody: ev.taskBody, status: ev.status,
             attempts: ev.attempts, continuations: ev.continuations, reason: ev.reason,
           },
-          { fetchImpl: deps.fetchImpl, env: deps.env, signal: deps.abort },
+          { fetchImpl: deps.fetchImpl, env: deps.env, signal: deps.abort, note: (m) => { note = m; } },
         );
         if (decision?.costUsd !== undefined) spentUsd += decision.costUsd;
         const pct = decision ? Math.round(decision.confidence * 100) : 0;
@@ -147,7 +148,7 @@ export async function decideBreakdown(config: Config, ev: BreakdownEvidence, dep
         }
         deps.log?.warn(decision
           ? `${ev.task.id}: [jev] breakdown decision "${decision.action}" was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%); falling back`
-          : `${ev.task.id}: [jev] breakdown decision returned no usable answer; falling back`);
+          : `${ev.task.id}: [jev] breakdown decision returned no usable answer${note ? ` (${note})` : ''}; falling back`);
       }
     }
   }

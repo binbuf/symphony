@@ -90,7 +90,7 @@
     "escalationDecision": true,
     "breakdownDecision": true,
     "provider": "openrouter",
-    "model": "jev-latest",
+    "model": "typesafe/jev-1.13",
     "apiKeyEnv": "OPENROUTER_API_KEY",
     "timeoutMs": 4000,
     "minConfidence": 0.7,

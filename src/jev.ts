@@ -1,7 +1,7 @@
 import type { ErrorCategory } from './classify.js';
 import type { JevConfig, JevProviderName } from './config.js';
 import type { ReportedStatus } from './result.js';
-import { headAndTail, isRecord } from './util.js';
+import { headAndTail, isRecord, squash } from './util.js';
 
 /** Base URL per built-in provider; `jev.baseUrl` overrides it. */
 const BASE_URLS: Record<JevProviderName, string> = {
@@ -55,6 +55,8 @@ export interface JevDeps {
   fetchImpl?: typeof fetch;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** Optional sink for why a call failed or an answer was unusable, so the caller's log can say more than "no answer". */
+  note?: (message: string) => void;
 }
 
 interface Choice {
@@ -94,7 +96,8 @@ async function callSystemOne(config: JevConfig, state: unknown, questions: unkno
 
   const doFetch = deps.fetchImpl ?? fetch;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, config.timeoutMs);
   const onAbort = () => controller.abort();
   if (deps.signal?.aborted) controller.abort();
   else deps.signal?.addEventListener('abort', onAbort, { once: true });
@@ -106,14 +109,36 @@ async function callSystemOne(config: JevConfig, state: unknown, questions: unkno
       body: JSON.stringify({ model: config.model, state, questions }),
       signal: controller.signal,
     });
-    if (!res.ok) return undefined;
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      deps.note?.(`HTTP ${res.status}${body ? `: ${squash(body, 160)}` : ''}`);
+      return undefined;
+    }
     return await res.json();
-  } catch {
+  } catch (e) {
+    deps.note?.(timedOut
+      ? `timeout after ${config.timeoutMs}ms`
+      : deps.signal?.aborted
+        ? 'aborted'
+        : `request failed: ${(e as Error).message}`);
     return undefined;
   } finally {
     clearTimeout(timer);
     deps.signal?.removeEventListener('abort', onAbort);
   }
+}
+
+/** A short, safe description of a System One body: which answer keys and choices came back. */
+function describeAnswer(json: unknown): string {
+  if (!isRecord(json)) return typeof json === 'string' ? `non-JSON body: ${squash(json, 120)}` : 'unexpected body';
+  if (!isRecord(json.answers)) return `no answers block (keys: ${Object.keys(json).join(',') || 'none'})`;
+  const parts = Object.entries(json.answers).map(([key, answer]) => {
+    const said = isRecord(answer) && typeof answer.choice === 'string'
+      ? answer.choice
+      : isRecord(answer) && typeof answer.type === 'string' ? `type=${answer.type}` : '?';
+    return `${key}=${said}`;
+  });
+  return `answers ${parts.join(', ') || '(none)'}`;
 }
 
 /** Read a named `choice` answer out of a System One response. */
@@ -162,7 +187,9 @@ export async function classifySessionResult(
     },
     deps,
   );
-  return parseDecision(json);
+  const decision = parseDecision(json);
+  if (!decision && json !== undefined) deps.note?.(`unusable answer: ${describeAnswer(json)}`);
+  return decision;
 }
 
 /**
@@ -186,7 +213,9 @@ export async function classifyError(
     },
     deps,
   );
-  return parseErrorDecision(json);
+  const decision = parseErrorDecision(json);
+  if (!decision && json !== undefined) deps.note?.(`unusable answer: ${describeAnswer(json)}`);
+  return decision;
 }
 
 /** The two options Jev weighs when deciding whether a failed task is worth escalating. */
@@ -228,7 +257,9 @@ export async function classifyEscalation(
     },
     deps,
   );
-  return parseEscalationDecision(json);
+  const decision = parseEscalationDecision(json);
+  if (!decision && json !== undefined) deps.note?.(`unusable answer: ${describeAnswer(json)}`);
+  return decision;
 }
 
 /** Read the `escalation` decision out of a System One response. Exported for tests. */
@@ -347,7 +378,9 @@ export async function classifyBreakdown(config: JevConfig, input: JevBreakdownIn
     { decision: { type: 'choice', instructions: question.instructions, criteria: question.criteria } },
     deps,
   );
-  return parseBreakdownDecision(json, input.stage);
+  const decision = parseBreakdownDecision(json, input.stage);
+  if (!decision && json !== undefined) deps.note?.(`unusable answer: ${describeAnswer(json)}`);
+  return decision;
 }
 
 /**

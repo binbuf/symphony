@@ -136,6 +136,16 @@ test('decideBreakdown carries a discarded Jev call cost onto the answer that win
   assert.equal(viaRules?.costUsd, 0.00002);
 });
 
+test('decideBreakdown says why Jev returned no usable answer', async () => {
+  const config: Config = { ...cfg({ enabled: true, decision: 'auto' }), jev: { ...DEFAULTS.jev, enabled: true } };
+  const warnings: string[] = [];
+  const log: Logger = { info() {}, warn: (m) => warnings.push(m), error() {}, plain() {}, banner() {} };
+  const notOk = (async () => new Response('upstream exploded', { status: 502 })) as unknown as typeof fetch;
+  const v = await decideBreakdown(config, evidence(), { fetchImpl: notOk, env: { OPENROUTER_API_KEY: 'k' }, log, askLlm: async () => undefined });
+  assert.equal(v?.source, 'rules');
+  assert.ok(warnings.some((w) => /no usable answer \(HTTP 502: upstream exploded\)/.test(w)), warnings.join('\n'));
+});
+
 test('decideBreakdown pins a source when asked to', async () => {
   let asked = 0;
   const noopFetch = (async () => { asked += 1; return jsonResponse({}); }) as unknown as typeof fetch;

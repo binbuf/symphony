@@ -405,13 +405,13 @@ test('escalation defaults to GLM-5.3 via OpenCode, is off until enabled, and res
   assert.throws(() => loadConfig(paths, {}), /unknown provider/);
 });
 
-test('jev config parses, defaults to OpenRouter with jev-latest, and validates its keys', () => {
+test('jev config parses, defaults to OpenRouter with typesafe/jev-1.13, and validates its keys', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-jev-'));
   const paths = resolvePaths(dir);
   mkdirSync(paths.symphony, { recursive: true });
   assert.equal(DEFAULTS.jev.enabled, false);
   assert.equal(DEFAULTS.jev.provider, 'openrouter');
-  assert.equal(DEFAULTS.jev.model, 'jev-latest');
+  assert.equal(DEFAULTS.jev.model, 'typesafe/jev-1.13');
   // Every workflow ships on, so flipping `enabled` turns them all on until you opt one out.
   assert.equal(DEFAULTS.jev.resultFallback, true);
   assert.equal(DEFAULTS.jev.failureTriage, true);
