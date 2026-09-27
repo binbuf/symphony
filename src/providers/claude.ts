@@ -98,7 +98,10 @@ export const claudeProvider: Provider = {
   authCheckArgs: ['auth', 'status'],
   buildCommand(o) {
     // Prompt goes over stdin (avoids argv limits; the predecessor harness ran ~70 sessions this way).
-    const args = ['-p', 'Follow the instructions provided on stdin exactly.', '--output-format', 'stream-json', '--verbose'];
+    // An inline prompt (the watcher's) is short and self-contained, so it is passed to `-p` directly
+    // and the stdin bootstrap is dropped — that wrapper measurably degrades the watch answer.
+    const promptArg = o.inlinePrompt ? o.prompt : 'Follow the instructions provided on stdin exactly.';
+    const args = ['-p', promptArg, '--output-format', 'stream-json', '--verbose'];
     if (o.resumeId) args.push('--resume', o.resumeId);
     if (o.model) args.push('--model', o.model);
     // Claude Code's session effort knob: low | medium | high | xhigh | max.
@@ -110,7 +113,7 @@ export const claudeProvider: Provider = {
     } else if (o.autoApprove) args.push('--dangerously-skip-permissions');
     else args.push('--permission-mode', 'acceptEdits', '--permission-prompts', 'none');
     args.push(...o.extraArgs);
-    return { bin: o.bin, args, stdinPayload: o.prompt };
+    return { bin: o.bin, args, stdinPayload: o.inlinePrompt ? undefined : o.prompt };
   },
   createParser: () => new ClaudeParser(),
 };

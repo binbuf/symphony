@@ -135,7 +135,12 @@ export const codexProvider: Provider = {
     else if (o.autoApprove) args.push('--dangerously-bypass-approvals-and-sandbox');
     else args.push('--sandbox', 'workspace-write', '--ask-for-approval', 'never');
     args.push(...o.extraArgs);
-    // `-` reads the prompt from stdin; never place the prompt on argv.
+    // `-` reads the prompt from stdin; never place the full task prompt on argv. A short inline
+    // prompt (the watcher's) is passed as the positional instead, with no bootstrap wrapper.
+    if (o.inlinePrompt) {
+      args.push(o.prompt);
+      return { bin: o.bin, args };
+    }
     args.push('-');
     return { bin: o.bin, args, stdinPayload: o.prompt };
   },

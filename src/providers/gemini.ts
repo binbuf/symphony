@@ -18,7 +18,7 @@ export const geminiProvider: Provider = {
     if (o.model) args.push('--model', o.model);
     if (o.autoApprove) args.push('--yolo');
     args.push(...o.extraArgs);
-    args.push('--prompt', fileBootstrap(o.promptFile));
+    args.push('--prompt', o.inlinePrompt ? o.prompt : fileBootstrap(o.promptFile));
     return { bin: o.bin, args };
   },
   createParser: () => new GenericParser(),

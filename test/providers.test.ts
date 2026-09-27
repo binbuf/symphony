@@ -69,6 +69,12 @@ test('claude buildCommand: stdin prompt, bypass by default, safe mode flags', ()
   assert.ok(roArgs.includes('--disallowedTools Edit Write NotebookEdit Bash'));
   assert.ok(roArgs.includes('--permission-mode acceptEdits'));
   assert.ok(!ro.args.includes('--dangerously-skip-permissions'), 'read-only beats the bypass flag');
+  // An inline prompt is passed to `-p` directly; the stdin bootstrap wrapper is dropped.
+  const inline = claudeProvider.buildCommand(opts({ inlinePrompt: true, readOnly: true }));
+  assert.equal(inline.args[0], '-p');
+  assert.equal(inline.args[1], 'do it');
+  assert.equal(inline.stdinPayload, undefined);
+  assert.ok(!inline.args.includes('Follow the instructions provided on stdin exactly.'));
 });
 
 test('cursor parser: tool_call reduction and result', () => {
@@ -155,6 +161,29 @@ test('opencode buildCommand: prompt attached via --file, --auto by default, --se
   assert.ok(!c.args.includes('--standalone'));
   assert.ok(c.args.join(' ').includes('--format json'));
   assert.ok(c.args.includes('--thinking'));
+  // An inline prompt (the watcher's) is the trailing positional: no `--file`, no bootstrap.
+  const inline = opencodeProvider.buildCommand(opts({ inlinePrompt: true, prompt: 'watch this', readOnly: true }));
+  assert.equal(inline.args[inline.args.length - 1], 'watch this');
+  assert.ok(!inline.args.includes('--file'));
+  assert.ok(!inline.args.includes(ATTACHED_BOOTSTRAP));
+  assert.equal(inline.stdinPayload, undefined);
+});
+
+test('every file-bootstrap provider passes the prompt inline when asked, with no wrapper', () => {
+  const expected: Array<[string, ReturnType<typeof antigravityProvider.buildCommand>]> = [
+    ['gemini', geminiProvider.buildCommand(opts({ inlinePrompt: true, prompt: 'watch this' }))],
+    ['cursor', cursorProvider.buildCommand(opts({ inlinePrompt: true, prompt: 'watch this' }))],
+    ['antigravity', antigravityProvider.buildCommand(opts({ inlinePrompt: true, prompt: 'watch this' }))],
+    ['codex', codexProvider.buildCommand(opts({ inlinePrompt: true, prompt: 'watch this' }))],
+  ];
+  for (const [name, c] of expected) {
+    const text = c.args.join(' ');
+    assert.ok(c.args.includes('watch this'), `${name} carries the prompt inline`);
+    assert.ok(!text.includes(fileBootstrap('/tmp/p.md')), `${name} drops the file bootstrap`);
+    assert.ok(!text.includes('Follow the instructions in the attached file'), `${name} drops the attached-file bootstrap`);
+    assert.equal(c.stdinPayload, undefined, `${name} sends nothing on stdin`);
+  }
+  assert.equal(expected[3][1].args[expected[3][1].args.length - 1], 'watch this', 'codex sends the prompt as the positional');
 });
 
 test('codex parser: thread, items, turn.completed → result with last message; turn.failed → error result', () => {

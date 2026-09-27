@@ -123,7 +123,10 @@ export function pipelineSnapshot(ctx: RunContext): string {
  * task outcomes) was removed so a check stays tiny and the model reads the log directly.
  */
 export function buildWatchPrompt(ctx: RunContext): string {
-  return renderPrompt('watch.md', { symphonyLog: rel(ctx.paths.root, ctx.paths.log) });
+  return renderPrompt('watch.md', {
+    symphonyLog: rel(ctx.paths.root, ctx.paths.log),
+    windowMin: Math.max(1, ctx.config.watch.intervalMin),
+  });
 }
 
 /** Append one check's result to the dedicated watch log. Never throws at the caller. */
@@ -177,7 +180,8 @@ async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider):
   mcp?.notes.forEach((n) => ctx.log.warn(`${WATCH_TASK_ID}: mcp: ${n}`));
   const cmd = provider.buildCommand({
     bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: WATCH_TASK_ID, attempt: 1, kind: 'task',
-    model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, readOnly: spec.readOnly, extraArgs: [...spec.extraArgs, ...(mcp?.args ?? [])], cwd: ctx.paths.root,
+    model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, readOnly: spec.readOnly,
+    inlinePrompt: true, extraArgs: [...spec.extraArgs, ...(mcp?.args ?? [])], cwd: ctx.paths.root,
   });
   if (mcp?.env) cmd.env = { ...(cmd.env ?? {}), ...mcp.env };
   if (mcp) ctx.log.info(`${WATCH_TASK_ID}: ${mcp.label}`);

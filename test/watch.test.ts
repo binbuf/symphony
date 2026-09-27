@@ -42,13 +42,15 @@ test('pipelineSnapshot describes the pipeline from live state', () => {
   assert.match(snap, /running T02/);
 });
 
-test('buildWatchPrompt asks how the current task is doing and points at the symphony log', () => {
+test('buildWatchPrompt asks for a curated health read of the log over the watch window', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-watch-prompt-'));
   const ctx = makeCtx(dir, [task('T01', 1)], { version: 1, tasks: {} });
   const prompt = buildWatchPrompt(ctx);
-  assert.match(prompt, /How is the current task doing\?/);
+  assert.match(prompt, /Provide a thoughtful and curated analysis of the current ongoing task/);
+  assert.match(prompt, /Read the last 5 minutes/);
   assert.match(prompt, /`\.symphony\/symphony\.log`/);
   assert.match(prompt, /4-5 sentences max/);
+  assert.match(prompt, /like a principal engineer providing an update to his Director/);
 });
 
 test('cleanWatchSummary strips conversational openers but keeps real analysis', () => {

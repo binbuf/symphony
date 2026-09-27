@@ -235,6 +235,11 @@ export const opencodeProvider: Provider = {
     if (o.autoApprove) args.push('--auto');
     // A read-only session (the watcher) is the default here: without `--auto`, reads are permitted
     // and edits/shell commands need approval nobody can give, so it can read the named log only.
+    if (o.inlinePrompt) {
+      // A short self-contained prompt (the watcher's) goes straight on argv: no file, no bootstrap.
+      args.push(...o.extraArgs, o.prompt);
+      return { bin: o.bin, args };
+    }
     // The full prompt is attached with `--file`; argv only carries a short bootstrap so an oversized
     // prompt can never overflow the OS command-line limit. In the OpenCode 1.x CLI `--file` is an
     // array flag that would swallow a following positional as another file, so the bootstrap message

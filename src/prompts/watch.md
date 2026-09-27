@@ -1,3 +1,1 @@
-How is the current task doing? Read the symphony log at `{symphonyLog}`.
-
-Give a finalized summary in 4-5 sentences max on what's going on. Only give a direct answer; no thinking process, no steps, no formalities.
+Provide a thoughtful and curated analysis of the current ongoing task by reviewing the log. Read the last {windowMin} minutes (or less if the log does not have data for the full time period) at `{symphonyLog}`. Give a finalized summary with no pre-amble or fluff. In 4-5 sentences max on what's going on technically like a principal engineer providing an update to his Director. Don't mention the current or previous phase or task. Focus on the health of the current task, if it's struggling, or if it's doing well, and why you think that.
