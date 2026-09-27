@@ -573,9 +573,9 @@ Escalation is bounded: `maxAttempts` caps it, and `maxIterationsPerTask` still c
 
 ## Jev
 
-**Jev** — TypeSafe's System One decision model — makes fast, typed calls that replace brittle hand-written decisions in the harness. It is reached through [OpenRouter](https://openrouter.ai/settings/keys), so your OpenRouter key is all you need. Jev is off by default. When it is enabled but its API key is missing, the run halts rather than run with the decision workflows silently disabled; a timeout or a low-confidence answer still falls back to the harness's own deterministic behavior.
+**Jev** — TypeSafe's System One decision model — makes fast, typed calls that replace brittle hand-written decisions in the harness. It is reached through [OpenRouter](https://openrouter.ai/settings/keys), so your OpenRouter key is all you need. Jev is off by default. When it is enabled, at least one workflow is armed, and its API key is missing, the run halts rather than run with the decision workflows silently disabled (with no workflow armed there is nothing to disable, so the run proceeds); a timeout or a low-confidence answer still falls back to the harness's own deterministic behavior.
 
-It runs up to three independent **workflows**, each behind its own flag:
+It runs up to four independent **workflows**, each behind its own flag:
 
 ```json
 "jev": {
@@ -616,7 +616,7 @@ A session that ended cleanly without a `SYMPHONY_RESULT` block is normally recov
 
 ### `failureTriage`
 
-`classifyFailure` is a set of hand-written regex rules over the provider's error text, backed by structured signals when the adapter can see them: an HTTP `429`/`5xx`, a provider `isRetryable`, or any provider `error` event becomes a transient retry even when the wording is unrecognised (an unrecognised `4xx` stays terminal, since it is a request problem, not a throttle). When none match and no such signal exists, the failure lands in `unknown`, which the harness treats as terminal and does not retry. With this on, that `unknown` is put to a `choice` — `auth`, `billing`, `usage_limit`, `rate_limit`, `overloaded`, `server`, `network`, `model`, `config`, or `task` — and the answer is mapped back through the harness's own fatal/transient rules, so a `server` or `rate_limit` becomes a retry that might have succeeded anyway. The regex stays primary: Jev is consulted only when the rules admit they do not know. Unlike the others, this workflow can halt a run (a Jev-classified `auth` is fatal), so tune `minConfidence` against your own error logs before leaving it unattended.
+`classifyFailure` is a set of hand-written regex rules over the provider's error text, backed by structured signals when the adapter can see them: an HTTP `429`/`5xx`, a provider `isRetryable`, or any provider `error` event becomes a transient retry even when the wording is unrecognised (an unrecognised `4xx` stays terminal, since it is a request problem, not a throttle). When none match and no such signal exists, the failure lands in `unknown`, which the harness treats as terminal and does not retry. With this on, that `unknown` is put to a `choice` — `auth`, `billing`, `usage_limit`, `rate_limit`, `overloaded`, `server`, `network`, `model`, `config`, `task`, or `unknown` — and the answer is mapped back through the harness's own fatal/transient rules, so a `server` or `rate_limit` becomes a retry that might have succeeded anyway. The regex stays primary: Jev is consulted only when the rules admit they do not know. Unlike the others, this workflow can halt a run (a Jev-classified `auth` is fatal), so tune `minConfidence` against your own error logs before leaving it unattended.
 
 ### `escalationDecision`
 
@@ -628,7 +628,7 @@ This is a gate, not a router: `onCategories` is still the trigger, infrastructur
 
 When the [`breakdown` block](#automatic-breakdowns) is enabled and one of its gates opens — a task is about to start, a slice ends with `continue`, a task reports `blocked`, or a task fails — Jev reads the task (title and body), the stage and the evidence (the failure, block summary, or the continuation count and last slice summary), and answers a `choice`: `split` (smaller subtasks are more likely to succeed than a stronger model), `replan` (the upcoming plan itself is wrong and should be rewritten), `escalate` (a more capable model would plausibly finish it from the same context), `stop` (neither helps), or `proceed` (let the harness take its ordinary path — at a block, stopping for the human). A confident `split` runs the same session as `symphony split` and a confident `replan` the automatic replan, then the run continues on the result; a confident `escalate` goes straight to the escalation model without asking `escalationDecision` a second time. Below `minConfidence`, or with no key, the chain moves on to the fallback LLM and then the rules — so `breakdownDecision` can only *choose* among the options, never block a run. `escalate` is only offered at the failure stage; the deterministic rules never choose `replan`.
 
-`symphony doctor` reports which workflows are armed and whether the key is present; a missing key halts the next `run` (exit `3`) until it is set or `jev.enabled` is turned off.
+`symphony doctor` reports which workflows are armed and whether the key is present; with a workflow armed, a missing key halts the next `run` (exit `3`) until it is set or `jev.enabled` is turned off.
 
 ## Vision tool
 

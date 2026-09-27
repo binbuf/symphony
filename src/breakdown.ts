@@ -9,7 +9,7 @@ import { getProvider, variantSupported } from './providers/index.js';
 import { startSession } from './session.js';
 import type { Task } from './tasks.js';
 import { renderPrompt } from './templates.js';
-import { clip, squash, stamp } from './util.js';
+import { headAndTail, squash, stamp } from './util.js';
 
 /**
  * Automatic task breakdown. Four stages can open a decision — before a task starts, at a `continue`
@@ -123,6 +123,10 @@ export async function decideBreakdown(config: Config, ev: BreakdownEvidence, dep
   const gate = breakdownGate(b, ev);
   if (!gate.open) return undefined;
 
+  // Every source that actually answered has already spent money, even when its answer is discarded
+  // for being below `minConfidence`; carry the spend onto whatever verdict finally wins.
+  let spentUsd = 0;
+
   if (b.decision === 'auto' || b.decision === 'jev') {
     if (config.jev.enabled && config.jev.breakdownDecision) {
       const problem = jevProblem(config.jev, deps.env ?? process.env);
@@ -136,9 +140,10 @@ export async function decideBreakdown(config: Config, ev: BreakdownEvidence, dep
           },
           { fetchImpl: deps.fetchImpl, env: deps.env, signal: deps.abort },
         );
+        if (decision?.costUsd !== undefined) spentUsd += decision.costUsd;
         const pct = decision ? Math.round(decision.confidence * 100) : 0;
         if (decision && decision.confidence >= config.jev.minConfidence) {
-          return { action: decision.action, source: 'jev', reason: `${gate.why} · Jev chose ${decision.action} (${pct}%)`, confidence: decision.confidence, costUsd: decision.costUsd };
+          return { action: decision.action, source: 'jev', reason: `${gate.why} · Jev chose ${decision.action} (${pct}%)`, confidence: decision.confidence, costUsd: spentUsd || undefined };
         }
         deps.log?.warn(decision
           ? `${ev.task.id}: [jev] breakdown decision "${decision.action}" was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%); falling back`
@@ -152,7 +157,8 @@ export async function decideBreakdown(config: Config, ev: BreakdownEvidence, dep
     if (ask) {
       const answer = await ask(ev);
       if (answer) {
-        return { action: answer.action, source: 'llm', reason: `${gate.why} · fallback LLM chose ${answer.action}${answer.reason ? `: ${answer.reason}` : ''}`, confidence: answer.confidence, costUsd: answer.costUsd };
+        const costUsd = spentUsd + (answer.costUsd ?? 0);
+        return { action: answer.action, source: 'llm', reason: `${gate.why} · fallback LLM chose ${answer.action}${answer.reason ? `: ${answer.reason}` : ''}`, confidence: answer.confidence, costUsd: costUsd || undefined };
       }
       // The session runner already logged why; a test-injected decider may simply decline.
     } else {
@@ -160,7 +166,9 @@ export async function decideBreakdown(config: Config, ev: BreakdownEvidence, dep
     }
   }
 
-  return rulesVerdict(b, ev, gate.why);
+  const verdict = rulesVerdict(b, ev, gate.why);
+  if (spentUsd > 0) verdict.costUsd = spentUsd;
+  return verdict;
 }
 
 export interface LlmBreakdownAnswer {
@@ -225,7 +233,7 @@ export function buildBreakdownPrompt(ev: BreakdownEvidence, gateReason: string):
     continuations: ev.continuations,
     evidence: evidence.join('\n') || '- (nothing recorded yet)',
     gateReason,
-    taskBody: ev.taskBody?.trim() ? clip(ev.taskBody, 12_000) : '(no task file — the roadmap bullet is the whole task)',
+    taskBody: ev.taskBody?.trim() ? headAndTail(ev.taskBody, 12_000) : '(no task file — the roadmap bullet is the whole task)',
   });
 }
 

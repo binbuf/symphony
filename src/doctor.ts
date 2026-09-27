@@ -131,7 +131,10 @@ export function runDoctor(i: DoctorInput): Check[] {
     const workflows = [j.resultFallback ? 'resultFallback' : undefined, j.failureTriage ? 'failureTriage' : undefined, j.escalationDecision ? 'escalationDecision' : undefined, j.breakdownDecision ? 'breakdownDecision' : undefined].filter(Boolean);
     const problem = jevProblem(j, process.env);
     const detail = `Jev [${workflows.join(', ') || 'no workflows'}] via ${j.provider} · ${j.model} (key from ${j.apiKeyEnv})`;
-    add('jev', problem ? 'warn' : 'ok', problem ? `Jev is on but ${problem}; run halts until this is fixed (set ${j.apiKeyEnv}, or jev.enabled=false). ${detail}` : detail);
+    const haltNote = workflows.length
+      ? `run halts until this is fixed (set ${j.apiKeyEnv}, or jev.enabled=false)`
+      : `no workflow is armed, so the run will not halt (set ${j.apiKeyEnv}, or jev.enabled=false)`;
+    add('jev', problem ? 'warn' : 'ok', problem ? `Jev is on but ${problem}; ${haltNote}. ${detail}` : detail);
   }
 
   const bd = i.config.breakdown;

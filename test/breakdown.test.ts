@@ -120,6 +120,22 @@ test('decideBreakdown asks Jev first, then the fallback LLM, then the rules', as
   assert.equal(noKey?.source, 'llm', 'without a Jev key the fallback LLM answers');
 });
 
+test('decideBreakdown carries a discarded Jev call cost onto the answer that wins', async () => {
+  const config: Config = { ...cfg({ enabled: true, decision: 'auto' }), jev: { ...DEFAULTS.jev, enabled: true } };
+  const jev = (choice: string, confidence: number) => (async () =>
+    jsonResponse({ model: 'typesafe/jev-1.13', answers: { decision: { type: 'choice', choice, confidence } }, usage: { cost: 0.00002 } })) as unknown as typeof fetch;
+
+  // Below minConfidence: the LLM answers, but Jev's spend is still reported (the LLM cost is added).
+  const viaLlm = await decideBreakdown(config, evidence(), { fetchImpl: jev('split', 0.3), env: { OPENROUTER_API_KEY: 'k' }, askLlm: async () => ({ action: 'proceed' as const, costUsd: 0.00005 }) });
+  assert.equal(viaLlm?.source, 'llm');
+  assert.ok(Math.abs((viaLlm?.costUsd ?? 0) - 0.00007) < 1e-12, `expected ~0.00007, got ${viaLlm?.costUsd}`);
+
+  // Below minConfidence and no LLM answer: the rules win, but Jev's spend is not lost.
+  const viaRules = await decideBreakdown(config, evidence(), { fetchImpl: jev('split', 0.3), env: { OPENROUTER_API_KEY: 'k' }, askLlm: async () => undefined });
+  assert.equal(viaRules?.source, 'rules');
+  assert.equal(viaRules?.costUsd, 0.00002);
+});
+
 test('decideBreakdown pins a source when asked to', async () => {
   let asked = 0;
   const noopFetch = (async () => { asked += 1; return jsonResponse({}); }) as unknown as typeof fetch;
@@ -140,6 +156,22 @@ test('parseBreakdownDecision reads the Jev choice and rejects unknown words', ()
   assert.equal(parseBreakdownDecision({ answers: { decision: { type: 'choice', choice: 'stop', confidence: 0.8 } } })?.action, 'stop');
   assert.equal(parseBreakdownDecision({ answers: { decision: { type: 'choice', choice: 'sleep', confidence: 0.8 } } }), undefined);
   assert.equal(parseBreakdownDecision(null), undefined);
+});
+
+test('parseBreakdownDecision normalizes the start/continue words Jev is actually asked', () => {
+  // At `start`/`continue` the criteria offer "run"/"continue", not "proceed"; both mean carry on.
+  assert.equal(parseBreakdownDecision({ answers: { decision: { type: 'choice', choice: 'run', confidence: 0.9 } } }, 'start')?.action, 'proceed');
+  assert.equal(parseBreakdownDecision({ answers: { decision: { type: 'choice', choice: 'continue', confidence: 0.9 } } }, 'continue')?.action, 'proceed');
+  // A raw "run" with no stage is still accepted.
+  assert.equal(parseBreakdownDecision({ answers: { decision: { type: 'choice', choice: 'run', confidence: 0.9 } } })?.action, 'proceed');
+});
+
+test('parseBreakdownDecision rejects an action the stage never offered', () => {
+  const json = { answers: { decision: { type: 'choice', choice: 'escalate', confidence: 0.9 } } };
+  assert.equal(parseBreakdownDecision(json, 'failure')?.action, 'escalate');
+  assert.equal(parseBreakdownDecision(json, 'start'), undefined);
+  assert.equal(parseBreakdownDecision(json, 'continue'), undefined);
+  assert.equal(parseBreakdownDecision(json, 'blocked'), undefined);
 });
 
 test('parseBreakdownAnswer reads the block or a bare line, and respects the stage', () => {

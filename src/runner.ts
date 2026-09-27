@@ -278,11 +278,14 @@ function mkError(c: Classified): LastError {
 
 /**
  * A configured-but-unusable Jev is a misconfiguration, not a soft fallback: when `jev.enabled` is
- * true but its API key is missing, the run halts (exit 3) so the problem cannot go unnoticed.
- * `undefined` means Jev is off or ready to run.
+ * true, at least one workflow is armed, and its API key is missing, the run halts (exit 3) so the
+ * problem cannot go unnoticed. With no workflow armed there is nothing to silently disable, so the
+ * run proceeds. `undefined` means Jev is off, idle, or ready to run.
  */
 function jevMisconfigHalt(config: Config): Halted | undefined {
   if (!config.jev.enabled) return undefined;
+  const armed = config.jev.resultFallback || config.jev.failureTriage || config.jev.escalationDecision || config.jev.breakdownDecision;
+  if (!armed) return undefined;
   const problem = jevProblem(config.jev, process.env);
   if (!problem) return undefined;
   return { at: nowIso(), category: 'config', reason: `Jev is enabled but ${problem}. Set ${config.jev.apiKeyEnv}, or turn off jev.enabled.` };
@@ -329,6 +332,11 @@ async function classifyOutcome(ctx: RunContext, task: Task, st: TaskState, ev: F
     log.warn(`${task.id}: [jev] failure is unclassified; Jev returned no usable category`);
     return base;
   }
+  // A call that answered was paid for even if the answer is then discarded for low confidence.
+  if (decision.costUsd !== undefined) {
+    st.costUsd = (st.costUsd ?? 0) + decision.costUsd;
+    ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd;
+  }
   const pct = Math.round(decision.confidence * 100);
   if (decision.confidence < config.jev.minConfidence) {
     log.warn(`${task.id}: [jev] failure is unclassified; Jev's ${decision.category} was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)`);
@@ -336,10 +344,6 @@ async function classifyOutcome(ctx: RunContext, task: Task, st: TaskState, ev: F
   }
   const classified = makeClassified(decision.category, `${base.message} · Jev: ${decision.category} (${pct}%)`, config.halt.onCategories);
   log.warn(`${task.id}: [jev] failure was unclassified; Jev reads it as ${classified.category} (${pct}%) — ${classified.fatal ? 'fatal' : classified.transient ? 'retryable' : 'terminal'}`);
-  if (decision.costUsd !== undefined) {
-    st.costUsd = (st.costUsd ?? 0) + decision.costUsd;
-    ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd;
-  }
   return classified;
 }
 
@@ -800,10 +804,11 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         log.warn(`${task.id}: [jev] session ended without a SYMPHONY_RESULT block; Jev fallback unavailable (${problem})`);
       } else {
         const decision = await classifySessionResult(config.jev, { taskTitle: task.title, output: outcome.allText }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal });
+        // Charge any answered call, even when the disposition is not accepted below.
+        if (decision?.costUsd !== undefined) { st.costUsd = (st.costUsd ?? 0) + decision.costUsd; ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd; }
         const pct = decision ? Math.round(decision.confidence * 100) : 0;
         if (decision && decision.confidence >= config.jev.minConfidence && config.jev.acceptStatuses.includes(decision.status)) {
           block = { status: decision.status, summary: `Jev classified the session as ${decision.status} (confidence ${pct}%)` };
-          if (decision.costUsd !== undefined) { st.costUsd = (st.costUsd ?? 0) + decision.costUsd; ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd; }
           log.info(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev classified the session as ${decision.status} (confidence ${pct}%, model ${decision.model ?? config.jev.model})`);
         } else if (decision && !config.jev.acceptStatuses.includes(decision.status)) {
           log.warn(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev said ${decision.status} (${pct}%) but only ${config.jev.acceptStatuses.join('/')} are accepted`);

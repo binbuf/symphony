@@ -957,6 +957,24 @@ test('an unclassified failure is retried when Jev reads it as transient', async 
   }
 });
 
+test('a low-confidence Jev failure triage still charges the call that was made', async () => {
+  const { dir, paths, task } = project();
+  unclassifiedFailureFixture(dir);
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, retry: { maxAttempts: 2, backoffSec: [0] }, jev: { ...DEFAULTS.jev, enabled: true } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: jevErrorFetch('server', 0.3) };
+  process.env.OPENROUTER_API_KEY = 'sk-or-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'failed'); // the answer was too weak to change the unknown category
+    assert.equal(state.tasks.T01.lastError?.category, 'unknown');
+    assert.equal(state.tasks.T01.costUsd, 0.00001); // but the call was paid for
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
 test('the same unclassified failure stays terminal when Jev is off', async () => {
   const { dir, paths, task } = project();
   unclassifiedFailureFixture(dir);
@@ -1085,6 +1103,24 @@ test('run halts when Jev is enabled but its API key is missing', async () => {
     assert.equal(state.halted?.category, 'config');
     assert.match(state.halted?.reason ?? '', /Jev is enabled but/);
     assert.equal(state.tasks.T01, undefined); // no session ran
+  } finally {
+    if (saved !== undefined) process.env.OPENROUTER_API_KEY = saved;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('Jev enabled with no workflow armed does not halt for a missing key', async () => {
+  const { paths, task } = project();
+  const state: State = loadState(paths);
+  const jev = { ...DEFAULTS.jev, enabled: true, resultFallback: false, failureTriage: false, escalationDecision: false, breakdownDecision: false };
+  const config = { ...DEFAULTS, provider: 'fake' as const, jev };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  const saved = process.env.OPENROUTER_API_KEY;
+  delete process.env.OPENROUTER_API_KEY;
+  try {
+    const code = await runCommand(ctx);
+    assert.notEqual(code, 3); // nothing to silently disable, so no halt
+    assert.equal(state.halted, undefined);
   } finally {
     if (saved !== undefined) process.env.OPENROUTER_API_KEY = saved;
     delete process.env.SYMPHONY_FAKE_FIXTURES;

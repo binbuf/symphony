@@ -1,7 +1,7 @@
 import type { ErrorCategory } from './classify.js';
 import type { JevConfig, JevProviderName } from './config.js';
 import type { ReportedStatus } from './result.js';
-import { isRecord } from './util.js';
+import { headAndTail, isRecord } from './util.js';
 
 /** Base URL per built-in provider; `jev.baseUrl` overrides it. */
 const BASE_URLS: Record<JevProviderName, string> = {
@@ -162,9 +162,7 @@ export async function classifySessionResult(
     },
     deps,
   );
-  const choice = readChoice(json, 'disposition');
-  if (!choice || !(STATUSES as string[]).includes(choice.choice)) return undefined;
-  return { status: choice.choice as ReportedStatus, confidence: choice.confidence, probabilities: choice.probabilities, model: choice.model, costUsd: choice.costUsd };
+  return parseDecision(json);
 }
 
 /**
@@ -188,9 +186,7 @@ export async function classifyError(
     },
     deps,
   );
-  const choice = readChoice(json, 'category');
-  if (!choice || !(JEV_ERROR_CATEGORIES as string[]).includes(choice.choice)) return undefined;
-  return { category: choice.choice as ErrorCategory, confidence: choice.confidence, probabilities: choice.probabilities, model: choice.model, costUsd: choice.costUsd };
+  return parseErrorDecision(json);
 }
 
 /** The two options Jev weighs when deciding whether a failed task is worth escalating. */
@@ -217,7 +213,7 @@ export async function classifyEscalation(
   const json = await callSystemOne(
     config,
     {
-      task: { title: input.taskTitle, body: input.taskBody ? tail(input.taskBody, 8000) : null },
+      task: { title: input.taskTitle, body: input.taskBody ? headAndTail(input.taskBody, 8000) : null },
       failure: tail(input.failure, 2000),
     },
     {
@@ -256,6 +252,24 @@ export interface JevBreakdownDecision {
   model?: string;
   costUsd?: number;
 }
+
+/**
+ * Natural words Jev may echo at the start/continue stages. The criteria describe "run"/"continue",
+ * so the model returns those exact words; the harness's action vocabulary calls the same thing
+ * `proceed`. Mirrors `normalizeAction` in breakdown.ts for the fallback-LLM path.
+ */
+const BREAKDOWN_ACTION_ALIASES: Record<string, JevBreakdownAction> = {
+  run: 'proceed',
+  continue: 'proceed',
+};
+
+/** The actions each stage may answer with; mirrors `allowedActions` in breakdown.ts. */
+const BREAKDOWN_ALLOWED: Record<BreakdownStage, readonly JevBreakdownAction[]> = {
+  start: ['split', 'replan', 'proceed'],
+  continue: ['split', 'replan', 'proceed'],
+  blocked: ['split', 'replan', 'proceed'],
+  failure: ['split', 'replan', 'escalate', 'stop', 'proceed'],
+};
 
 export interface JevBreakdownInput {
   stage: BreakdownStage;
@@ -326,21 +340,28 @@ export async function classifyBreakdown(config: JevConfig, input: JevBreakdownIn
   const json = await callSystemOne(
     config,
     {
-      task: { title: input.taskTitle, body: input.taskBody ? tail(input.taskBody, 8000) : null },
+      task: { title: input.taskTitle, body: input.taskBody ? headAndTail(input.taskBody, 8000) : null },
       harness: { stage: input.stage, status: input.status, sessions: input.attempts, continuations: input.continuations },
       evidence: input.reason ? tail(input.reason, 2000) : null,
     },
     { decision: { type: 'choice', instructions: question.instructions, criteria: question.criteria } },
     deps,
   );
-  return parseBreakdownDecision(json);
+  return parseBreakdownDecision(json, input.stage);
 }
 
-/** Read the `decision` choice of a breakdown call. Exported for tests. */
-export function parseBreakdownDecision(json: unknown): JevBreakdownDecision | undefined {
+/**
+ * Read the `decision` choice of a breakdown call, normalizing the stage's natural words
+ * (`run`/`continue`) to `proceed` and, when a stage is given, rejecting an action that stage never
+ * offered. Exported for tests.
+ */
+export function parseBreakdownDecision(json: unknown, stage?: BreakdownStage): JevBreakdownDecision | undefined {
   const choice = readChoice(json, 'decision');
-  if (!choice || !(BREAKDOWN_ACTIONS as readonly string[]).includes(choice.choice)) return undefined;
-  return { action: choice.choice as JevBreakdownAction, confidence: choice.confidence, probabilities: choice.probabilities, model: choice.model, costUsd: choice.costUsd };
+  if (!choice) return undefined;
+  const action = BREAKDOWN_ACTION_ALIASES[choice.choice] ?? choice.choice;
+  if (!(BREAKDOWN_ACTIONS as readonly string[]).includes(action)) return undefined;
+  if (stage && !BREAKDOWN_ALLOWED[stage].includes(action as JevBreakdownAction)) return undefined;
+  return { action: action as JevBreakdownAction, confidence: choice.confidence, probabilities: choice.probabilities, model: choice.model, costUsd: choice.costUsd };
 }
 
 /** Read the `disposition` choice out of a System One response. Exported for tests. */

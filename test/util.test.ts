@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { resolveExecutable } from '../src/util.js';
-import { fmtDateTime, fmtTime, parseTimeZone, squash, squashTail } from '../src/util.js';
+import { clip, fmtDateTime, fmtTime, headAndTail, parseTimeZone, squash, squashTail } from '../src/util.js';
 
 test('fmtTime: a zero-padded local clock time, not a date', () => {
   assert.equal(fmtTime(new Date(2026, 0, 2, 3, 4, 5)), '03:04:05');
@@ -43,6 +43,18 @@ test('squash keeps the head; squashTail keeps the tail', () => {
   assert.equal(squashTail('some/namespace/claude-sonnet-4-5', 12), '…-sonnet-4-5');
   assert.match(squashTail('some/namespace/claude-sonnet-4-5', 28), /^….*claude-sonnet-4-5$/);
   assert.equal(squashTail('short', 28), 'short');
+});
+
+test('headAndTail keeps both the goal at the top and the hand-off at the bottom', () => {
+  const body = `## Goal\n${'g'.repeat(400)}\n## Hand-off\n${'h'.repeat(400)}`;
+  const out = headAndTail(body, 120);
+  assert.equal(out.length, 120);
+  assert.ok(out.startsWith('## Goal'), out.slice(0, 20));
+  assert.ok(out.endsWith('h'.repeat(10)), out.slice(-10));
+  // The head-only `clip` is the contrasting behaviour this helper exists to avoid.
+  assert.equal(clip(body, 120).length, 120);
+  assert.ok(!clip(body, 120).includes('Hand-off'));
+  assert.equal(headAndTail('short', 120), 'short');
 });
 
 test('resolveExecutable: an existing path is returned as-is, a missing one is undefined', () => {

@@ -41,6 +41,21 @@ export function clip(s: string, max: number): string {
   return t.length > max ? `${t.slice(0, Math.max(0, max - 1))}…` : t;
 }
 
+/**
+ * Truncate a long document to `max` while keeping both ends: for a task file the `## Goal` and
+ * acceptance criteria sit at the top and the hand-off notes at the bottom, and a decision model
+ * needs both. Below `max` the text is returned unchanged.
+ */
+export function headAndTail(s: string, max: number): string {
+  const t = s.trim();
+  if (t.length <= max) return t;
+  const separator = '\n…\n';
+  if (max <= separator.length) return t.slice(0, Math.max(0, max));
+  const budget = Math.max(0, max - separator.length);
+  const head = Math.ceil(budget * 0.6);
+  return `${t.slice(0, head)}${separator}${t.slice(t.length - (budget - head))}`;
+}
+
 export function ensureDir(p: string): void {
   mkdirSync(p, { recursive: true });
 }
