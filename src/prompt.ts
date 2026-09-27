@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename } from 'node:path';
 import { readProgressContext, renderInlinedDocs, selectTaskDesignDocs } from './context.js';
 import { rel, type Paths } from './paths.js';
 import { readIndexCapped } from './repomap.js';
@@ -7,8 +7,6 @@ import { DONE_STATES, type State } from './state.js';
 import { parseFrontMatter, type Task } from './tasks.js';
 import { renderPrompt } from './templates.js';
 import { ensureDir, slugify } from './util.js';
-
-const DEFAULT_MAX_INDEX_BYTES = 16384;
 
 export interface PromptCtx {
   paths: Paths;
@@ -22,16 +20,17 @@ export interface PromptCtx {
   model?: string;
   /** Effective reasoning-effort / variant, or undefined when the model has none. */
   variant?: string;
+  /** Byte cap for PROGRESS.md content inlined into a prompt; 0 points to the file (default 0). */
   maxProgressBytes: number;
   /** When false, design/ and adr/ are not part of the contract. */
   designDocs: boolean;
   /** Message of the failure that ended the previous attempt, if any. */
   lastError?: string;
-  /** Maintain and inline the generated progress digest (default true). */
+  /** Maintain and inline the generated progress digest (only inlined when maxProgressBytes > 0). */
   progressDigest?: boolean;
-  /** Inline the design docs the task names, not just list them (default true). */
+  /** Inline the design docs the task names, not just point to docs/design (default false). */
   inlineDesignDocs?: boolean;
-  /** Byte cap for the inlined repo map (default 16384). */
+  /** Byte cap for the inlined project index; 0 points to docs/INDEX.md (default 0). */
   maxIndexBytes?: number;
   /** Byte cap for the inlined task file body (default: uncapped). */
   maxTaskBytes?: number;
@@ -48,7 +47,7 @@ export const PROGRESS_HEADER = `# Progress notes
 Shared notebook for the symphony run. Each task session appends a "## Txx — title" section with what
 later tasks need to know: real paths, commands that work, contract deviations, gotchas. Facts, not
 narrative. The harness keeps a generated "Key facts" digest at the top (between the symphony:digest
-markers) and inlines that digest plus only the most recent sections into every prompt.
+markers); sessions are pointed at this file and read it themselves.
 `;
 
 export function ensureProgressFile(paths: Paths): boolean {
@@ -56,11 +55,6 @@ export function ensureProgressFile(paths: Paths): boolean {
   ensureDir(paths.docs);
   writeFileSync(paths.progress, PROGRESS_HEADER);
   return true;
-}
-
-export function listDesignDocs(paths: Paths): { design: string[]; adr: string[] } {
-  const list = (dir: string) => (existsSync(dir) ? readdirSync(dir).filter((f) => f.toLowerCase().endsWith('.md')).sort().map((f) => rel(paths.root, join(dir, f))) : []);
-  return { design: list(paths.designDir), adr: list(paths.adrDir) };
 }
 
 export function nextAdrNumber(adrDir: string): string {
@@ -112,7 +106,6 @@ function defaultTaskFileRel(paths: Paths, task: Task): string {
 export function buildTaskPrompt(ctx: PromptCtx): string {
   const { paths, task } = ctx;
   const d = docPaths(paths);
-  const docs = listDesignDocs(paths);
   const body = taskFileBody(task, ctx.maxTaskBytes);
   const taskFileRel = task.taskFileRel ?? defaultTaskFileRel(paths, task);
   const noTaskFileNote = body === undefined
@@ -124,22 +117,13 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
   const continuationNote = ctx.continuation > 0
     ? `\nThis is continuation session ${ctx.continuation} of ${task.id}: a previous session deliberately reported "continue" after finishing part of the task. Read the task's Hand-off and your own "## ${task.id}" section in ${d.progress}, inspect \`git status\` and \`git log -5\`, and do the next unfinished slice only. Do not redo completed work.\n`
     : '';
-  const designList = docs.design.length ? docs.design.join(', ') : '(none yet)';
-  const adrList = docs.adr.length ? docs.adr.join(', ') : '(none yet)';
-  const designBullets = ctx.designDocs
-    ? `- ${d.design}/*.md are the architecture docs. Read the ones relevant to this task before editing code.\n- ${d.adr}/NNNN-title.md are architecture decision records. When you make a decision that constrains later tasks (a library, a schema, a protocol, a directory layout), add one using the next free number, ${nextAdrNumber(paths.adrDir)}, with sections Status / Context / Decision / Consequences, at most one page. Do not write ADRs for routine choices.\n`
-    : '';
-  const designPresent = ctx.designDocs ? `Design docs present: ${designList}\nADRs present: ${adrList}\n` : '';
-  const inlinedDocs = ctx.designDocs && ctx.inlineDesignDocs !== false ? selectTaskDesignDocs(paths, body) : [];
-  const designInlinedBlock = renderInlinedDocs(inlinedDocs);
-  const repoMapBody = ctx.indexBody ?? readIndexCapped(paths.index, ctx.maxIndexBytes ?? DEFAULT_MAX_INDEX_BYTES, d.index);
 
   const steps: string[] = [
     `Read the task file (inlined below)${ctx.designDocs ? ' and every Context or design doc it names' : ''}, then implement exactly its Scope. Out-of-scope items belong to other tasks: note them in the Hand-off instead of doing them.`,
     'Keep the work verifiable. Write or update the unit/integration tests the task\'s "Done when" names, run them in the foreground, and paste the real command and result into the Hand-off. Do not claim done unless those tests actually pass; if the task names no tests, add at least one meaningful automated check that would fail if your change regressed.',
   ];
   if (ctx.designDocs) {
-    steps.push(`Keep the design docs honest. If your implementation changes behaviour a ${d.design}/*.md doc describes, update that doc in the same session. If a decision now constrains later tasks, write an ADR (step above) and list it in the Hand-off.`);
+    steps.push(`Keep the design docs honest. If your change makes a ${d.design}/*.md doc untrue, update it in the same session; if a decision now constrains later tasks, add an ADR under ${d.adr}/ (next free number, Status / Context / Decision / Consequences, one page max) and list it in the Hand-off.`);
   }
   steps.push(
     `If the task is too large for one session, do not rush or fake completion. Finish the largest coherent slice that leaves the tree green, record what remains under "## Hand-off" and in ${d.progress}, and report status "continue" (see the block below). The harness will start a fresh session to finish the rest; the next session reads your notes and continues. Only use "continue" when real, committed progress was made and a later session can pick it up.`,
@@ -149,6 +133,7 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
   );
   const howTo = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
   const finalStep = steps.length + 1;
+  const inlinedContext = inlineContextBlocks(ctx, paths, body, d);
 
   const vars: Record<string, string | number> = {
     projectName: basename(paths.root),
@@ -172,24 +157,51 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
     progress: d.progress,
     logs: d.logs,
     index: d.index,
-    designBullets,
+    design: d.design,
+    adr: d.adr,
     noTaskFileNote,
-    designPresent,
-    designInlinedBlock,
-    repoMapBody,
     doneIds: ids(ctx, (s) => (DONE_STATES as string[]).includes(s)),
     blockedIds: ids(ctx, (s) => s === 'blocked' || s === 'failed'),
     howTo,
     finalStep,
-    progressBody: readProgress(ctx, paths),
+    inlinedContext,
     taskFileForBlock: task.taskFileRel ?? 'none',
     taskBody: body ?? `(no task file — the roadmap bullet is the whole task: "${task.id} — ${task.title}")`,
   };
   return renderPrompt('task.md', vars);
 }
 
+/**
+ * The optional inlined context blocks, each wrapped in its own delimiters, or an empty string. By
+ * default nothing is inlined: the prompt names the files and the session reads what it needs, which
+ * keeps the prompt small no matter how large PROGRESS.md, the design docs or the tree grow.
+ */
+function inlineContextBlocks(ctx: PromptCtx, paths: Paths, body: string | undefined, d: ReturnType<typeof docPaths>): string {
+  const blocks: string[] = [];
+  if (ctx.maxProgressBytes > 0) {
+    const progress = readProgressContext(paths.progress, d.progress, {
+      digest: ctx.progressDigest !== false,
+      maxBytes: ctx.maxProgressBytes,
+    });
+    blocks.push(`--- PROGRESS (${d.progress}) ---\n${progress}\n--- END PROGRESS ---`);
+  }
+  if (ctx.designDocs && ctx.inlineDesignDocs === true) {
+    const inlined = renderInlinedDocs(selectTaskDesignDocs(paths, body)).trim();
+    if (inlined) blocks.push(inlined);
+  }
+  if ((ctx.maxIndexBytes ?? 0) > 0) {
+    const map = ctx.indexBody ?? readIndexCapped(paths.index, ctx.maxIndexBytes as number, d.index);
+    blocks.push(`--- PROJECT INDEX (${d.index}) ---\n${map}\n--- END PROJECT INDEX ---`);
+  }
+  return blocks.length ? `\n${blocks.join('\n\n')}\n` : '';
+}
+
 function readProgress(ctx: PromptCtx, paths: Paths): string {
-  return readProgressContext(paths.progress, rel(paths.root, paths.progress), {
+  const display = rel(paths.root, paths.progress);
+  if (ctx.maxProgressBytes <= 0) {
+    return `(read ${display} for what earlier tasks recorded, and append your "## ${ctx.task.id}" section there before finishing)`;
+  }
+  return readProgressContext(paths.progress, display, {
     digest: ctx.progressDigest !== false,
     maxBytes: ctx.maxProgressBytes,
   });
@@ -248,7 +260,8 @@ END_SYMPHONY_RESULT
  * now, so the session stops new work, makes the tree build cleanly, records the hand-off and reports
  * — the harness then commits the slice and pauses, resuming the task on the next run. When the
  * running session can be resumed this is a short note; when it cannot (a provider without resume) it
- * is self-contained, inlining the task file and progress like a task prompt.
+ * is self-contained: it inlines the task file and points at (or inlines) the progress notebook like a
+ * task prompt.
  */
 export function buildWrapUpPrompt(ctx: PromptCtx, opts: { resumed: boolean; verify?: { command: string } }): string {
   const { paths, task } = ctx;

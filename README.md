@@ -11,7 +11,7 @@ Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Goo
 ## Why symphony
 
 - **Unattended by default.** No session ever waits on a human. The harness handles the things that normally make you babysit an agent: transient API failures, oversized tasks, missing result blocks, runaway loops, and dirty worktrees.
-- **Fresh context per task.** Every task starts in a brand-new session with only its task file, the digest and recent tail of `PROGRESS.md`, the design docs it names and a generated project index. No context rot, no hidden state carried from the previous task.
+- **Fresh context per task.** Every task starts in a brand-new session with its task file and pointers to `ROADMAP.md`, the `PROGRESS.md` notebook, the design docs and the generated `docs/INDEX.md`; it reads only what the task needs. No context rot, no hidden state carried from the previous task.
 - **Everything lands in git.** Each task ends in a commit that carries the code, the roadmap marker, the task's hand-off, the design updates and the run log. `git log` is the pipeline's history; `git revert` is the undo.
 - **Resumable and inspectable.** Kill it, crash it, or pause it with a file — state and roadmap markers let the next run pick up exactly where it left off. Every session's exact prompt, rendered log and raw NDJSON are saved.
 - **Provider-agnostic.** The same plan and lifecycle work with any of the six agent CLIs, or the built-in `fake` provider for testing the harness itself without spending anything.
@@ -118,7 +118,7 @@ docs/
 `run` walks the selected tasks in roadmap order. For each one:
 
 1. **Marks the bullet** `[~] ⟵ running` and records the attempt in `.symphony/state.json`.
-2. **Builds the prompt** and writes it to `.symphony/runs/<task>-<stamp>.prompt.md`. It contains the task file, a generated "Key facts" digest of `PROGRESS.md` plus its most recent sections, the design docs the task names (inlined, not just listed), the generated `docs/INDEX.md` (design-doc summaries + a source map), the rules for the session, and the required result block.
+2. **Builds the prompt** and writes it to `.symphony/runs/<task>-<stamp>.prompt.md`. It contains the task file, the paths of the roadmap, the `PROGRESS.md` notebook, `docs/design/`, `docs/INDEX.md` and the run logs, the rules for the session, and the required result block. The session reads the files it needs with its own tools, so the prompt stays small however large those files grow. Set `maxProgressBytes`, `inlineDesignDocs` or `maxIndexBytes` to paste bodies back in when you want them.
 3. **Spawns the provider CLI** in the project root with permissions bypassed, and streams what it does:
 
    ```
@@ -824,11 +824,11 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `nudge`, `nudgeTimeoutMin` | `true`, `45` | resume once to collect a missing result block |
 | `timeoutMin`, `idleTimeoutMin` | `240`, `20` | max wall clock per session; kill after this long with no output |
 | `prepareTimeoutMin` | `60` | wall clock for the `prepare` session |
-| `maxProgressBytes` | `32768` | byte cap for the recent `PROGRESS.md` sections inlined into each prompt |
-| `progressDigest` | `true` | maintain a generated "Key facts" digest at the top of `PROGRESS.md` and inline it ahead of the recent sections |
-| `inlineDesignDocs` | `true` | inline the design docs a task names in its Context / Design notes, not just list them |
-| `repoMap` | `true` | generate `docs/INDEX.md` (design-doc summaries + a source map) before each task and inline it |
-| `maxIndexBytes` | `16384` | byte cap for the inlined repo map |
+| `maxProgressBytes` | `0` | byte cap for `PROGRESS.md` content inlined into each prompt; `0` inlines nothing and points the session at the file |
+| `progressDigest` | `true` | maintain a generated "Key facts" digest at the top of `PROGRESS.md` (inlined only when `maxProgressBytes > 0`) |
+| `inlineDesignDocs` | `false` | inline the design docs a task names, not just point at `docs/design/` |
+| `repoMap` | `true` | generate `docs/INDEX.md` (design-doc summaries + a source map) before each task |
+| `maxIndexBytes` | `0` | byte cap for the project index inlined into each prompt; `0` inlines nothing and points the session at `docs/INDEX.md` |
 | `maxTaskBytes` | `32768` | byte cap for the inlined task file body (the full file stays on disk) |
 | `designDocs` | `true` | when `false`, `design/` and `adr/` are neither required nor used: tasks run standalone |
 | `maxContinuations` | `4` | extra fresh sessions a task may take after reporting `continue`; counted across a `.stop` pause so pausing does not reset the budget |

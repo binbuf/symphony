@@ -4,11 +4,11 @@ import { rel, type Paths } from './paths.js';
 import { atomicWriteSync, squash } from './util.js';
 
 /*
- * Context assembly: keeps the token cost of every prompt proportional to what the task needs, not to
- * how long the run has been going.
- * - PROGRESS.md is append-only; the harness maintains a short "Key facts" digest at the top and inlines
- *   that digest plus only the most recent sections, instead of a raw byte-capped tail.
- * - Only the design docs a task names in its Context / Design notes are inlined, not every doc.
+ * Context assembly. Inlining is opt-in: the prompt normally names PROGRESS.md, docs/design/ and
+ * docs/INDEX.md and the session reads what it needs, so the prompt stays small as the run grows.
+ * - When PROGRESS.md is inlined (maxProgressBytes > 0), the harness maintains a short "Key facts"
+ *   digest at the top and inlines that digest plus only the most recent sections.
+ * - When design docs are inlined (inlineDesignDocs), only the docs a task names are inlined.
  */
 
 const DIGEST_START = '<!-- symphony:digest:start -->';
@@ -136,7 +136,7 @@ export function readProgressContext(path: string, displayName = 'PROGRESS.md', o
     parts.push(buildProgressDigest(text, { linesPerSection: opts.linesPerSection, maxBytes: Math.min(opts.maxBytes ?? DIGEST_MAX_BYTES, DIGEST_MAX_BYTES) }));
   }
   const sections = parseProgressSections(text);
-  if (sections.length) {
+  if (recentSections > 0 && sections.length) {
     const recent = sections.slice(-recentSections);
     const label = recent.length < sections.length ? `last ${recent.length} of ${sections.length}` : 'all';
     const body = recent.map((s) => `## ${s.heading}\n\n${s.body}`.trim()).join('\n\n');

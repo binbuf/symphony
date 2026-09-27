@@ -6,7 +6,8 @@ import { atomicWriteSync, clip, squash } from './util.js';
 /*
  * A cheap, deterministic repo map: one-line summaries of the design docs plus a source-file list with
  * top-level symbols. It is regenerated before each task, written to `docs/INDEX.md`, committed with the
- * task, and inlined into the prompt so the agent does not spend turns discovering files.
+ * task, and named in the prompt (inlined only when `maxIndexBytes > 0`) so the agent does not spend
+ * turns discovering files.
  *
  * Regex-based on purpose: no language servers, no dependencies, provider-agnostic. A file that yields no
  * symbols is still listed by path.

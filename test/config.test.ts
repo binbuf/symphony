@@ -345,7 +345,15 @@ test('cost cap, task byte cap and non-positive timeouts/caps validate and fall b
   assert.equal(bad.config.timeoutMin, DEFAULTS.timeoutMin);
   assert.equal(bad.config.maxIndexBytes, DEFAULTS.maxIndexBytes);
   assert.equal(bad.config.maxTaskBytes, DEFAULTS.maxTaskBytes);
-  assert.equal(bad.warnings.filter((w) => /positive/.test(w)).length, 3);
+  assert.equal(bad.warnings.filter((w) => /positive/.test(w)).length, 2);
+  assert.equal(bad.warnings.filter((w) => /expected a number >= 0/.test(w)).length, 1);
+
+  // A cap of 0 is meaningful for the inlined-context caps: it inlines nothing and points at the file.
+  writeFileSync(paths.config, JSON.stringify({ maxProgressBytes: 0, maxIndexBytes: 0 }));
+  const zero = loadConfig(paths, {});
+  assert.equal(zero.config.maxProgressBytes, 0);
+  assert.equal(zero.config.maxIndexBytes, 0);
+  assert.equal(zero.warnings.length, 0);
 
   // idleTimeoutMin 0 is meaningful (it disables stall detection), so it must stay 0.
   writeFileSync(paths.config, JSON.stringify({ idleTimeoutMin: 0, providers: { claude: { idleTimeoutMin: 0 } } }));

@@ -351,14 +351,21 @@ export interface Config {
   idleTimeoutMin: number;
   nudgeTimeoutMin: number;
   prepareTimeoutMin: number;
+  /**
+   * Byte cap for PROGRESS.md content inlined into a prompt. `0` (default) inlines nothing: the prompt
+   * names the file and the session reads it with its own tools.
+   */
   maxProgressBytes: number;
-  /** Maintain a "Key facts" digest at the top of PROGRESS.md and inline digest + recent sections instead of the raw tail. */
+  /** Maintain a generated "Key facts" digest at the top of PROGRESS.md. The digest is inlined only when `maxProgressBytes > 0`. */
   progressDigest: boolean;
-  /** Inline the design docs a task names in its Context / Design notes, not just list them. */
+  /** Inline the design docs a task names, not just point to the design folder. Off by default. */
   inlineDesignDocs: boolean;
-  /** Generate `docs/INDEX.md` (design-doc summaries + a source map) before each task and inline it. */
+  /** Generate `docs/INDEX.md` (design-doc summaries + a source map) before each task. */
   repoMap: boolean;
-  /** Byte cap for the inlined repo map. */
+  /**
+   * Byte cap for the project index inlined into a prompt. `0` (default) inlines nothing: the prompt
+   * names `docs/INDEX.md` and the session reads it.
+   */
   maxIndexBytes: number;
   /** Byte cap for the inlined task file body. */
   maxTaskBytes: number;
@@ -460,11 +467,11 @@ export const DEFAULTS: Config = {
   idleTimeoutMin: 20,
   nudgeTimeoutMin: 45,
   prepareTimeoutMin: 60,
-  maxProgressBytes: 32768,
+  maxProgressBytes: 0,
   progressDigest: true,
-  inlineDesignDocs: true,
+  inlineDesignDocs: false,
   repoMap: true,
-  maxIndexBytes: 16384,
+  maxIndexBytes: 0,
   maxTaskBytes: 32768,
   designDocs: true,
   maxContinuations: 4,
@@ -847,11 +854,11 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     idleTimeoutMin: atLeastOr(raw.idleTimeoutMin, DEFAULTS.idleTimeoutMin, 0, 'idleTimeoutMin', warnings),
     nudgeTimeoutMin: positiveOr(raw.nudgeTimeoutMin, DEFAULTS.nudgeTimeoutMin, 'nudgeTimeoutMin', warnings),
     prepareTimeoutMin: positiveOr(raw.prepareTimeoutMin, DEFAULTS.prepareTimeoutMin, 'prepareTimeoutMin', warnings),
-    maxProgressBytes: positiveOr(raw.maxProgressBytes, DEFAULTS.maxProgressBytes, 'maxProgressBytes', warnings),
+    maxProgressBytes: atLeastOr(raw.maxProgressBytes, DEFAULTS.maxProgressBytes, 0, 'maxProgressBytes', warnings),
     progressDigest: boolOr(raw.progressDigest, DEFAULTS.progressDigest, 'progressDigest', warnings),
     inlineDesignDocs: boolOr(raw.inlineDesignDocs, DEFAULTS.inlineDesignDocs, 'inlineDesignDocs', warnings),
     repoMap: boolOr(raw.repoMap, DEFAULTS.repoMap, 'repoMap', warnings),
-    maxIndexBytes: positiveOr(raw.maxIndexBytes, DEFAULTS.maxIndexBytes, 'maxIndexBytes', warnings),
+    maxIndexBytes: atLeastOr(raw.maxIndexBytes, DEFAULTS.maxIndexBytes, 0, 'maxIndexBytes', warnings),
     maxTaskBytes: positiveOr(raw.maxTaskBytes, DEFAULTS.maxTaskBytes, 'maxTaskBytes', warnings),
     designDocs: boolOr(raw.designDocs, DEFAULTS.designDocs, 'designDocs', warnings),
     maxContinuations: Math.max(0, numberOr(raw.maxContinuations, DEFAULTS.maxContinuations, 'maxContinuations', warnings)),

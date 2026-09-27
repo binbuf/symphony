@@ -41,36 +41,48 @@ function fixture(): { paths: Paths; ctx: PromptCtx; noFile: PromptCtx } {
   };
   const base: PromptCtx = {
     paths, task: t1, tasks: [t1, t2], state, attempt: 2, continuation: 0,
-    providerName: 'claude', model: 'opus', maxProgressBytes: 4096, designDocs: true,
+    providerName: 'claude', model: 'opus', maxProgressBytes: 0, designDocs: true,
   };
   const noFile: PromptCtx = { ...base, task: t2, attempt: 1, continuation: 2, model: undefined, designDocs: false };
   return { paths, ctx: base, noFile };
 }
 
-test('buildTaskPrompt renders from the template with no leftover placeholders', () => {
+test('buildTaskPrompt points at files by path and inlines only the task by default', () => {
   const { paths, ctx, noFile } = fixture();
   const text = buildTaskPrompt(ctx);
   assert.doesNotMatch(text, PLACEHOLDER);
   assert.match(text, /Task: T01 — First task/);
-  assert.match(text, /## The planning contract/);
+  assert.match(text, /## Where things are/);
   assert.match(text, /## How to work/);
   assert.match(text, /SYMPHONY_RESULT/);
-  assert.match(text, /--- PROGRESS \(docs\/PROGRESS\.md\) ---/);
   assert.match(text, /--- TASK FILE \(docs\/tasks\/01-first\.md\) ---/);
   assert.match(text, /## Goal\nDo it\./);
-  // The design doc the task names is inlined, and the generated index is included.
-  assert.match(text, /--- DESIGN DOCS NAMED BY THIS TASK ---/);
-  assert.match(text, /### docs\/design\/overview\.md/);
-  assert.match(text, /--- PROJECT INDEX \(docs\/INDEX\.md\) ---/);
-  assert.match(text, /Key facts \(maintained by symphony/);
+  // Lean default: the main docs are named by path, not pasted in.
+  assert.match(text, /docs\/PROGRESS\.md/);
+  assert.match(text, /docs\/design/);
+  assert.match(text, /docs\/design\/adr/);
+  assert.match(text, /docs\/INDEX\.md/);
+  assert.doesNotMatch(text, /--- PROGRESS \(docs\/PROGRESS\.md\) ---/);
+  assert.doesNotMatch(text, /--- DESIGN DOCS NAMED BY THIS TASK ---/);
+  assert.doesNotMatch(text, /--- PROJECT INDEX \(docs\/INDEX\.md\) ---/);
+  assert.doesNotMatch(text, /Key facts \(maintained by symphony/);
 
   const noTask = buildTaskPrompt(noFile);
   assert.doesNotMatch(noTask, PLACEHOLDER);
   assert.match(noTask, /Task file: \(none\)/);
   assert.match(noTask, /create docs\/tasks\/02-second-task\.md/);
   assert.match(noTask, /\(no task file — the roadmap bullet is the whole task/);
-  assert.doesNotMatch(noTask, /Design docs present:/);
   void paths;
+});
+
+test('the full profile inlines PROGRESS, the named design docs and the index', () => {
+  const { ctx } = fixture();
+  const text = buildTaskPrompt({ ...ctx, maxProgressBytes: 4096, inlineDesignDocs: true, maxIndexBytes: 16384 });
+  assert.match(text, /--- PROGRESS \(docs\/PROGRESS\.md\) ---/);
+  assert.match(text, /Key facts \(maintained by symphony/);
+  assert.match(text, /--- DESIGN DOCS NAMED BY THIS TASK ---/);
+  assert.match(text, /### docs\/design\/overview\.md/);
+  assert.match(text, /--- PROJECT INDEX \(docs\/INDEX\.md\) ---/);
 });
 
 test('docsContract renders the numbered rules, with design rules only when enabled', () => {
@@ -131,9 +143,9 @@ test('a very large task file is truncated with a pointer to the full path', () =
   assert.ok(!text.includes('x'.repeat(500)), 'the body tail should not be inlined');
 });
 
-test('an explicit indexBody is inlined instead of the on-disk INDEX.md', () => {
+test('an explicit indexBody is inlined instead of the on-disk INDEX.md in the full profile', () => {
   const { ctx } = fixture();
-  const text = buildTaskPrompt({ ...ctx, indexBody: '# Project index\n\n## Source map\n- `src/app.ts` — main' });
+  const text = buildTaskPrompt({ ...ctx, maxIndexBytes: 16384, indexBody: '# Project index\n\n## Source map\n- `src/app.ts` — main' });
   assert.match(text, /--- PROJECT INDEX \(docs\/INDEX\.md\) ---/);
   assert.match(text, /src\/app\.ts/);
   assert.doesNotMatch(text, /not generated yet/);
@@ -146,7 +158,7 @@ test('enabled vision is discoverable in every task prompt without displacing the
   const task = buildTaskPrompt({ ...ctx, visionNote: note });
   assert.match(task, /## Image analysis tool \(enabled\)/);
   assert.ok(task.indexOf('Attempt:') < task.indexOf('## Image analysis tool'));
-  assert.ok(task.indexOf('## Image analysis tool') < task.indexOf('## The planning contract'));
+  assert.ok(task.indexOf('## Image analysis tool') < task.indexOf('## Where things are'));
   for (const prompt of [
     buildContinuePrompt({ ...ctx, visionNote: note }),
     buildNudgePrompt({ ...ctx, visionNote: note }, 'Keep the visual regression result'),
