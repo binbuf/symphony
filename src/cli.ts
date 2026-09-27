@@ -9,7 +9,7 @@ import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { formatLint, lintDocs } from './lint.js';
 import { prepareCommand } from './prepare.js';
 import { loadProject } from './project.js';
-import { replanCommand } from './replan.js';
+import { replanCommand, replanForBreakdown } from './replan.js';
 import { runWithDaemon, startCommand, stopCommand } from './daemon.js';
 import { createLogger } from './logger.js';
 import { resolvePaths, taskSetOverrides, type PathOverrides } from './paths.js';
@@ -99,10 +99,11 @@ Controls
                            .symphony/watch.log every watch.intervalMin (default 5 min, on by default;
                            press w in the TUI to check now). Configure via the "watch" config block.
   automatic breakdowns     with "breakdown": {"enabled": true} in the config, one decision (Jev, then
-                           a fallback LLM, then deterministic rules) can break an oversized task into
-                           subtasks at its start, at a "continue" boundary, or instead of escalating a
-                           failure; the run reloads the plan and resumes on the subtasks. Configure via
-                           the "breakdown" block (see the README).
+                           a fallback LLM, then deterministic rules) can split an oversized task into
+                           subtasks or replan the upcoming work, at a task's start, at a "continue"
+                           boundary, when it reports blocked, or instead of escalating a failure; the
+                           run reloads the plan and resumes on it. Configure via the "breakdown" block
+                           (see the README).
   Slack notifications      with "slack": {"enabled": true, "channel": "#eng-alerts"} in the config,
                            post task done/continue/failed/blocked, halt and run-end events to a Slack
                            channel or DM a user, threading a task's later events under its start; every
@@ -350,9 +351,10 @@ export async function main(argv: string[]): Promise<number> {
         if (!id) throw new UsageError('nudge: give a task id, e.g. symphony nudge T05');
         return nudgeCommand(ctx, id, v.note);
       }
-      // Automatic breakdowns (config `breakdown`) run the `split` machinery from inside the run,
-      // sharing this run's lock and branch instead of acquiring its own.
+      // Automatic breakdowns (config `breakdown`) run the `split`/`replan` machinery from inside the
+      // run, sharing this run's lock and branch instead of acquiring their own.
       ctx.performSplit = (taskId) => splitTask(ctx, { id: taskId, dryRun: false, keepLock: true });
+      ctx.performReplan = (_taskId, ev, decisionReason) => replanForBreakdown(ctx, ev, { decisionReason });
       // `symphony start` re-invokes this process with --daemon: run headless, serviced by the control
       // channel, with no local view. `symphony attach` in another terminal drives it.
       if (v.daemon === true) return runWithDaemon(ctx, () => runCommand(ctx));

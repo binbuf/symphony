@@ -184,6 +184,11 @@ export async function runWithTui(ctx: RunContext, run: () => Promise<number>, op
       app.onPlanChanged();
       app.toast(`broke ${parentId} into ${childIds.join(', ')}; resuming`);
     };
+    ctx.onReplanned = (taskId, pending) => {
+      if (app.fatalError) return;
+      app.onPlanChanged();
+      app.toast(`replanned after ${taskId}${pending.length ? `; next: ${pending.slice(0, 4).join(' ')}${pending.length > 4 ? '…' : ''}` : '; nothing left to run'}`);
+    };
     code = await runWithResume(ctx, run, {
       awaitHaltAction: () => app.awaitHaltAction(),
       quitRequested: () => app.quitRequested,

@@ -13,11 +13,12 @@ import { writeTaskLog } from './logs.js';
 import { mcpPromptNote, planMcp, resolveMcpProfile } from './mcp.js';
 import { placeStop, stopPresent, type Paths } from './paths.js';
 import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
-import { applyPlan, loadProject, retargetFlags } from './project.js';
+import { applyPlan, loadProject, retargetFlags, sanitizeFlags } from './project.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { addUsage } from './providers/common.js';
 import type { Provider, ResultEvent, SpawnSpec, TokenUsage } from './providers/types.js';
 import { generateIndex, writeIndex } from './repomap.js';
+import type { ReplanResult } from './replan.js';
 import { parseResultBlock, type ResultBlock } from './result.js';
 import { canonicalId, patchRoadmapFile, type Roadmap } from './roadmap.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
@@ -65,6 +66,12 @@ export interface SplitRequest {
  */
 export type PerformSplit = (taskId: string) => Promise<SplitResult>;
 
+/**
+ * A plan-wide rewrite performed by the runner itself (an automatic replan). Wired by the CLI to the
+ * `replan` machinery with the run's lock shared; absent in unit tests.
+ */
+export type PerformReplan = (taskId: string, ev: BreakdownEvidence, decisionReason: string) => Promise<ReplanResult>;
+
 export interface RunContext {
   paths: Paths;
   config: Config;
@@ -96,12 +103,16 @@ export interface RunContext {
   splitRequest?: SplitRequest;
   /** Run an automatic breakdown for a task; the CLI wires this to `split` with the run's lock shared. */
   performSplit?: PerformSplit;
+  /** Run an automatic plan rewrite for a task; the CLI wires this to `replan` with the run's lock shared. */
+  performReplan?: PerformReplan;
   /** Automatic breakdowns attempted per task id in this run; bounds a task that keeps failing. */
   autoSplits?: Map<string, number>;
   /** Slack thread roots per task id (task id → root message `ts`), so later events reply in-thread. */
   slackThreads?: Map<string, string>;
   /** Called when the run itself rewrote the plan (an automatic breakdown), so a live view can refresh. */
   onPlanChanged?: (parentId: string, childIds: string[]) => void;
+  /** Called when an automatic replan rewrote the plan, so a live view can refresh and report. */
+  onReplanned?: (taskId: string, pending: string[]) => void;
   /** Live pipeline-watch state shown in the TUI's top panel; undefined when the watcher is off. */
   watch?: WatchState;
   /** Trigger an immediate pipeline-watch check (bound by the watcher). */
@@ -109,7 +120,7 @@ export interface RunContext {
 }
 
 interface Final { status: TaskStatus; summary: string; lastError?: LastError }
-interface TaskOutcome { status: TaskStatus; halt?: Halted; stopped?: boolean; interrupted?: boolean; split?: boolean }
+interface TaskOutcome { status: TaskStatus; halt?: Halted; stopped?: boolean; interrupted?: boolean; split?: boolean; replan?: boolean }
 
 const LIVE_MAX = 400;
 const LOG_MAX = 4000;
@@ -146,19 +157,18 @@ function refreshDerivedDocs(ctx: RunContext): void {
   }
 }
 
-/** One automatic-breakdown attempt: the verdict, when the gate was open, and whether it split. */
-interface AutoBreakdown { verdict?: BreakdownVerdict; split: boolean }
+/** One automatic-breakdown attempt: the verdict, when the gate was open, and what it rewrote. */
+interface AutoBreakdown { verdict?: BreakdownVerdict; split: boolean; replan: boolean }
 
 /** The evidence a breakdown decision reads: the task, its recorded state, and the stage's reason. */
-function breakdownEvidence(ctx: RunContext, task: Task, stage: BreakdownStage, extra: { category?: string; reason?: string; continuations?: number } = {}): BreakdownEvidence {
+function breakdownEvidence(ctx: RunContext, task: Task, stage: BreakdownStage, extra: { category?: string; reason?: string; continuations?: number; status?: string } = {}): BreakdownEvidence {
   const st = ctx.state.tasks[task.id];
   const body = taskFileBody(task, ctx.config.maxTaskBytes);
   return {
     stage,
     task,
     taskBody: body,
-    taskBytes: body !== undefined ? Buffer.byteLength(body, 'utf8') : 0,
-    status: st?.status ?? 'pending',
+    status: extra.status ?? st?.status ?? 'pending',
     attempts: st?.attempts ?? 0,
     continuations: extra.continuations ?? st?.continuation ?? 0,
     category: extra.category,
@@ -175,35 +185,71 @@ function addDecisionCost(ctx: RunContext, task: Task, costUsd: number | undefine
 }
 
 /**
- * Ask for a breakdown decision at this stage and, when the answer is `split`, run the split session.
- * The caller reloads the plan when `split` is true. Without a wired `performSplit` (unit tests) or
- * once `maxPerTask` has been spent, no decision is asked and the run behaves exactly as before.
+ * Ask for a breakdown decision at this stage and, when the answer is `split` or `replan`, run that
+ * rewrite. The caller reloads the plan when `split`/`replan` is true. Without the matching delegate
+ * (unit tests) or once `maxPerTask` has been spent, no decision is asked and the run behaves exactly
+ * as before.
  */
 async function autoBreakdown(ctx: RunContext, task: Task, ev: BreakdownEvidence): Promise<AutoBreakdown> {
-  if (!ctx.performSplit || ctx.interrupted) return { split: false };
+  if (ctx.interrupted || (!ctx.performSplit && !ctx.performReplan)) return { split: false, replan: false };
   const max = Math.max(0, ctx.config.breakdown.maxPerTask);
   const used = ctx.autoSplits?.get(task.id) ?? 0;
-  if (ctx.autoSplits && max > 0 && used >= max) return { split: false };
+  if (ctx.autoSplits && max > 0 && used >= max) return { split: false, replan: false };
   const verdict = await decideBreakdown(ctx.config, ev, { log: ctx.log, paths: ctx.paths, abort: ctx.abort.signal, fetchImpl: ctx.fetchImpl });
-  if (!verdict) return { split: false };
+  if (!verdict) return { split: false, replan: false };
   addDecisionCost(ctx, task, verdict.costUsd);
+  const pct = verdict.confidence !== undefined ? ` ${Math.round(verdict.confidence * 100)}%` : '';
+
+  if (verdict.action === 'replan') {
+    if (!ctx.performReplan) {
+      ctx.log.warn(`${task.id}: ${ev.stage} breakdown chose replan, but no replan delegate is wired; carrying on with the task as it is`);
+      return { verdict, split: false, replan: false };
+    }
+    ctx.log.warn(`${task.id}: ${ev.stage} replan (${verdict.source}${pct}): ${verdict.reason}`);
+    ctx.autoSplits?.set(task.id, used + 1);
+    let result: ReplanResult;
+    try {
+      result = await ctx.performReplan(task.id, ev, verdict.reason);
+    } catch (e) {
+      ctx.log.warn(`${task.id}: replan did not complete (${(e as Error).message}); carrying on with the task as it is`);
+      return { verdict, split: false, replan: false };
+    }
+    if (result.code !== 0) {
+      ctx.log.warn(`${task.id}: replan did not complete (exit ${result.code}${result.error ? `: ${result.error}` : ''}); carrying on with the task as it is`);
+      return { verdict, split: false, replan: false };
+    }
+    ctx.log.info(`${task.id}: plan rewritten; continuing with ${result.pending?.join(' ') || 'the remaining tasks'}`);
+    ctx.onReplanned?.(task.id, result.pending ?? []);
+    await slackNotify(ctx, 'taskReplan', {
+      title: `${task.id} replanned — ${task.title}`,
+      lines: [
+        result.pending?.length ? `next up: ${result.pending.slice(0, 12).join(' ')}${result.pending.length > 12 ? ` … +${result.pending.length - 12} more` : ''}` : 'no unfinished tasks left in the new plan',
+        `${ev.stage} breakdown (${verdict.source}): ${verdict.reason}`,
+      ],
+    }, task.id);
+    return { verdict, split: false, replan: true };
+  }
+
   if (verdict.action !== 'split') {
     ctx.log.info(`${task.id}: ${ev.stage} breakdown check: ${verdict.action} — ${verdict.reason}`);
-    return { verdict, split: false };
+    return { verdict, split: false, replan: false };
   }
-  const pct = verdict.confidence !== undefined ? ` ${Math.round(verdict.confidence * 100)}%` : '';
   ctx.log.warn(`${task.id}: ${ev.stage} breakdown (${verdict.source}${pct}): ${verdict.reason}`);
   ctx.autoSplits?.set(task.id, used + 1);
+  if (!ctx.performSplit) {
+    ctx.log.warn(`${task.id}: breakdown chose split, but no split delegate is wired; carrying on with the task as it is`);
+    return { verdict, split: false, replan: false };
+  }
   let result: SplitResult;
   try {
     result = await ctx.performSplit(task.id);
   } catch (e) {
     ctx.log.warn(`${task.id}: breakdown did not complete (${(e as Error).message}); carrying on with the task as it is`);
-    return { verdict, split: false };
+    return { verdict, split: false, replan: false };
   }
   if (result.code !== 0) {
     ctx.log.warn(`${task.id}: breakdown did not complete (exit ${result.code}${result.error ? `: ${result.error}` : ''}); carrying on with the task as it is`);
-    return { verdict, split: false };
+    return { verdict, split: false, replan: false };
   }
   ctx.log.info(`${task.id}: broken down into ${result.children.join(', ')}; continuing with the subtasks`);
   retargetFlags(ctx.flags, task.id, result.children);
@@ -215,11 +261,11 @@ async function autoBreakdown(ctx: RunContext, task: Task, ev: BreakdownEvidence)
       `${ev.stage} breakdown${verdict.source ? ` (${verdict.source})` : ''}: ${verdict.reason}`,
     ],
   }, task.id);
-  return { verdict, split: true };
+  return { verdict, split: true, replan: false };
 }
 
-/** Re-read the plan and its state after an automatic split rewrote them, in place on the context. */
-function reloadAfterSplit(ctx: RunContext): void {
+/** Re-read the plan and its state after an automatic split/replan rewrote them, in place on the context. */
+function reloadAfterRewrite(ctx: RunContext): void {
   const loaded = loadProject(ctx.paths, ctx.log);
   loaded.warnings.forEach((w) => ctx.log.warn(w));
   if (loaded.roadmapError) ctx.log.error(loaded.roadmapError);
@@ -662,12 +708,13 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
 
   /**
    * Recovery for a failure: an automatic breakdown decision first — the preferred path — then the
-   * ordinary escalation route. `split` means the task was replaced by subtasks and the run must
+   * ordinary escalation route. `split`/`replan` means the plan was rewritten and the run must
    * reload; `escalated` means a fresh attempt is starting; `failed` means give up on this task.
    */
-  const recover = async (category: string, reason: string): Promise<'split' | 'escalated' | 'failed'> => {
+  const recover = async (category: string, reason: string): Promise<'split' | 'replan' | 'escalated' | 'failed'> => {
     const attempt = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'failure', { category, reason, continuations: continuation }));
     if (attempt.split) return 'split';
+    if (attempt.replan) return 'replan';
     if (attempt.verdict?.action === 'stop') return 'failed';
     // A breakdown verdict of `escalate` already weighed the stronger model, so Jev is not asked again.
     if (await tryEscalate(category, reason, { skipDecision: attempt.verdict?.action === 'escalate' })) return 'escalated';
@@ -826,10 +873,11 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
             return { status: st.status, stopped: true };
           }
           // The preferred alternative to yet another slice: ask whether the task should be broken
-          // down now (the slice above is committed, so a split's commit stays docs-only).
-          if ((await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'continue', { reason: block.summary, continuations: slicesUsed }))).split) {
-            return { status: st.status, split: true };
-          }
+          // down (or the whole upcoming plan rewritten) now. The slice above is committed, so a
+          // split's or replan's commit stays docs-only.
+          const bd = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'continue', { reason: block.summary, continuations: slicesUsed }));
+          if (bd.split) return { status: st.status, split: true };
+          if (bd.replan) return { status: st.status, replan: true };
           log.info(`${task.id}: session reported continue (${continuation}/${maxContinuations}); starting a fresh session for the next slice`);
           resumeId = undefined;
           lastTransient = undefined;
@@ -838,6 +886,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         const contSummary = `${block.summary || 'more work remains'} | gave up after ${maxContinuations} continuation sessions (maxContinuations)`;
         const rec = await recover('task', `continuation limit (${maxContinuations}) reached`);
         if (rec === 'split') return { status: st.status, split: true };
+        if (rec === 'replan') return { status: st.status, replan: true };
         if (rec === 'escalated') continue;
         final = { status: 'failed', summary: contSummary, lastError: { category: 'task', message: 'continuation limit reached', transient: false, fatal: false, at: nowIso() } };
         break;
@@ -902,7 +951,18 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         if (scheduleTransientRetry(c, summary, outcome.sessionId)) continue;
         const rec = await recover('task', block.summary || 'model reported failed');
         if (rec === 'split') return { status: st.status, split: true };
+        if (rec === 'replan') return { status: st.status, replan: true };
         if (rec === 'escalated') continue;
+      }
+      if (block.status === 'blocked') {
+        // A blocked report often means the task bundled automatable work with an item that needs a
+        // human. Before the run stops for that human, the `onBlocked` stage may split the task or
+        // rewrite the upcoming plan so the automatable parts land now and the human gets a smaller,
+        // clear block. A `proceed` verdict (or a rewrite that cannot complete) falls through to the
+        // ordinary blocked path.
+        const bd = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'blocked', { reason: block.summary, status: 'blocked' }));
+        if (bd.split) return { status: st.status, split: true };
+        if (bd.replan) return { status: st.status, replan: true };
       }
       final = { status: block.status, summary: block.summary || block.status };
       if (block.status !== 'done') final.lastError = { category: 'task', message: block.summary || `model reported ${block.status}`, transient: false, fatal: false, at: nowIso() };
@@ -920,6 +980,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     if (scheduleTransientRetry(classified, summary, outcome.sessionId)) continue;
     const rec = await recover(classified.category, summary);
     if (rec === 'split') return { status: st.status, split: true };
+    if (rec === 'replan') return { status: st.status, replan: true };
     if (rec === 'escalated') continue;
     final = { status: 'failed', summary: classified.transient ? `${summary} (gave up after ${retryCount} retries)` : summary, lastError };
     break;
@@ -1080,9 +1141,9 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       if (esc) log.plain(`escalation: ${esc.spec.providerName} · ${esc.spec.model}${esc.spec.variant ? ` · variant ${esc.spec.variant}` : ''} if the task fails (${config.escalation.onCategories.join(', ')}; max ${config.escalation.maxAttempts} session${config.escalation.maxAttempts === 1 ? '' : 's'})`);
       const bd = config.breakdown;
       if (bd.enabled) {
-        const stages = [bd.onStart && 'start', bd.onContinue && 'continue', bd.onFailure && 'failure'].filter(Boolean).join(', ') || '(no stage on)';
+        const stages = [bd.onStart && 'start', bd.onContinue && 'continue', bd.onFailure && 'failure', bd.onBlocked && 'blocked'].filter(Boolean).join(', ') || '(no stage on)';
         const fallback = bd.decision === 'rules' ? '' : ` → ${bd.provider ?? config.watch.provider}${(bd.model || config.watch.model) ? ` · ${bd.model || config.watch.model}` : ''}`;
-        log.plain(`breakdown: ${stages} · decision ${bd.decision}${fallback} → rules at ${bd.rules.minTaskBytes} B / continuation ${bd.rules.afterContinuations} / attempt ${bd.rules.afterFailedAttempts} (${bd.rules.onCategories.join(', ')})`);
+        log.plain(`breakdown: ${stages} · decision ${bd.decision}${fallback} → rules at continuation ${bd.rules.afterContinuations} / attempt ${bd.rules.afterFailedAttempts} (${bd.rules.onCategories.join(', ')})`);
       }
       log.plain(`command: ${describeCmd(cmd)}`);
       log.plain(`--- prompt for ${t.id} (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);
@@ -1149,8 +1210,11 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       const room = config.maxTasksPerRun > 0 ? Math.max(0, config.maxTasksPerRun - attempted.size) : selected.length;
       queue = selected.slice(0, room);
     };
-    const afterSplit = (): void => {
-      reloadAfterSplit(ctx);
+    const afterRewrite = (): void => {
+      reloadAfterRewrite(ctx);
+      // A replan may have removed tasks named by --from/--to/--only; drop the stale ids rather than
+      // letting selectTasks throw mid-run.
+      sanitizeFlags(ctx.flags, ctx.tasks, (m) => log.warn(`replan: ${m}`));
       if (ctx.pauseAt && !ctx.tasks.some((t) => t.id === ctx.pauseAt)) delete ctx.pauseAt;
       consecutiveFailures = 0;
       rebuild();
@@ -1187,10 +1251,12 @@ export async function runCommand(ctx: RunContext): Promise<number> {
         return setHalt(ctx, { at: nowIso(), taskId: task.id, category: 'attempts', reason: `${task.id} has failed ${st.attempts} times (halt.maxAttemptsPerTask = ${config.halt.maxAttemptsPerTask}); last: ${st.lastError?.message ?? st.summary ?? '?'}. Fix the cause, then \`symphony run --clear-halt --retry --only ${task.id}\`` });
       }
 
-      // Before the task starts: the preferred moment to notice it is too big. A successful split
-      // replaces the task with subtasks, so the queue is re-selected and this task never runs.
-      if ((await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'start'))).split) {
-        afterSplit();
+      // Before the task starts: the preferred moment to notice it is too big, or that the plan
+      // around it is wrong. A successful split or replan rewrites the plan, so the queue is
+      // re-selected and this task never runs as it was.
+      const bd = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'start'));
+      if (bd.split || bd.replan) {
+        afterRewrite();
         continue;
       }
 
@@ -1213,7 +1279,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
         patchRoadmap(ctx, task.id, 'failed');
         out = { status: 'failed' };
       }
-      if (out.split) { afterSplit(); continue; }
+      if (out.split || out.replan) { afterRewrite(); continue; }
       if (out.stopped) return 0;
       if (out.halt) return setHalt(ctx, out.halt);
       if (out.interrupted) return ctx.signalName === 'SIGTERM' ? 143 : 130;

@@ -136,15 +136,15 @@ export function runDoctor(i: DoctorInput): Check[] {
 
   const bd = i.config.breakdown;
   if (bd.enabled) {
-    const stages = [bd.onStart && 'start', bd.onContinue && 'continue', bd.onFailure && 'failure'].filter(Boolean).join('/');
+    const stages = [bd.onStart && 'start', bd.onContinue && 'continue', bd.onFailure && 'failure', bd.onBlocked && 'blocked'].filter(Boolean).join('/');
     const bdProvider = bd.provider ?? i.config.watch.provider;
     const bdModelProvider = bd.modelProvider ?? i.config.watch.modelProvider ?? i.config.providers[bdProvider].modelProvider;
     const model = composeModel(bdProvider, bdModelProvider, bd.model || i.config.watch.model);
     const decision = bd.decision === 'rules' ? 'rules' : `${bd.decision} (jev → ${bdProvider}${model ? ` · ${model}` : ''} → rules)`;
-    const rules = `minTaskBytes=${bd.rules.minTaskBytes}, afterContinuations=${bd.rules.afterContinuations}, afterFailedAttempts=${bd.rules.afterFailedAttempts}, onCategories=${bd.rules.onCategories.join('/') || 'none'}`;
+    const rules = `afterContinuations=${bd.rules.afterContinuations}, afterFailedAttempts=${bd.rules.afterFailedAttempts}, onCategories=${bd.rules.onCategories.join('/') || 'none'}`;
     add('breakdown', stages ? 'ok' : 'warn', stages
       ? `on ${stages} · decision ${decision} · rules ${rules} · max ${bd.maxPerTask || '∞'} per task`
-      : `breakdown.enabled is true but onStart/onContinue/onFailure are all false; nothing will trigger`);
+      : `breakdown.enabled is true but onStart/onContinue/onFailure/onBlocked are all false; nothing will trigger`);
   }
 
   if (i.config.vision.enabled) {

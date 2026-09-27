@@ -506,13 +506,14 @@ test('breakdown config is off by default, parses overrides, and validates keys',
   assert.equal(DEFAULTS.breakdown.onStart, false);
   assert.equal(DEFAULTS.breakdown.onContinue, true);
   assert.equal(DEFAULTS.breakdown.onFailure, true);
-  assert.deepEqual(DEFAULTS.breakdown.rules, { minTaskBytes: 16384, afterContinuations: 1, afterFailedAttempts: 1, onCategories: ['task', 'verify'] });
+  assert.equal(DEFAULTS.breakdown.onBlocked, true);
+  assert.deepEqual(DEFAULTS.breakdown.rules, { afterContinuations: 1, afterFailedAttempts: 1, onCategories: ['task', 'verify'] });
   assert.equal(loadConfig(paths, {}).config.breakdown.enabled, false);
 
   writeFileSync(paths.config, JSON.stringify({
     breakdown: {
-      enabled: true, onStart: true, onContinue: false, onFailure: false, decision: 'rules', preferOverEscalation: false, maxPerTask: 3,
-      rules: { minTaskBytes: 0, afterContinuations: 0, afterFailedAttempts: 2, onCategories: ['verify'] },
+      enabled: true, onStart: true, onContinue: false, onFailure: false, onBlocked: false, decision: 'rules', preferOverEscalation: false, maxPerTask: 3,
+      rules: { afterContinuations: 0, afterFailedAttempts: 2, onCategories: ['verify'] },
     },
   }));
   const config = loadConfig(paths, {}).config;
@@ -520,10 +521,11 @@ test('breakdown config is off by default, parses overrides, and validates keys',
   assert.equal(config.breakdown.onStart, true);
   assert.equal(config.breakdown.onContinue, false);
   assert.equal(config.breakdown.onFailure, false);
+  assert.equal(config.breakdown.onBlocked, false);
   assert.equal(config.breakdown.decision, 'rules');
   assert.equal(config.breakdown.preferOverEscalation, false);
   assert.equal(config.breakdown.maxPerTask, 3);
-  assert.deepEqual(config.breakdown.rules, { minTaskBytes: 0, afterContinuations: 0, afterFailedAttempts: 2, onCategories: ['verify'] });
+  assert.deepEqual(config.breakdown.rules, { afterContinuations: 0, afterFailedAttempts: 2, onCategories: ['verify'] });
 
   writeFileSync(paths.config, JSON.stringify({ breakdown: { provider: 'nope', decision: 'maybe', maxPerTask: -1 } }));
   const bad = loadConfig(paths, {});
@@ -595,7 +597,7 @@ test('slack config is off by default with agnostic values, parses overrides, and
   assert.equal(DEFAULTS.slack.channel, '');
   assert.equal(DEFAULTS.slack.user, '');
   assert.equal(DEFAULTS.slack.mention, true);
-  assert.deepEqual(DEFAULTS.slack.events, { runStart: true, taskStart: true, taskSplit: true, taskEscalated: true, taskDone: true, taskContinue: true, taskFailed: true, taskBlocked: true, watch: false, budgetClose: true, budgetExceeded: true, halt: true, runEnd: true });
+  assert.deepEqual(DEFAULTS.slack.events, { runStart: true, taskStart: true, taskSplit: true, taskReplan: true, taskEscalated: true, taskDone: true, taskContinue: true, taskFailed: true, taskBlocked: true, watch: false, budgetClose: true, budgetExceeded: true, halt: true, runEnd: true });
   assert.equal(loadConfig(paths, {}).config.slack.enabled, false);
 
   writeFileSync(paths.config, JSON.stringify({ slack: { enabled: true, apiKeyEnv: 'SLACK_API_KEY', project: 'symphony', channel: '#eng', user: '@ada', mention: false, timeoutMs: 5000, events: { taskStart: false, taskDone: true, taskContinue: false, taskFailed: true, taskBlocked: true, halt: false, runEnd: true } } }));
@@ -607,7 +609,7 @@ test('slack config is off by default with agnostic values, parses overrides, and
   assert.equal(config.slack.user, '@ada');
   assert.equal(config.slack.mention, false);
   assert.equal(config.slack.timeoutMs, 5000);
-  assert.deepEqual(config.slack.events, { runStart: true, taskStart: false, taskSplit: true, taskEscalated: true, taskDone: true, taskContinue: false, taskFailed: true, taskBlocked: true, watch: false, budgetClose: true, budgetExceeded: true, halt: false, runEnd: true });
+  assert.deepEqual(config.slack.events, { runStart: true, taskStart: false, taskSplit: true, taskReplan: true, taskEscalated: true, taskDone: true, taskContinue: false, taskFailed: true, taskBlocked: true, watch: false, budgetClose: true, budgetExceeded: true, halt: false, runEnd: true });
   assert.equal(warnings.length, 0);
 
   // Enabled with no target cannot post anywhere: it is turned off with a warning.

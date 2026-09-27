@@ -209,7 +209,7 @@ The previous behaviour is unchanged: `symphony run` (or `symphony run --no-tui`)
 | **fatal error** — auth, no credits, usage limit, unknown model, bad config, missing binary | the run **halts**: banner, exit `3`, sticky in `state.json`; later `run`s refuse to start |
 | task fails **twice in a row**, or one task fails **3 times** | the run halts (thresholds configurable) |
 | `continue` past `maxContinuations` | treated as failed |
-| a `breakdown` stage fires (task starts too big, `continue` boundary, failure) | one decision — Jev → fallback LLM → rules — answers split / carry on / escalate / stop; a split rewrites the task into subtasks and the run continues on the children in the same invocation |
+| a `breakdown` stage fires (task starts too big, `continue` boundary, blocked report, failure) | one decision — Jev → fallback LLM → rules — answers split / replan / carry on / escalate / stop; a split rewrites the task into subtasks and a replan the upcoming plan, and the run continues on the result in the same invocation |
 | `maxIterationsPerTask` / `maxTasksPerRun` / `--budget` reached | the task fails gracefully, or the run processes only the first N tasks, with a clear summary |
 | `touch .stop` (path configurable) | pauses at the next boundary — before the next task, or after the current slice when a task is split via `continue` — exit `0`; nothing is killed, and a mid-continuation pause resumes the right slice next run. `touch .symphony/STOP` is the legacy alias. In the TUI, `p` toggles the sentinel now and `P` queues a pause at a chosen task, placing the sentinel when the run reaches it |
 | commit fails (pre-commit hook, signing, `index.lock`) or a session switched branches | retried once; if it still fails the task is demoted to `failed` instead of recorded `done`, because its work did not land in git |
@@ -241,7 +241,7 @@ Everything that can happen to a task, and what you do about it.
 | 1 | task reports `done`, verify passes | commits the task; starts the next task in a new session | `[x]` | – | nothing |
 | 2 | task reports `continue` | commits the slice; starts a fresh session for the next slice (≤ `maxContinuations`) | `[~] ⟵ running` between sessions | – | nothing |
 | 3 | `continue` past the limit | marks the task failed | `[~] ⟵ failed` | 2 | `symphony split T05` to break it down, or raise `maxContinuations` |
-| 4 | task reports `blocked` | stops for a human (default); `onBlocked: "continue"` moves on instead | `[~] ⟵ blocked` | 2 | read the task's Hand-off; `accept T05 --note "…"` or `run --retry --only T05` |
+| 4 | task reports `blocked` | stops for a human (default); `onBlocked: "continue"` moves on instead; with `breakdown.onBlocked` a breakdown decision may first split off the automatable parts | `[~] ⟵ blocked` | 2 | read the task's Hand-off; `accept T05 --note "…"` or `run --retry --only T05` |
 | 5 | task reports `failed` | a summary naming a transient infra fault (dropped MCP/plugin session, reset connection, 5xx) is retried with backoff; otherwise stops | `[~] ⟵ failed` | 2 | fix the cause, then `run` (failed tasks are retried) |
 | 6 | `done` but verify fails | a transport fault (dropped MCP/plugin session, reset connection) is retried with backoff; a real failure demotes to failed and records command, exit code and output tail | `[~] ⟵ failed` | 2 | fix, then `run` |
 | 7 | session ends without a result block | resumes it once to close out | `[~] ⟵ running` while nudging | – | nothing (or `--no-nudge` and accept that it fails) |
@@ -254,7 +254,7 @@ Everything that can happen to a task, and what you do about it.
 | 14 | `maxIterationsPerTask` / `maxTasksPerRun` / budget hit | task fails gracefully, or the run processes only the first N tasks | task `failed` / rest `pending` | – | raise the limit, or `symphony split` the task |
 | 15 | you tick `[x]` by hand | next load reconciles state to the roadmap tick | `[x]` | – | nothing |
 | 16 | `reset T05 --revert` | clears state and reverts the task's commits newest-first; on conflict it stops and tells you to resolve | `[ ]` pending | 0 | fix conflicts if any, then `run` |
-| 17 | `breakdown.enabled` and a task looks too big (at its start, after a `continue` slice, or where it would escalate/fail) | one decision (Jev → fallback LLM → rules) answers split / carry on / escalate / stop; a split runs the split session, commits the rewritten plan and continues the run on the subtasks | `T10` → `T10a`, `T10b` (parent state pruned) | – | nothing; `breakdown.decision: "rules"` keeps it offline and free |
+| 17 | `breakdown.enabled` and a task looks too big or the plan around it wrong (at its start, after a `continue` slice, when it reports blocked, or where it would escalate/fail) | one decision (Jev → fallback LLM → rules) answers split / replan / carry on / escalate / stop; a split runs the split session and a replan rewrites the upcoming plan; the run commits and continues on the result | `T10` → `T10a`, `T10b` (parent state pruned), or a rewritten roadmap with only never-run tasks reshaped | – | nothing; `breakdown.decision: "rules"` keeps it offline and free |
 
 The pipeline stops for a human only when a task itself reports `blocked`, or a fatal provider/config problem halts the run. Everything else — transient errors, large tasks, missing result blocks — is handled by retry, continuation and nudge.
 
@@ -269,6 +269,8 @@ Sometimes you discover half-way through that the design is wrong. symphony does 
 5. **Resume.** Remove the sentinel (`rm .stop`) and `symphony run`.
 
 Why not re-plan inside a running session? The one-fresh-session-per-task model is the whole point: a session gets its task and nothing else, and a task that changes underneath it is exactly the context rot symphony exists to avoid. Pause, re-plan, commit, resume — the pivot stays auditable in `git log`.
+
+The same move can happen automatically when the harness notices the problem itself: an [automatic breakdown](#automatic-breakdowns) verdict of *replan* runs this scoped-down shape of the same machinery — rewrite only the tasks that have not run, validate that finished work is untouched, commit, reload and resume — without stopping for you first.
 
 ## Splitting a task
 
@@ -285,11 +287,11 @@ One agent session reads the task file, its state and last failure, the roadmap a
 
 Subtasks run like any other task: the next `symphony run` picks them up where the parent would have run. Only unfinished tasks can be split (`pending`, `failed`, `blocked`, or interrupted by Ctrl-C/the TUI); `done` and `accepted` ones stay as history. Splitting goes one level at a time — a subtask can be split again into `T05a1`, `T05a2`, … — and work the parent already committed stays in git history for the children to build on or ignore.
 
-In the run view, press `b` on the selected task: the run pauses at the next boundary (or the session is stopped when that task is the one running), the same split logic runs with its output in the live panel, and the run resumes automatically on the subtasks. A halted task can be split too — the halt is a symptom of the oversized task, and a successful split clears it. Prefer the harness to notice by itself? [Automatic breakdowns](#automatic-breakdowns) trigger the same move at a task's start, at a `continue` boundary, or instead of an escalation.
+In the run view, press `b` on the selected task: the run pauses at the next boundary (or the session is stopped when that task is the one running), the same split logic runs with its output in the live panel, and the run resumes automatically on the subtasks. A halted task can be split too — the halt is a symptom of the oversized task, and a successful split clears it. Prefer the harness to notice by itself? [Automatic breakdowns](#automatic-breakdowns) trigger the same move at a task's start, at a `continue` boundary, when a task reports blocked, or instead of an escalation.
 
 ## Automatic breakdowns
 
-`symphony split` is manual; the `breakdown` block makes the same move automatic. When a task looks too big — before it starts, at a `continue` boundary, or where the harness would otherwise escalate a failure — one decision answers *split*, *carry on*, *escalate* or *stop*. A *split* runs the same session as `symphony split`, commits the rewritten plan, and the run reloads `ROADMAP.md` and carries on with the subtasks in the same invocation.
+`symphony split` is manual; the `breakdown` block makes the same move automatic. When a task looks too big — before it starts, at a `continue` boundary, when it reports blocked, or where the harness would otherwise escalate a failure — one decision answers *split*, *replan*, *carry on*, *escalate* or *stop*. A *split* runs the same session as `symphony split`, commits the rewritten plan, and the run reloads `ROADMAP.md` and carries on with the subtasks in the same invocation; a *replan* rewrites the upcoming plan (see below).
 
 ```json
 "breakdown": {
@@ -297,8 +299,8 @@ In the run view, press `b` on the selected task: the run pauses at the next boun
   "onStart": true,
   "onContinue": true,
   "onFailure": true,
+  "onBlocked": true,
   "rules": {
-    "minTaskBytes": 16384,
     "afterContinuations": 1,
     "afterFailedAttempts": 1,
     "onCategories": ["task", "verify"]
@@ -315,10 +317,10 @@ In the run view, press `b` on the selected task: the run pauses at the next boun
 | key | default | meaning |
 |---|---|---|
 | `enabled` | `false` | master switch |
-| `onStart` | `false` | decide before a task runs; the rules open it when the task file body is at least `rules.minTaskBytes` |
+| `onStart` | `false` | decide before a task runs |
 | `onContinue` | `true` | decide at a `continue` boundary instead of starting another slice (`rules.afterContinuations`) |
 | `onFailure` | `true` | decide where the harness would escalate or fail (`rules.afterFailedAttempts`, `rules.onCategories`) |
-| `rules.minTaskBytes` | `16384` | `onStart` trigger: task file body size that opens the decision (0 = every task) |
+| `onBlocked` | `true` | decide before stopping for a task that reported `blocked`; *split* moves the automatable parts into subtasks, *proceed* takes the ordinary blocked path |
 | `rules.afterContinuations` | `1` | `onContinue` trigger: continuation sessions already run before the decision opens (0 = after the very first slice) |
 | `rules.afterFailedAttempts` | `1` | `onFailure` trigger: sessions already run before the decision opens |
 | `rules.onCategories` | `[task, verify]` | `onFailure` categories that open the decision; infrastructure failures (auth, rate limits, timeouts) never do |
@@ -330,9 +332,11 @@ In the run view, press `b` on the selected task: the run pauses at the next boun
 
 The decision chain is **Jev** (`jev.breakdownDecision`, one typed call, discarded below `jev.minConfidence`) → **fallback LLM** (one read-only session with a self-contained snapshot, `autoApprove: false`, its own `provider`/`model` so it can be cheap) → **deterministic rules**. A source that is off, unavailable, slow or unsure falls through to the next, so the rules always answer — `decision: "rules"` makes the whole thing free, offline and fully predictable. Both model sources report their cost, and it counts against `maxCostUsdPerRun` like a session's.
 
-The answer means: **split** break the task down now, **run**/**continue** carry on as the harness would, **escalate** hand it to the escalation model immediately (skipping the separate `escalationDecision` gate, since this call just decided), **stop** fail the task without escalating. Every answer is logged, e.g. `T05: continue breakdown (rules): continuation 1 (>= breakdown.rules.afterContinuations 1); split instead of another slice`, and a split in the TUI toasts `broke T05 into T05a, T05b; resuming` after the view refreshes.
+The answer means: **split** break the task down now, **replan** rewrite the upcoming part of the whole plan (reorder, re-size, merge, split or add tasks; everything that already ran is preserved) and resume the run on it, **run**/**continue**/**proceed** carry on as the harness otherwise would (run the task, start the next slice, take the ordinary failure path, or stop for the human at a block), **escalate** hand it to the escalation model immediately (skipping the separate `escalationDecision` gate, since this call just decided), **stop** fail the task without escalating. Every answer is logged, e.g. `T05: continue breakdown (rules): continuation 1 (>= breakdown.rules.afterContinuations 1); split instead of another slice`, and a split in the TUI toasts `broke T05 into T05a, T05b; resuming` while a replan toasts the rewritten queue.
 
-Breakdowns are bounded on purpose: `maxPerTask` caps how often one task is split in a run, the id grammar caps depth (`T10` → `T10a`…, a subtask → `T10a1`…, a twice-split task not at all), `maxTasksPerRun` still counts tasks the run has started (a breakdown cannot buy more), and `maxContinuations` still caps the slices. A rewrite that fails validation leaves the task exactly as it was, and the run falls back to its ordinary behaviour — escalate, fail or continue — so a breakdown can only ever help.
+An automatic replan runs the same planning machinery as `symphony replan` but scoped to the pipeline: one agent session rewrites `ROADMAP.md` and the task files that have not run, the harness validates that no finished task was removed or retitled (and prunes only rows that never ran), commits the docs change, reloads the plan and continues in the same invocation. A rewrite that fails validation is never committed; the run falls back to its ordinary behaviour.
+
+Breakdowns are bounded on purpose: `maxPerTask` caps how often one task may trigger a rewrite (split or replan) in a run, the id grammar caps split depth (`T10` → `T10a`…, a subtask → `T10a1`…, a twice-split task not at all), `maxTasksPerRun` still counts tasks the run has started (a breakdown cannot buy more), and `maxContinuations` still caps the slices. A rewrite that fails validation is never committed, and the run falls back to its ordinary behaviour — escalate, fail or continue — so a breakdown can only ever help.
 
 ## Multiple task sets
 
@@ -595,7 +599,7 @@ It runs up to three independent **workflows**, each behind its own flag:
 | `resultFallback` | `true` | settle a session that omitted its `SYMPHONY_RESULT` block |
 | `failureTriage` | `true` | place a failure the regex classifier could not |
 | `escalationDecision` | `true` | decide whether a failed task is worth escalating |
-| `breakdownDecision` | `true` | decide split / carry on / escalate / stop for an open [automatic breakdown](#automatic-breakdowns) |
+| `breakdownDecision` | `true` | decide split / replan / carry on / escalate / stop for an open [automatic breakdown](#automatic-breakdowns) |
 | `provider` | `openrouter` | where the System One call goes; `baseUrl` overrides it |
 | `baseUrl` | – | override the provider's base URL (e.g. a self-hosted gateway) |
 | `model` | `jev-latest` | System One model id; `jev-latest` tracks the newest Jev release |
@@ -622,7 +626,7 @@ This is a gate, not a router: `onCategories` is still the trigger, infrastructur
 
 ### `breakdownDecision`
 
-When the [`breakdown` block](#automatic-breakdowns) is enabled and one of its gates opens — a task starts and its file is large, a slice ends with `continue`, or a task fails — Jev reads the task (title and body), the stage and the evidence (the failure, or the continuation count and last slice summary), and answers a `choice`: `split` (smaller subtasks are more likely to succeed than a stronger model), `escalate` (a more capable model would plausibly finish it from the same context), `stop` (neither helps), or `proceed` (let the harness take its ordinary path). A confident `split` runs the same session as `symphony split`, then the run continues on the subtasks; a confident `escalate` goes straight to the escalation model without asking `escalationDecision` a second time. Below `minConfidence`, or with no key, the chain moves on to the fallback LLM and then the rules — so `breakdownDecision` can only *choose* among the options, never block a run.
+When the [`breakdown` block](#automatic-breakdowns) is enabled and one of its gates opens — a task is about to start, a slice ends with `continue`, a task reports `blocked`, or a task fails — Jev reads the task (title and body), the stage and the evidence (the failure, block summary, or the continuation count and last slice summary), and answers a `choice`: `split` (smaller subtasks are more likely to succeed than a stronger model), `replan` (the upcoming plan itself is wrong and should be rewritten), `escalate` (a more capable model would plausibly finish it from the same context), `stop` (neither helps), or `proceed` (let the harness take its ordinary path — at a block, stopping for the human). A confident `split` runs the same session as `symphony split` and a confident `replan` the automatic replan, then the run continues on the result; a confident `escalate` goes straight to the escalation model without asking `escalationDecision` a second time. Below `minConfidence`, or with no key, the chain moves on to the fallback LLM and then the rules — so `breakdownDecision` can only *choose* among the options, never block a run. `escalate` is only offered at the failure stage; the deterministic rules never choose `replan`.
 
 `symphony doctor` reports which workflows are armed and whether the key is present; a missing key halts the next `run` (exit `3`) until it is set or `jev.enabled` is turned off.
 
@@ -711,6 +715,7 @@ An unattended run is easier to trust when something tells you the moment it need
     "runStart": true,
     "taskStart": true,
     "taskSplit": true,
+    "taskReplan": true,
     "taskEscalated": true,
     "taskDone": true,
     "taskContinue": true,
@@ -747,6 +752,7 @@ An unattended run is easier to trust when something tells you the moment it need
 | `runStart` | the run acquired its lock and started its queue |
 | `taskStart` | a task started its first session this run (after any start-time breakdown) |
 | `taskSplit` | a breakdown replaced a task with subtasks |
+| `taskReplan` | a breakdown rewrote the upcoming plan (an automatic replan) and the run resumed on it |
 | `taskEscalated` | a failed task was handed to the escalation provider/model |
 | `taskDone` | a task finished `done` (after its verify, if one is configured) |
 | `taskContinue` | a task session reported `continue`; a fresh slice is starting |
@@ -760,7 +766,7 @@ An unattended run is easier to trust when something tells you the moment it need
 
 The two `budget*` events depend on another setting: they never fire unless `maxCostUsdPerRun` is configured (greater than zero). `budgetClose` fires once per run at 80% of the cap; `budgetExceeded` fires at the cap, just before the run halts. `watch` is **feature-flagged off by default** and also needs `watch.enabled`: it fires once per watcher check that produces a new summary, threaded (see below), and stays quiet when no task is running.
 
-**Threads.** With `taskStart` on, the first message about a task is an ordinary channel/DM message and every later message about that same task — `taskContinue`, `taskEscalated`, `taskSplit`, `taskDone`/`taskFailed`/`taskBlocked`, and a `watch` update — is posted as a reply in that message's thread, so a busy channel shows one root per task instead of a flat stream. Run-level events (`runStart`, `runEnd`, `halt`, `budget*`) are never threaded. A reply does not re-`mention` the user, even with `mention: true`; only the thread root pings. If `taskStart` is off, the first task event that actually posts becomes the thread root.
+**Threads.** With `taskStart` on, the first message about a task is an ordinary channel/DM message and every later message about that same task — `taskContinue`, `taskEscalated`, `taskSplit`, `taskReplan`, `taskDone`/`taskFailed`/`taskBlocked`, and a `watch` update — is posted as a reply in that message's thread, so a busy channel shows one root per task instead of a flat stream. Run-level events (`runStart`, `runEnd`, `halt`, `budget*`) are never threaded. A reply does not re-`mention` the user, even with `mention: true`; only the thread root pings. If `taskStart` is off, the first task event that actually posts becomes the thread root.
 
 **Messages.** Each headline carries the `[project]` tag, the task id and title (or the run/halt), and the resolved status; the detail lines add phase, provider/model/variant, duration, cost, summary and commit. For example:
 
@@ -839,7 +845,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, adaptive image description, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt explains it (see [Vision tool](#vision-tool)) |
 | `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true` except `watch`, `10000` | post lifecycle events to a Slack channel or DM a user, threading a task's later events under its start (see [Slack notifications](#slack-notifications)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
-| `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.rules.*`, `.decision`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `16384`/`1`/`1`/`[task, verify]`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
+| `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.onBlocked`, `.rules.*`, `.decision`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `true`, `1`/`1`/`[task, verify]`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, when a task reports blocked, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
 
 ## Hooks

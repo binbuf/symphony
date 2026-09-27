@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import type { BreakdownEvidence } from './breakdown.js';
 import { scaffoldDocs } from './commands.js';
 import { resolveSession } from './config.js';
 import { docsContract } from './contract.js';
@@ -12,11 +13,11 @@ import { nextAdrNumber } from './prompt.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { idFromNum, parseRoadmap, patchRoadmapFile } from './roadmap.js';
 import { haltBanner, preflight, type RunContext } from './runner.js';
-import { acquireLock, HELD_STATES, releaseLock, saveState, startLockHeartbeat, type State, type TaskStatus } from './state.js';
+import { acquireLock, DONE_STATES, HELD_STATES, releaseLock, saveState, startLockHeartbeat, type State, type TaskStatus } from './state.js';
 import { updatePipelineStatus } from './status.js';
 import { discoverTasks, type Task } from './tasks.js';
 import { renderPrompt } from './templates.js';
-import { UsageError, clip } from './util.js';
+import { UsageError, clip, squash } from './util.js';
 
 const ROADMAP_CAP = 16 * 1024;
 const DIRECTION_CAP = 32 * 1024;
@@ -250,4 +251,205 @@ export async function replanCommand(ctx: RunContext, opts: ReplanOptions): Promi
     stopHeartbeat();
     releaseLock(paths);
   }
+}
+
+/** One automatic replan: the exit code, a detail on failure, and the ids the rewritten plan queues next. */
+export interface ReplanResult {
+  code: number;
+  error?: string;
+  /** Task ids in the rewritten plan that have not finished, in roadmap order (for logs/toasts). */
+  pending?: string[];
+}
+
+/** A one-line statement of the stage for the auto-replan prompt, and the evidence line beneath it. */
+function autoReplanEvidence(ev: BreakdownEvidence): { stageLine: string; label: string; text: string } {
+  const task = `${ev.task.id} — ${ev.task.title}`;
+  if (ev.stage === 'failure') {
+    return {
+      stageLine: 'it failed, and the decision was that the plan around it — not just the task — is the problem.',
+      label: `failure (${ev.category ?? 'task'})`,
+      text: squash(ev.reason ?? '(no message)', 2000),
+    };
+  }
+  if (ev.stage === 'blocked') {
+    return {
+      stageLine: 'it reported blocked, and the decision was that the upcoming plan should be reshaped around the human item.',
+      label: 'block summary',
+      text: squash(ev.reason ?? '(none given)', 2000),
+    };
+  }
+  if (ev.stage === 'continue') {
+    return {
+      stageLine: `it has used ${ev.continuations} continuation slice(s) without finishing, and the decision was that the plan itself is the problem.`,
+      label: 'last slice reported',
+      text: squash(ev.reason ?? 'continue', 2000),
+    };
+  }
+  return {
+    stageLine: 'it is about to start, and the decision was that the upcoming plan is wrong enough to fix before running anything.',
+    label: 'trigger',
+    text: `breaks down was considered for ${task} at its start (${ev.attempts} session(s) recorded so far)`,
+  };
+}
+
+/** The prompt for an automatic replan: the trigger, the plan, the rules, and the free child ids. */
+export function buildAutoReplanPrompt(ctx: RunContext, ev: BreakdownEvidence, report: LintReport, decisionReason = ''): string {
+  const { paths, config } = ctx;
+  const d = {
+    roadmap: rel(paths.root, paths.roadmap),
+    progress: rel(paths.root, paths.progress),
+    tasks: rel(paths.root, paths.tasksDir),
+    design: rel(paths.root, paths.designDir),
+    adr: rel(paths.root, paths.adrDir),
+    docs: rel(paths.root, paths.docs),
+  };
+  const findings = report.findings.length
+    ? report.findings.map((x) => `${x.level === 'error' ? '✗' : x.level === 'warn' ? '!' : '·'} ${x.code}: ${x.message}`).join('\n')
+    : '(none)';
+  const roadmap = existsSync(paths.roadmap) ? clip(readFileSync(paths.roadmap, 'utf8'), ROADMAP_CAP) : '(missing)';
+  const tree = docsTree(paths);
+  const maxNum = ctx.tasks.reduce((m, t) => Math.max(m, t.num), 0);
+  const evidence = autoReplanEvidence(ev);
+
+  const vars: Record<string, string | number> = {
+    projectName: basename(paths.root),
+    root: paths.root,
+    stage: ev.stage,
+    stageLine: evidence.stageLine,
+    taskId: ev.task.id,
+    taskTitle: ev.task.title,
+    taskPhase: ev.task.phase,
+    status: ev.status,
+    attempts: ev.attempts,
+    continuations: ev.continuations,
+    evidenceLabel: evidence.label,
+    evidence: evidence.text,
+    decisionReason: decisionReason || 'the upcoming plan should be rewritten',
+    taskBody: ev.taskBody?.trim() ? clip(ev.taskBody, 12_000) : '(no task file — the roadmap bullet is the whole task)',
+    contract: docsContract(paths, { design: config.designDocs }),
+    findings,
+    docsDir: d.docs,
+    tree: tree.length ? tree.join('\n') : '(empty)',
+    roadmapPath: d.roadmap,
+    roadmapContent: roadmap,
+    progress: d.progress,
+    tasks: d.tasks,
+    nextId: idFromNum(maxNum + 1),
+    lintCommand: lintCommand(ctx),
+  };
+  return renderPrompt('replan-auto.md', vars);
+}
+
+/** The verdict on an automatic replan's rewrite, before anything is recorded. */
+export interface AutoReplanCheck {
+  ok: boolean;
+  errors: string[];
+  /** Ids of tasks in the rewritten plan that have not finished, in roadmap order. */
+  pending: string[];
+}
+
+/**
+ * Validate an automatic replan against the harness state: the rewrite must not remove or retitle a
+ * task that already ran (done, accepted or blocked), and must leave at least one task. Pure, so the
+ * rules are testable without running an agent.
+ */
+export function checkAutoReplanState(state: State, tasks: Task[]): AutoReplanCheck {
+  const errors: string[] = [];
+  if (!tasks.length) errors.push('the rewrite left no tasks in the roadmap');
+  const plan = planReplanState(state, tasks);
+  for (const id of plan.removed) {
+    const status = state.tasks[id]?.status;
+    if (status !== undefined && HELD_STATES.includes(status)) {
+      errors.push(`${id} already ran [${status}] but the rewrite removed it; finished work must be preserved`);
+    }
+  }
+  for (const c of plan.conflicts) {
+    errors.push(`${c.id} was retitled: it already ran as "${c.oldTitle}" [${c.status}] but the new plan calls it "${c.newTitle}"; finished work must be preserved`);
+  }
+  return { ok: errors.length === 0, errors, pending: tasks.filter((t) => !DONE_STATES.includes(state.tasks[t.id]?.status ?? 'pending')).map((t) => t.id) };
+}
+
+/**
+ * Rewrite the upcoming part of the plan on an open breakdown verdict of `replan`: one docs session
+ * reshapes `ROADMAP.md` and the task files, then the rewrite is validated — finished work must be
+ * untouched, removed rows must not have run — and committed. The caller (a live run) already holds
+ * the lock and reloads the plan on success. Pure plan work: no application code, no design docs.
+ */
+export async function replanForBreakdown(ctx: RunContext, ev: BreakdownEvidence, opts: { dryRun?: boolean; decisionReason?: string } = {}): Promise<ReplanResult> {
+  const { paths, config, log, state } = ctx;
+  const docsRel = rel(paths.root, paths.docs);
+  const fail = (code: number, error: string): ReplanResult => ({ code, error });
+
+  if (state.halted && state.halted.taskId !== ev.task.id) {
+    haltBanner(ctx, state.halted);
+    return fail(3, `halted on ${state.halted.taskId ?? '?'} (${state.halted.category})`);
+  }
+
+  let findings = lintDocs(paths, { design: config.designDocs });
+  log.plain('--- lint (before)');
+  formatLint(findings).forEach((l) => log.plain(l));
+
+  // Deterministic skeleton first, so the session always has tasks/ to write into.
+  const created = scaffoldDocs(paths, { roadmap: false, config: false, design: config.designDocs });
+  created.forEach((p) => log.info(`created ${relative(paths.root, p)}`));
+  const stopEntry = stopIgnoreEntry(paths);
+  const added = ensureGitignore(paths.root, ['.symphony/', ...(stopEntry ? [stopEntry] : [])]);
+  if (added.length) log.info(`added ${added.join(', ')} to ${join(paths.root, '.gitignore')}`);
+  if (created.length || added.length) findings = lintDocs(paths, { design: config.designDocs });
+
+  const { spec, warnings } = resolveSession(config, undefined, ctx.cli, process.env, (p) => getProvider(p).supportsBudget, variantSupported);
+  warnings.forEach((w) => log.warn(w));
+  const provider = getProvider(spec.providerName);
+  const prompt = buildAutoReplanPrompt(ctx, ev, findings, opts.decisionReason);
+
+  if (opts.dryRun) {
+    log.plain(`\nprovider: ${spec.providerName} [${spec.sources.provider}] · model: ${spec.model ?? 'provider default'} [${spec.sources.model}]${spec.variant ? ` · variant ${spec.variant} [${spec.sources.variant}]` : ''} · timeout ${config.prepareTimeoutMin} min`);
+    log.plain(`--- auto-replan prompt (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);
+    return { code: 0 };
+  }
+
+  const label = `replan: reshaping the upcoming plan around ${ev.task.id} — ${ev.task.title}`;
+  const { outcome, early } = await runDocsSession(ctx, spec, provider, {
+    prompt, runName: `replan-${ev.task.id}`, taskId: `replan-${ev.task.id}`, label, timeoutMin: config.prepareTimeoutMin,
+  });
+  if (early !== undefined) return fail(early, `replan session ended early (exit ${early})`);
+
+  const after = lintDocs(paths, { design: config.designDocs });
+  log.plain('--- lint (after)');
+  formatLint(after).forEach((l) => log.plain(l));
+  if (!after.ok) {
+    log.error(`${docsRel}/ is still not in the expected format after the replan; fix the ✗ items by hand or let a later run try again`);
+    return fail(2, `${docsRel}/ is still not in the expected format after the replan`);
+  }
+
+  // The agent rewrote the plan on disk: reload it and check the rewrite before committing.
+  let newTasks: Task[];
+  try {
+    const roadmap = parseRoadmap(readFileSync(paths.roadmap, 'utf8'));
+    const discovered = discoverTasks(paths, roadmap);
+    newTasks = discovered.tasks;
+    discovered.warnings.forEach((w) => log.warn(w));
+  } catch (e) {
+    log.error(`replan: the rewritten plan does not parse (${(e as Error).message}); refusing to commit.`);
+    return fail(2, 'the rewritten plan does not parse');
+  }
+
+  const check = checkAutoReplanState(state, newTasks);
+  if (!check.ok) {
+    check.errors.forEach((e) => log.error(`replan: ${e}`));
+    log.error('replan: refusing to commit. Nothing was recorded.');
+    return fail(2, check.errors[0]);
+  }
+
+  const plan = planReplanState(state, newTasks);
+  applyReplanState(paths, state, plan, { allowIdReuse: false, resetState: false }, log);
+  for (const t of newTasks) {
+    if (state.tasks[t.id]) continue;
+    try { patchRoadmapFile(paths.roadmap, t.id, 'pending'); } catch { /* reported by the run */ }
+  }
+  updatePipelineStatus(paths, newTasks, state, log);
+  const commit = commitAll(paths.root, `docs: auto-replan after ${ev.task.id} (${ev.stage}) [replan]`, (m) => log.warn(m), { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore, expectedBranch: ctx.startBranch });
+  log.info(`replan: git ${describeCommit(commit)}${outcome.costUsd !== undefined ? ` · $${outcome.costUsd.toFixed(2)}` : ''}`);
+  log.info(`replan: ${newTasks.length} task${newTasks.length === 1 ? '' : 's'} in the rewritten plan; next: ${check.pending.join(' ') || '(nothing left)'}`);
+  return { code: 0, pending: check.pending };
 }

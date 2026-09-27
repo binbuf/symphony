@@ -89,7 +89,7 @@ export async function runDocsSession(
   ensureDir(paths.runs);
   const sinks = openRunSinks(paths.runs, `${opts.runName}-${stamp()}`);
   writeFileSync(sinks.promptPath, opts.prompt);
-  const mcpKind: McpSessionKind = opts.runName === 'replan' ? 'replan' : opts.runName.startsWith('split') ? 'split' : 'prepare';
+  const mcpKind: McpSessionKind = opts.runName.startsWith('replan') ? 'replan' : opts.runName.startsWith('split') ? 'split' : 'prepare';
   const mcp = planMcp(config, mcpKind, undefined, ctx.cli, provider.name, join(paths.runs, sinks.base), (m) => log.warn(`${opts.taskId}: mcp: ${m}`));
   mcp?.notes.forEach((n) => log.warn(`${opts.taskId}: mcp: ${n}`));
   const cmd = provider.buildCommand({

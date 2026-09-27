@@ -243,11 +243,11 @@ export function parseEscalationDecision(json: unknown): JevEscalationDecision | 
 }
 
 /** What the harness may do with a task an automatic-breakdown decision is asked about. */
-export const BREAKDOWN_ACTIONS = ['split', 'proceed', 'escalate', 'stop'] as const;
+export const BREAKDOWN_ACTIONS = ['split', 'replan', 'proceed', 'escalate', 'stop'] as const;
 export type JevBreakdownAction = (typeof BREAKDOWN_ACTIONS)[number];
 
-/** The stage a breakdown decision is made at: before a task starts, at a `continue` boundary, or on failure. */
-export type BreakdownStage = 'start' | 'continue' | 'failure';
+/** The stage a breakdown decision is made at: before a task starts, at a `continue` boundary, on failure, or when a task reports blocked. */
+export type BreakdownStage = 'start' | 'continue' | 'failure' | 'blocked';
 
 export interface JevBreakdownDecision {
   action: JevBreakdownAction;
@@ -273,32 +273,45 @@ export interface JevBreakdownInput {
 
 /**
  * The options Jev may pick per stage. `proceed` means "carry on as the harness otherwise would"
- * (run the task, start the next slice, or take the ordinary failure path including escalation);
- * `escalate` skips the ordinary escalation gate because this call already decided it; `stop` fails
- * the task without escalating. Only the failure stage offers escalate/stop.
+ * (run the task, start the next slice, take the ordinary failure path including escalation, or stop
+ * for the human at a block); `split` breaks this one task into subtasks; `replan` rewrites the
+ * upcoming part of the whole plan; `escalate` skips the ordinary escalation gate because this call
+ * already decided it; `stop` fails the task without escalating. Only the failure stage offers
+ * escalate/stop.
  */
 const BREAKDOWN_QUESTIONS: Record<BreakdownStage, { instructions: string; criteria: Record<string, string> }> = {
   start: {
-    instructions: 'A coding agent is about to start this task in one unattended session. Is the task sized for that, or is it really several pieces of work that should be split into smaller subtasks first?',
+    instructions: 'A coding agent is about to start this task in one unattended session. Is the task sized for that, or is it really several pieces of work that should be split, or is the plan around it wrong enough to re-plan before running anything?',
     criteria: {
       run: 'The task is one coherent piece of work that a single session can plausibly finish; run it as it is.',
       split: 'The task mixes several independent pieces of work, or is clearly larger than one session; split it into smaller subtasks first.',
+      replan: 'The problem is the plan, not this task: the upcoming tasks are mis-sized, mis-ordered, duplicative or missing pieces, so the upcoming plan should be rewritten before continuing.',
     },
   },
   continue: {
-    instructions: 'A coding agent has already used one or more sessions on this task, each ending with "continue" (unfinished). Another slice is about to start. Should it keep going, or is the task too large for this approach?',
+    instructions: 'A coding agent has already used one or more sessions on this task, each ending with "continue" (unfinished). Another slice is about to start. Should it keep going, be split, or is the plan itself the problem?',
     criteria: {
       continue: 'The work is progressing and one or a few more slices will plausibly finish it; keep going.',
       split: 'The task keeps producing slices without converging, or is too large to finish this way; split it into smaller subtasks.',
+      replan: 'The repeated slices show the plan around this task is wrong (mis-sized, mis-ordered, or missing pieces); rewrite the upcoming plan instead of slicing on.',
     },
   },
   failure: {
-    instructions: 'A coding agent failed to finish this task. Should the harness break the task into smaller subtasks, retry it on a more capable model, or give up?',
+    instructions: 'A coding agent failed to finish this task. Should the harness break the task into smaller subtasks, rewrite the upcoming plan, retry it on a more capable model, or give up?',
     criteria: {
       split: 'The task is too large or mixes several jobs; smaller subtasks are more likely to succeed than a stronger model.',
+      replan: 'The failure revealed that the plan around this task is wrong: upcoming work is mis-sized, mis-ordered, or missing pieces; rewrite the upcoming plan.',
       escalate: 'The task is the right size and a more capable model would plausibly finish it from the same context.',
       stop: 'Neither would help: the task needs missing context or a human decision, or it is a dead end.',
       proceed: 'Unclear; let the harness take its ordinary failure path.',
+    },
+  },
+  blocked: {
+    instructions: 'A coding agent reported this task blocked: it finished what it could and left items needing a human in its Hand-off. The run is about to stop for that human. Should the task be broken into smaller subtasks first, should the upcoming plan be rewritten, or is the block the real unit of work?',
+    criteria: {
+      split: 'The task bundles work a model could do with a decision or input that needs a human; splitting it lets the automatable parts run now and leaves a smaller, clear item for the human.',
+      replan: 'The block showed the plan around this task is wrong: upcoming work depends on the blocked decision, is mis-sized or mis-ordered; rewrite the upcoming plan so the human item is isolated and the rest can proceed.',
+      proceed: 'The block is the real unit of work — it needs a human decision before anything more can proceed; leave the ordinary blocked path alone.',
     },
   },
 };

@@ -116,12 +116,12 @@ test('doctor reports the breakdown block: stages, decision chain and rules', () 
   const checks = runDoctor({ paths, config, state });
   const line = checks.find((c) => c.name === 'breakdown');
   assert.equal(line?.level, 'ok');
-  assert.match(line?.detail ?? '', /on start\/continue\/failure/);
+  assert.match(line?.detail ?? '', /on start\/continue\/failure\/blocked/);
   assert.match(line?.detail ?? '', /decision auto \(jev → opencode · openrouter\/deepseek\/deepseek-v4\.1-flash → rules\)/);
   assert.match(line?.detail ?? '', /max 1 per task/);
 
   // Enabled but no stage on is a warning, not a failure.
-  const noStage = runDoctor({ paths, config: { ...config, breakdown: { ...config.breakdown, onStart: false, onContinue: false, onFailure: false } }, state });
+  const noStage = runDoctor({ paths, config: { ...config, breakdown: { ...config.breakdown, onStart: false, onContinue: false, onFailure: false, onBlocked: false } }, state });
   assert.equal(noStage.find((c) => c.name === 'breakdown')?.level, 'warn');
   assert.match(noStage.find((c) => c.name === 'breakdown')?.detail ?? '', /nothing will trigger/);
 });

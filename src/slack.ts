@@ -7,6 +7,7 @@ export type SlackEvent =
   | 'runStart'
   | 'taskStart'
   | 'taskSplit'
+  | 'taskReplan'
   | 'taskEscalated'
   | 'taskDone'
   | 'taskContinue'
@@ -25,6 +26,7 @@ const EMOJI: Record<SlackEvent, string> = {
   runStart: ':runner:',
   taskStart: ':rocket:',
   taskSplit: ':scissors:',
+  taskReplan: ':twisted_rightwards_arrows:',
   taskEscalated: ':arrow_up:',
   taskDone: ':white_check_mark:',
   taskContinue: ':arrow_forward:',

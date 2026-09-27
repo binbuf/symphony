@@ -165,6 +165,8 @@ export interface SlackEvents {
   taskStart: boolean;
   /** An automatic (or failure-time) breakdown replaced a task with subtasks. */
   taskSplit: boolean;
+  /** An automatic breakdown rewrote the upcoming plan (an automatic replan). */
+  taskReplan: boolean;
   /** A task failed and was handed to the escalation provider/model. */
   taskEscalated: boolean;
   /** A task finished `done` (its verify passed, if one is configured). */
@@ -263,8 +265,6 @@ export interface McpConfig {
 
 /** The deterministic triggers that open a breakdown decision, per stage. */
 export interface BreakdownRules {
-  /** `onStart` trigger: only ask when the task file body is at least this many bytes (0 = every task). */
-  minTaskBytes: number;
   /** `onContinue` trigger: ask once this many continuation sessions have already run (0 = after the first slice). */
   afterContinuations: number;
   /** `onFailure` trigger: ask once the task has failed at least this many sessions. */
@@ -275,9 +275,10 @@ export interface BreakdownRules {
 
 /**
  * Automatic task breakdown: when a task looks too big (before it starts, after a `continue` slice,
- * or instead of escalating a failure), one decision — Jev, a fallback LLM, or the deterministic
- * rules — breaks it into subtasks with the same machinery as `symphony split`, and the run resumes
- * on the children. Off by default; the rules are the always-available last resort in the chain.
+ * when it reports blocked, or instead of escalating a failure), one decision — Jev, a fallback LLM,
+ * or the deterministic rules — breaks it into subtasks with the same machinery as `symphony split`,
+ * and the run resumes on the children. Off by default; the rules are the always-available last
+ * resort in the chain.
  */
 export interface BreakdownConfig {
   /** Master switch for every stage below. */
@@ -288,6 +289,8 @@ export interface BreakdownConfig {
   onContinue: boolean;
   /** Ask when a task fails / its verify rejects a `done` / continuations run out, instead of escalating first. */
   onFailure: boolean;
+  /** Ask before stopping for a task that reported blocked, instead of leaving the block whole. */
+  onBlocked: boolean;
   rules: BreakdownRules;
   /**
    * Which decision source answers: `auto` tries Jev, then the fallback LLM, then the rules; the other
@@ -516,6 +519,7 @@ export const DEFAULTS: Config = {
       runStart: true,
       taskStart: true,
       taskSplit: true,
+      taskReplan: true,
       taskEscalated: true,
       taskDone: true,
       taskContinue: true,
@@ -549,8 +553,8 @@ export const DEFAULTS: Config = {
     onStart: false,
     onContinue: true,
     onFailure: true,
+    onBlocked: true,
     rules: {
-      minTaskBytes: 16384,
       afterContinuations: 1,
       afterFailedAttempts: 1,
       onCategories: ['task', 'verify'],
@@ -1006,6 +1010,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
           runStart: boolOr(slackEventsRaw.runStart, DEFAULTS.slack.events.runStart, 'slack.events.runStart', warnings),
           taskStart: boolOr(slackEventsRaw.taskStart, DEFAULTS.slack.events.taskStart, 'slack.events.taskStart', warnings),
           taskSplit: boolOr(slackEventsRaw.taskSplit, DEFAULTS.slack.events.taskSplit, 'slack.events.taskSplit', warnings),
+          taskReplan: boolOr(slackEventsRaw.taskReplan, DEFAULTS.slack.events.taskReplan, 'slack.events.taskReplan', warnings),
           taskEscalated: boolOr(slackEventsRaw.taskEscalated, DEFAULTS.slack.events.taskEscalated, 'slack.events.taskEscalated', warnings),
           taskDone: boolOr(slackEventsRaw.taskDone, DEFAULTS.slack.events.taskDone, 'slack.events.taskDone', warnings),
           taskContinue: boolOr(slackEventsRaw.taskContinue, DEFAULTS.slack.events.taskContinue, 'slack.events.taskContinue', warnings),
@@ -1084,8 +1089,8 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         onStart: boolOr(breakRaw.onStart, DEFAULTS.breakdown.onStart, 'breakdown.onStart', warnings),
         onContinue: boolOr(breakRaw.onContinue, DEFAULTS.breakdown.onContinue, 'breakdown.onContinue', warnings),
         onFailure: boolOr(breakRaw.onFailure, DEFAULTS.breakdown.onFailure, 'breakdown.onFailure', warnings),
+        onBlocked: boolOr(breakRaw.onBlocked, DEFAULTS.breakdown.onBlocked, 'breakdown.onBlocked', warnings),
         rules: {
-          minTaskBytes: Math.max(0, numberOr(breakRulesRaw.minTaskBytes, DEFAULTS.breakdown.rules.minTaskBytes, 'breakdown.rules.minTaskBytes', warnings)),
           afterContinuations: Math.max(0, numberOr(breakRulesRaw.afterContinuations, DEFAULTS.breakdown.rules.afterContinuations, 'breakdown.rules.afterContinuations', warnings)),
           afterFailedAttempts: Math.max(0, numberOr(breakRulesRaw.afterFailedAttempts, DEFAULTS.breakdown.rules.afterFailedAttempts, 'breakdown.rules.afterFailedAttempts', warnings)),
           onCategories: stringArray(breakRulesRaw.onCategories, DEFAULTS.breakdown.rules.onCategories, 'breakdown.rules.onCategories', warnings),

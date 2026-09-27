@@ -8,7 +8,8 @@ import { DEFAULTS } from '../src/config.js';
 import type { LintReport } from '../src/lint.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths, type Paths } from '../src/paths.js';
-import { applyReplanState, buildReplanPrompt, planReplanState, resolveDirection } from '../src/replan.js';
+import { applyReplanState, buildAutoReplanPrompt, buildReplanPrompt, checkAutoReplanState, planReplanState, resolveDirection } from '../src/replan.js';
+import type { BreakdownEvidence } from '../src/breakdown.js';
 import type { RunContext } from '../src/runner.js';
 import { newTaskState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
@@ -82,6 +83,55 @@ test('applyReplanState --reset-state wipes every row and the halt', () => {
   applyReplanState(paths, state, { removed: [], conflicts: [] }, { allowIdReuse: false, resetState: true }, silent);
   assert.deepEqual(state.tasks, {});
   assert.equal(state.halted, undefined);
+});
+
+test('checkAutoReplanState protects finished work and reports what runs next', () => {
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: { ...newTaskState('Old one'), status: 'done' },
+      T02: { ...newTaskState('Old two'), status: 'pending' },
+    },
+  };
+  const ok = checkAutoReplanState(state, [task('T01', 'Old one'), task('T03', 'Fresh')]);
+  assert.equal(ok.ok, true);
+  assert.deepEqual(ok.pending, ['T03']);
+
+  const removed = checkAutoReplanState(state, [task('T02', 'Old two')]);
+  assert.equal(removed.ok, false);
+  assert.match(removed.errors[0], /T01 already ran \[done\] but the rewrite removed it/);
+
+  const retitled = checkAutoReplanState(state, [task('T01', 'Different'), task('T02', 'Old two')]);
+  assert.equal(retitled.ok, false);
+  assert.match(retitled.errors[0], /T01 was retitled/);
+
+  const empty = checkAutoReplanState(state, []);
+  assert.equal(empty.ok, false);
+  assert.match(empty.errors[0], /left no tasks/);
+});
+
+test('buildAutoReplanPrompt renders the trigger, the plan and the free ids', () => {
+  const { paths } = project();
+  const ctx = { paths, config: { ...DEFAULTS, designDocs: false }, tasks: [task('T01', 'Old one'), task('T02', 'Old two')] } as unknown as RunContext;
+  const report = { findings: [{ level: 'warn', code: 'x', message: 'm' }], candidates: [] } as unknown as LintReport;
+  const ev: BreakdownEvidence = {
+    stage: 'failure',
+    task: task('T02', 'Old two'),
+    status: 'failed',
+    attempts: 2,
+    continuations: 0,
+    category: 'task',
+    reason: 'boom',
+    taskBody: '# T02 — Old two\n\n## Goal\nship it\n',
+  };
+  const text = buildAutoReplanPrompt(ctx, ev, report, 'the upcoming plan needs reshaping');
+  assert.doesNotMatch(text, /\{[a-zA-Z_]\w*\}/);
+  assert.match(text, /task: T02 — Old two/);
+  assert.match(text, /boom/);
+  assert.match(text, /the upcoming plan needs reshaping/);
+  assert.match(text, /at least T03/);
+  assert.match(text, /SYMPHONY_RESULT/);
+  assert.match(text, /- \[x\] T01 — Old one/);
 });
 
 test('reset --all clears state and resets every roadmap marker to pending', () => {

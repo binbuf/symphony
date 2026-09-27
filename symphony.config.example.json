@@ -154,8 +154,8 @@
     "onStart": false,
     "onContinue": true,
     "onFailure": true,
+    "onBlocked": true,
     "rules": {
-      "minTaskBytes": 16384,
       "afterContinuations": 1,
       "afterFailedAttempts": 1,
       "onCategories": [

@@ -10,6 +10,7 @@ import { parseBreakdownDecision } from '../src/jev.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths, type Paths } from '../src/paths.js';
 import { loadProject } from '../src/project.js';
+import { replanForBreakdown } from '../src/replan.js';
 import type { RunContext, RunFlags } from '../src/runner.js';
 import { runCommand, runTask } from '../src/runner.js';
 import { splitTask } from '../src/split.js';
@@ -52,17 +53,21 @@ test('breakdownGate opens per stage from the switch and the rules thresholds', (
   assert.equal(breakdownGate(DEFAULTS.breakdown, evidence()).open, false, 'off by default');
 
   const on = cfg({ enabled: true }).breakdown;
-  assert.match(breakdownGate(on, evidence({ stage: 'start', taskBytes: 20000 })).why, /onStart is off/);
-  assert.equal(breakdownGate(on, evidence({ stage: 'start', taskBytes: 20000 })).open, false);
+  assert.match(breakdownGate(on, evidence({ stage: 'start' })).why, /onStart is off/);
+  assert.equal(breakdownGate(on, evidence({ stage: 'start' })).open, false);
 
   const withStart = cfg({ enabled: true, onStart: true }).breakdown;
-  assert.match(breakdownGate(withStart, evidence({ stage: 'start', taskBytes: 100 })).why, /minTaskBytes 16384/);
-  assert.equal(breakdownGate(withStart, evidence({ stage: 'start', taskBytes: 20000 })).open, true);
-  assert.equal(breakdownGate(withStart, evidence({ stage: 'start', taskBytes: 20000, taskBody: undefined })).open, true);
+  assert.equal(breakdownGate(withStart, evidence({ stage: 'start' })).open, true);
+  assert.equal(breakdownGate(withStart, evidence({ stage: 'start', taskBody: undefined })).open, true);
 
   assert.equal(breakdownGate(on, evidence({ stage: 'continue', continuations: 0 })).open, false, 'afterContinuations defaults to 1');
   assert.equal(breakdownGate(on, evidence({ stage: 'continue', continuations: 1 })).open, true);
   assert.equal(breakdownGate(cfg({ enabled: true, rules: rules({ afterContinuations: 2 }) }).breakdown, evidence({ stage: 'continue', continuations: 1 })).open, false);
+
+  assert.equal(breakdownGate(on, evidence({ stage: 'blocked' })).open, true, 'onBlocked defaults to on');
+  assert.match(breakdownGate(on, evidence({ stage: 'blocked' })).why, /reported blocked/);
+  assert.equal(breakdownGate(cfg({ enabled: true, onBlocked: false }).breakdown, evidence({ stage: 'blocked' })).open, false);
+  assert.match(breakdownGate(cfg({ enabled: true, onBlocked: false }).breakdown, evidence({ stage: 'blocked' })).why, /onBlocked is off/);
 
   assert.equal(breakdownGate(on, evidence({ category: 'network' })).open, false, 'infrastructure categories do not open it');
   assert.equal(breakdownGate(on, evidence({ category: 'verify' })).open, true);
@@ -78,6 +83,8 @@ test('rulesVerdict splits at start/continue and prefers the split over escalatio
   assert.equal(rulesVerdict(b, evidence({ stage: 'failure' }), 'why').action, 'split');
   assert.match(rulesVerdict(b, evidence({ stage: 'failure' }), 'why').reason, /instead of escalating/);
   assert.equal(rulesVerdict({ ...b, preferOverEscalation: false }, evidence({ stage: 'failure' }), 'why').action, 'proceed');
+  assert.equal(rulesVerdict(b, evidence({ stage: 'blocked' }), 'the task reported blocked').action, 'split');
+  assert.match(rulesVerdict(b, evidence({ stage: 'blocked' }), 'the task reported blocked').reason, /instead of stopping for the human/);
 });
 
 test('decideBreakdown is silent while the gate is closed and answers with the rules when nothing else can', async () => {
@@ -141,10 +148,14 @@ test('parseBreakdownAnswer reads the block or a bare line, and respects the stag
   assert.equal(parseBreakdownAnswer('decision: run', 'start')?.action, 'proceed');
   assert.equal(parseBreakdownAnswer('decision: continue', 'continue')?.action, 'proceed');
   assert.equal(parseBreakdownAnswer('decision: split', 'failure')?.action, 'split');
+  assert.equal(parseBreakdownAnswer('decision: replan', 'failure')?.action, 'replan');
+  assert.equal(parseBreakdownAnswer('decision: proceed', 'blocked')?.action, 'proceed');
+  assert.deepEqual(parseBreakdownAnswer('SYMPHONY_BREAKDOWN\ndecision: replan\nreason: the plan is wrong\nEND_SYMPHONY_BREAKDOWN', 'start'), { action: 'replan', reason: 'the plan is wrong' });
   assert.equal(parseBreakdownAnswer('decision: probe', 'start'), undefined);
   assert.equal(parseBreakdownAnswer('no decision here', 'failure'), undefined);
   // `escalate` only exists at the failure stage.
   assert.equal(parseBreakdownAnswer('SYMPHONY_BREAKDOWN\ndecision: escalate\nEND_SYMPHONY_BREAKDOWN', 'start'), undefined);
+  assert.equal(parseBreakdownAnswer('SYMPHONY_BREAKDOWN\ndecision: escalate\nEND_SYMPHONY_BREAKDOWN', 'blocked'), undefined);
 });
 
 test('buildBreakdownPrompt is self-contained and stage-specific', () => {
@@ -159,6 +170,10 @@ test('buildBreakdownPrompt is self-contained and stage-specific', () => {
   const failure = buildBreakdownPrompt(evidence({ stage: 'failure', category: 'verify', reason: 'verify failed (exit 1)' }), 'why');
   assert.match(failure, /- escalate: a more capable model/);
   assert.match(failure, /verify failed \(exit 1\)/);
+  const blocked = buildBreakdownPrompt(evidence({ stage: 'blocked', status: 'blocked', reason: 'needs a human decision on the API shape' }), 'the task reported blocked');
+  assert.match(blocked, /reported blocked/);
+  assert.match(blocked, /- split: the task mixes automatable work/);
+  assert.match(blocked, /needs a human decision on the API shape/);
 });
 
 test('a continue boundary breaks the task down instead of starting another slice', async () => {
@@ -243,6 +258,97 @@ test('a failure breaks the task down instead of failing it, and falls through wh
   }
 });
 
+test('a blocked report can break the task down instead of stopping for the human', async () => {
+  const { dir, paths } = project('# R\n\n- [ ] T01 — Do the thing → [tasks/01-thing.md](tasks/01-thing.md)\n', { 'docs/tasks/01-thing.md': '# T01\n' });
+  writeFileSync(join(dir, 'fixtures', 'T01.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    claudeResult('blocked', 'needs a human decision on the API shape'),
+  ].join('\n') + '\n');
+  const config: Config = {
+    ...DEFAULTS, provider: 'fake', nudge: false, watch: { ...DEFAULTS.watch, enabled: false },
+    breakdown: { ...DEFAULTS.breakdown, enabled: true, decision: 'rules' },
+  };
+  const loaded = loadProject(paths, silent);
+  let splits = 0;
+  const ctx: RunContext = {
+    paths, config, cli: {}, flags, log: silent, roadmap: loaded.roadmap, tasks: loaded.tasks, state: loaded.state,
+    interrupted: false, abort: new AbortController(), autoSplits: new Map(),
+    performSplit: async (id) => { splits += 1; return { code: 0, parentId: id, children: ['T01a', 'T01b'] }; },
+  };
+  try {
+    const out = await runTask(ctx, loaded.tasks[0]);
+    assert.equal(out.split, true);
+    assert.equal(splits, 1);
+    assert.equal(ctx.state.tasks.T01.status, 'running', 'the task is not finalised as blocked');
+
+    // The same report with onBlocked off takes the ordinary blocked path.
+    const off = { ...config, breakdown: { ...config.breakdown, onBlocked: false } };
+    const parked = loadProject(paths, silent);
+    const ctx2: RunContext = { ...ctx, config: off, roadmap: parked.roadmap, tasks: parked.tasks, state: parked.state, autoSplits: new Map() };
+    const out2 = await runTask(ctx2, parked.tasks[0]);
+    assert.equal(out2.split, undefined);
+    assert.equal(out2.status, 'blocked');
+    assert.equal(ctx2.state.tasks.T01.status, 'blocked');
+    assert.equal(splits, 1, 'no split was attempted');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('run: a failure can replan the upcoming work and the run resumes on the new plan', async () => {
+  const { dir, paths } = project(
+    '# Roadmap\n\n## Phase 1\n\n- [x] T01 — Done → [tasks/01-done.md](tasks/01-done.md)\n- [ ] T02 — Broken → [tasks/02-broken.md](tasks/02-broken.md)\n- [ ] T03 — Later → [tasks/03-later.md](tasks/03-later.md)\n',
+    { 'docs/tasks/01-done.md': '# T01\n', 'docs/tasks/02-broken.md': '# T02\n', 'docs/tasks/03-later.md': '# T03\n' },
+  );
+  const fixtures = join(dir, 'fixtures');
+  writeFileSync(join(fixtures, 'T02.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    claudeResult('failed', 'the plan around this is wrong'),
+  ].join('\n') + '\n');
+  writeFileSync(join(fixtures, 'breakdown-failure.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-bd' }),
+    JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 's-bd', result: 'SYMPHONY_BREAKDOWN\ndecision: replan\nreason: the upcoming plan needs reshaping\nEND_SYMPHONY_BREAKDOWN' }),
+  ].join('\n') + '\n');
+  writeFileSync(join(fixtures, 'replan-T02.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-rp' }),
+    JSON.stringify({ type: 'fake_rm', path: 'docs/tasks/02-broken.md' }),
+    JSON.stringify({ type: 'fake_write', path: 'docs/ROADMAP.md', content: '# Roadmap\n\n## Phase 1\n\n- [x] T01 — Done → [tasks/01-done.md](tasks/01-done.md)\n- [ ] T03 — Later, rescoped → [tasks/03-later.md](tasks/03-later.md)\n' }),
+    claudeResult('done', 'removed T02; rescoped T03'),
+  ].join('\n') + '\n');
+  writeFileSync(join(fixtures, 'T03.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-T03' }),
+    claudeResult('done', 'T03 finished'),
+  ].join('\n') + '\n');
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+
+  const loaded = loadProject(paths, silent);
+  const config: Config = {
+    ...DEFAULTS, provider: 'fake', nudge: false, watch: { ...DEFAULTS.watch, enabled: false },
+    breakdown: { ...DEFAULTS.breakdown, enabled: true, decision: 'llm', provider: 'fake', model: '', rules: rules({ afterFailedAttempts: 1, onCategories: ['task'] }) },
+  };
+  const ctx: RunContext = {
+    paths, config, cli: {}, flags, log: silent, roadmap: loaded.roadmap, tasks: loaded.tasks, state: loaded.state,
+    interrupted: false, abort: new AbortController(), autoSplits: new Map(),
+  };
+  // Wired exactly like the CLI: the automatic replan shares the run's lock.
+  ctx.performReplan = (_id, ev, decisionReason) => replanForBreakdown(ctx, ev, { decisionReason });
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    const roadmap = readFileSync(paths.roadmap, 'utf8');
+    assert.doesNotMatch(roadmap, /T02/);
+    assert.match(roadmap, /- \[x\] T03 — Later, rescoped/);
+    assert.equal(ctx.state.tasks.T02, undefined, 'the removed task row is pruned');
+    assert.equal(ctx.state.tasks.T01.status, 'done', 'finished work is preserved');
+    assert.equal(ctx.state.tasks.T03.status, 'done', 'the new plan ran to the end');
+    const log = execFileSync('git', ['-C', dir, 'log', '--oneline'], { encoding: 'utf8' });
+    assert.match(log, /docs: auto-replan after T02 \(failure\) \[replan\]/);
+    assert.match(log, /T03: Later, rescoped \[done\]/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
 test('decideBreakdown runs the fallback LLM session and reads its decision block', async () => {
   const { dir, paths } = project('# R\n\n- [ ] T01 — Big\n');
   writeFileSync(join(dir, 'fixtures', 'breakdown-failure.jsonl'), [
@@ -300,7 +406,7 @@ test('run: an on-start breakdown rewrites the plan and the run continues on the 
   const loaded = loadProject(paths, silent);
   const config: Config = {
     ...DEFAULTS, provider: 'fake', nudge: false, watch: { ...DEFAULTS.watch, enabled: false },
-    breakdown: { ...DEFAULTS.breakdown, enabled: true, onStart: true, decision: 'rules', rules: rules({ minTaskBytes: 20 }) },
+    breakdown: { ...DEFAULTS.breakdown, enabled: true, onStart: true, decision: 'rules' },
   };
   // Wired exactly like the CLI: the automatic breakdown shares the run's lock.
   const ctx: RunContext = {

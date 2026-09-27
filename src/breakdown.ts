@@ -12,28 +12,28 @@ import { renderPrompt } from './templates.js';
 import { clip, squash, stamp } from './util.js';
 
 /**
- * Automatic task breakdown. Three stages can open a decision — before a task starts, at a `continue`
- * boundary, and when a task would otherwise escalate or fail — and one answer decides: split the
- * task into subtasks (`symphony split` machinery), carry on as before, skip a pointless escalation,
- * or give up. The decision comes from Jev first, then a fallback LLM session, then deterministic
- * rules; every source above the rules can fail without blocking the run.
+ * Automatic task breakdown. Four stages can open a decision — before a task starts, at a `continue`
+ * boundary, when a task reports blocked, and when a task would otherwise escalate or fail — and one
+ * answer decides: split the task into subtasks (`symphony split` machinery), rewrite the upcoming
+ * plan (the `replan` machinery), carry on as before, skip a pointless escalation, or give up. The
+ * decision comes from Jev first, then a fallback LLM session, then deterministic rules; every source
+ * above the rules can fail without blocking the run.
  */
 
 /** What the harness should do with the task an open decision is about. */
-export type BreakdownAction = 'split' | 'proceed' | 'escalate' | 'stop';
+export type BreakdownAction = 'split' | 'replan' | 'proceed' | 'escalate' | 'stop';
 
 export interface BreakdownEvidence {
   stage: BreakdownStage;
   task: Task;
   /** The task file body (already capped by the caller), for the decision sources that read it. */
   taskBody?: string;
-  taskBytes?: number;
   status: string;
   attempts: number;
   continuations: number;
   /** Failure category (stage `failure`). */
   category?: string;
-  /** The continuation summary, the failure message, or the verify output that opened the decision. */
+  /** The continuation summary, the failure message, the block summary, or the verify output that opened the decision. */
   reason?: string;
 }
 
@@ -65,14 +65,16 @@ export function breakdownGate(b: BreakdownConfig, ev: BreakdownEvidence): { open
   if (!b.enabled) return { open: false, why: 'breakdown is off' };
   if (ev.stage === 'start') {
     if (!b.onStart) return { open: false, why: 'breakdown.onStart is off' };
-    const bytes = ev.taskBytes ?? 0;
-    if (bytes < b.rules.minTaskBytes) return { open: false, why: `task file is ${bytes} B (< breakdown.rules.minTaskBytes ${b.rules.minTaskBytes})` };
-    return { open: true, why: `task file is ${bytes} B (>= breakdown.rules.minTaskBytes ${b.rules.minTaskBytes})` };
+    return { open: true, why: 'breakdown.onStart is on' };
   }
   if (ev.stage === 'continue') {
     if (!b.onContinue) return { open: false, why: 'breakdown.onContinue is off' };
     if (ev.continuations < b.rules.afterContinuations) return { open: false, why: `continuation ${ev.continuations} (< breakdown.rules.afterContinuations ${b.rules.afterContinuations})` };
     return { open: true, why: `continuation ${ev.continuations} (>= breakdown.rules.afterContinuations ${b.rules.afterContinuations})` };
+  }
+  if (ev.stage === 'blocked') {
+    if (!b.onBlocked) return { open: false, why: 'breakdown.onBlocked is off' };
+    return { open: true, why: 'the task reported blocked (human input needed)' };
   }
   if (!b.onFailure) return { open: false, why: 'breakdown.onFailure is off' };
   if (ev.category && !b.rules.onCategories.includes(ev.category)) return { open: false, why: `category ${ev.category} is not in breakdown.rules.onCategories` };
@@ -86,7 +88,9 @@ export function rulesVerdict(b: BreakdownConfig, ev: BreakdownEvidence, why: str
     ? 'split before running it'
     : ev.stage === 'continue'
       ? 'split instead of another slice'
-      : 'split instead of escalating';
+      : ev.stage === 'blocked'
+        ? 'split instead of stopping for the human'
+        : 'split instead of escalating';
   if (ev.stage === 'failure' && !b.preferOverEscalation) {
     return { action: 'proceed', source: 'rules', reason: `${why}; keeping the ordinary failure path (breakdown.preferOverEscalation is off)` };
   }
@@ -97,6 +101,7 @@ export function rulesVerdict(b: BreakdownConfig, ev: BreakdownEvidence, why: str
 function normalizeAction(word: string): BreakdownAction | undefined {
   const w = word.toLowerCase();
   if (w === 'split') return 'split';
+  if (w === 'replan') return 'replan';
   if (w === 'stop') return 'stop';
   if (w === 'escalate') return 'escalate';
   if (w === 'proceed' || w === 'run' || w === 'continue') return 'proceed';
@@ -105,7 +110,7 @@ function normalizeAction(word: string): BreakdownAction | undefined {
 
 /** The decisions a source may answer at this stage (the failure stage alone offers escalate/stop). */
 export function allowedActions(stage: BreakdownStage): BreakdownAction[] {
-  return stage === 'failure' ? ['split', 'escalate', 'stop', 'proceed'] : ['split', 'proceed'];
+  return stage === 'failure' ? ['split', 'replan', 'escalate', 'stop', 'proceed'] : ['split', 'replan', 'proceed'];
 }
 
 /**
@@ -186,12 +191,14 @@ const STAGE_LINES: Record<BreakdownStage, string> = {
   start: 'A coding agent is about to start this task in one unattended session. Is it sized for that, or is it really several pieces of work that should become smaller subtasks first?',
   continue: 'The task has used one or more sessions, each ending with "continue" (unfinished), and another slice is about to start. Should it keep going, or is the task too large for this approach?',
   failure: 'The task failed. Should the harness break it into smaller subtasks, retry it on a more capable model, or give up?',
+  blocked: 'The task reported blocked: the session finished what it could and left items that need a human. The run is about to stop for that human. Should the task be broken into smaller subtasks first, or is the block the real unit of work?',
 };
 
 const STAGE_DECISIONS: Record<BreakdownStage, string> = {
-  start: '- run: the task is one coherent session of work; run it as it is.\n- split: it mixes several independent pieces of work, or is larger than one session; split it first.',
-  continue: '- continue: the work is converging; let the next slice run.\n- split: it is not converging, or is too large; break it into smaller subtasks.',
-  failure: '- split: smaller subtasks are more likely to succeed than a stronger model.\n- escalate: a more capable model would plausibly finish it from the same context.\n- stop: neither helps (missing context or a human decision).\n- proceed: unclear; take the ordinary failure path.',
+  start: '- run: the task is one coherent session of work; run it as it is.\n- split: it mixes several independent pieces of work, or is larger than one session; split it first.\n- replan: the plan around it is wrong (upcoming tasks mis-sized, mis-ordered, duplicative or missing); rewrite the upcoming plan first.',
+  continue: '- continue: the work is converging; let the next slice run.\n- split: it is not converging, or is too large; break it into smaller subtasks.\n- replan: the slices show the plan itself is wrong; rewrite the upcoming plan instead of slicing on.',
+  failure: '- split: smaller subtasks are more likely to succeed than a stronger model.\n- replan: the failure shows the plan around this task is wrong; rewrite the upcoming plan.\n- escalate: a more capable model would plausibly finish it from the same context.\n- stop: neither helps (missing context or a human decision).\n- proceed: unclear; take the ordinary failure path.',
+  blocked: '- split: the task mixes automatable work with the human item; split it so the automatable parts can land now and the human gets a smaller, clear block.\n- replan: upcoming work depends on the block or is mis-sized around it; rewrite the upcoming plan so the human item is isolated.\n- proceed: the block is the real unit of work; leave the ordinary blocked path (stop for the human, or continue past it as configured).',
 };
 
 /** The fallback-LLM prompt: a self-contained snapshot so the read-only session answers without tools. */
@@ -203,8 +210,8 @@ export function buildBreakdownPrompt(ev: BreakdownEvidence, gateReason: string):
   } else if (ev.stage === 'failure') {
     evidence.push(`- failure category: ${ev.category ?? 'task'}`);
     evidence.push(`- failure: ${squash(ev.reason ?? '(no message)', 400)}`);
-  } else if (ev.taskBytes !== undefined) {
-    evidence.push(`- task file size: ${ev.taskBytes} bytes`);
+  } else if (ev.stage === 'blocked') {
+    evidence.push(`- block summary: ${squash(ev.reason ?? '(none given)', 400)}`);
   }
   return renderPrompt('breakdown.md', {
     stage: ev.stage,

@@ -56,6 +56,27 @@ export function retargetFlags(flags: RunFlags, parentId: string, childIds: strin
 }
 
 /**
+ * Drop run-selection flags that name tasks no longer in the roadmap after an automatic replan, so
+ * the rebuilt queue cannot throw on a stale `--from`/`--to`/`--only` id.
+ */
+export function sanitizeFlags(flags: RunFlags, tasks: Task[], warn: (m: string) => void): void {
+  const ids = new Set(tasks.map((t) => t.id));
+  if (flags.only?.length) {
+    const kept = flags.only.filter((raw) => ids.has(canonicalId(raw) ?? ''));
+    if (kept.length !== flags.only.length) warn(`--only: dropped ${flags.only.length - kept.length} id(s) that are no longer in the roadmap`);
+    flags.only = kept.length ? kept : undefined;
+  }
+  if (flags.from && !ids.has(canonicalId(flags.from) ?? '')) {
+    warn(`--from ${flags.from}: no longer in the roadmap; running from the start`);
+    flags.from = undefined;
+  }
+  if (flags.to && !ids.has(canonicalId(flags.to) ?? '')) {
+    warn(`--to ${flags.to}: no longer in the roadmap; running to the end`);
+    flags.to = undefined;
+  }
+}
+
+/**
  * Adopt a freshly loaded plan on a live run context. The state's `tasks`/`halted` are updated in
  * place, so closures that already hold the state object (the run loop, the run view) keep seeing the
  * live rows instead of a stale snapshot.
