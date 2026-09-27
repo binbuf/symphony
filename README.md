@@ -487,22 +487,22 @@ needs, so the schemas and results of unrelated toolchains never enter the conver
 "mcp": {
   "enabled": true,
   "servers": {
-    "ghidra": { "command": ["ghidra-mcp"], "env": { "GHIDRA_HOME": "C:/ghidra" } },
-    "mesen":  { "command": ["mesen-mcp"] },
-    "blender": { "command": ["blender-mcp"] },
-    "unreal": { "url": "http://127.0.0.1:8080/mcp" }
+    "alpha": { "command": ["alpha-mcp"], "env": { "ALPHA_HOME": "C:/alpha" } },
+    "beta":  { "command": ["beta-mcp"] },
+    "gamma": { "command": ["gamma-mcp"] },
+    "delta": { "url": "http://127.0.0.1:8080/mcp" }
   },
   "capabilities": {
-    "reverse_engineering": ["ghidra", "mesen"],
-    "3d_modeling": ["blender"]
+    "analysis": ["alpha", "beta"],
+    "assets": ["gamma"]
   },
-  "defaultServers": ["ghidra"],
+  "defaultServers": ["alpha"],
   "sessions": { "watch": [], "prepare": [], "split": [], "breakdown": [], "escalation": [] }
 }
 ```
 
-A task picks servers from its front matter — `capabilities: reverse_engineering`, or
-`mcp: ghidra,mesen` (the two are unioned). Resolution order: `--mcp a,b` / `--no-mcp` on the run,
+A task picks servers from its front matter — `capabilities: analysis`, or
+`mcp: alpha,beta` (the two are unioned). Resolution order: `--mcp a,b` / `--no-mcp` on the run,
 then task front matter, then `mcp.sessions.<kind>`, then `mcp.defaultServers` for tasks and escalated
 sessions and none for the other session kinds (watch, prepare, split, replan, breakdown). An
 escalated session inherits the task's selection because it is the same work on a stronger model.

@@ -246,9 +246,9 @@ export type McpSessionKind = (typeof MCP_SESSION_KINDS)[number];
  * Per-session MCP selection. Off by default: with `enabled: false` the harness never touches a
  * client's MCP configuration. When on, each session is spawned with only the servers its selection
  * names — clients that can express it get an allowlist, and servers the registry defines are
- * disabled for the ones that need a full entry to be disabled. Sessions that are not tasks
- * (pipeline watch, prepare/replan/split, breakdown, escalation) default to no servers unless
- * `sessions.<kind>` says otherwise.
+ * disabled for the ones that need a full entry to be disabled. Tasks and escalated sessions fall
+ * back to `defaultServers`; the other kinds (pipeline watch, prepare/replan/split, breakdown)
+ * default to no servers unless `sessions.<kind>` says otherwise.
  */
 export interface McpConfig {
   /** Master switch. */
@@ -259,7 +259,7 @@ export interface McpConfig {
   capabilities: Record<string, string[]>;
   /** Servers a task runs with when it names neither `mcp:` nor `capabilities:`. */
   defaultServers: string[];
-  /** Per session-kind selection; an unset `task` kind falls back to `defaultServers`, others to none. */
+  /** Per session-kind selection; an unset `task`/`escalation` kind falls back to `defaultServers`, others to none. */
   sessions: Partial<Record<McpSessionKind, string[]>>;
 }
 

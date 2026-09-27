@@ -72,8 +72,8 @@ test('doctor reports MCP scoping: defined servers, name-only entries and unsuppo
     mcp: {
       ...DEFAULTS.mcp,
       enabled: true,
-      servers: { ghidra: { command: [process.execPath] }, ghost: {} },
-      defaultServers: ['ghidra'],
+      servers: { alpha: { command: [process.execPath] }, ghost: {} },
+      defaultServers: ['alpha'],
     },
   };
   const spec = resolveSession(config, undefined, {}, {}).spec;

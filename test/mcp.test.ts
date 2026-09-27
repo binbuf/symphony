@@ -23,41 +23,60 @@ test('resolveMcpProfile: off by default, precedence from flags through front mat
   assert.equal(resolveMcpProfile(off, 'task', undefined, {}), undefined, 'the master switch is off');
 
   const cfg = configWith({
-    servers: { ghidra: { command: ['ghidra-mcp'] }, mesen: { command: ['mesen-mcp'] }, blender: { command: ['b-mcp'] }, unity: { url: 'http://127.0.0.1:8080/mcp' } },
-    capabilities: { reverse_engineering: ['ghidra', 'mesen'] },
-    defaultServers: ['blender'],
-    sessions: { watch: ['ghidra'], breakdown: [] },
+    servers: { alpha: { command: ['alpha-mcp'] }, beta: { command: ['beta-mcp'] }, gamma: { command: ['gamma-mcp'] }, delta: { url: 'http://127.0.0.1:8080/mcp' } },
+    capabilities: { analysis: ['alpha', 'beta'] },
+    defaultServers: ['gamma'],
+    sessions: { watch: ['alpha'], breakdown: [] },
   });
-  assert.deepEqual(resolveMcpProfile(cfg, 'task', undefined, {})!.selected, ['blender'], 'task falls back to defaultServers');
-  assert.deepEqual(resolveMcpProfile(cfg, 'watch', undefined, {})!.selected, ['ghidra'], 'a configured session kind wins');
+  assert.deepEqual(resolveMcpProfile(cfg, 'task', undefined, {})!.selected, ['gamma'], 'task falls back to defaultServers');
+  assert.deepEqual(resolveMcpProfile(cfg, 'watch', undefined, {})!.selected, ['alpha'], 'a configured session kind wins');
   assert.deepEqual(resolveMcpProfile(cfg, 'breakdown', undefined, {})!.selected, [], 'an explicit empty list means none');
   assert.deepEqual(resolveMcpProfile(cfg, 'prepare', undefined, {})!.selected, [], 'an unset non-task kind means none');
-  assert.deepEqual(resolveMcpProfile(cfg, 'escalation', undefined, {})!.selected, ['blender'], 'escalation inherits the task default');
-  assert.deepEqual(resolveMcpProfile(cfg, 'task', taskWith({ capabilities: 'reverse_engineering' }), {})!.selected, ['ghidra', 'mesen']);
-  assert.deepEqual(resolveMcpProfile(cfg, 'task', taskWith({ mcp: 'unity' }), {})!.selected, ['unity']);
+  assert.deepEqual(resolveMcpProfile(cfg, 'escalation', undefined, {})!.selected, ['gamma'], 'escalation inherits the task default');
+  assert.deepEqual(resolveMcpProfile(cfg, 'task', taskWith({ capabilities: 'analysis' }), {})!.selected, ['alpha', 'beta']);
+  assert.deepEqual(resolveMcpProfile(cfg, 'task', taskWith({ mcp: 'delta' }), {})!.selected, ['delta']);
   // `mcp:` and `capabilities:` are unioned and deduped.
-  assert.deepEqual(resolveMcpProfile(cfg, 'task', taskWith({ mcp: 'ghidra', capabilities: 'reverse_engineering' }), {})!.selected, ['ghidra', 'mesen']);
+  assert.deepEqual(resolveMcpProfile(cfg, 'task', taskWith({ mcp: 'alpha', capabilities: 'analysis' }), {})!.selected, ['alpha', 'beta']);
   // CLI flags beat front matter and config.
-  assert.deepEqual(resolveMcpProfile(cfg, 'task', taskWith({ mcp: 'unity' }), { mcp: ['blender'] })!.selected, ['blender']);
-  assert.deepEqual(resolveMcpProfile(cfg, 'task', taskWith({ mcp: 'unity' }), { noMcp: true })!.selected, []);
-  assert.equal(resolveMcpProfile(cfg, 'task', taskWith({ mcp: 'unity' }), {})!.source, 'task front matter');
+  assert.deepEqual(resolveMcpProfile(cfg, 'task', taskWith({ mcp: 'delta' }), { mcp: ['gamma'] })!.selected, ['gamma']);
+  assert.deepEqual(resolveMcpProfile(cfg, 'task', taskWith({ mcp: 'delta' }), { noMcp: true })!.selected, []);
+  assert.equal(resolveMcpProfile(cfg, 'task', taskWith({ mcp: 'delta' }), {})!.source, 'task front matter');
 
   const warnings: string[] = [];
   assert.deepEqual(resolveMcpProfile(cfg, 'task', taskWith({ capabilities: 'nope' }), {}, (m) => warnings.push(m))!.selected, []);
   assert.equal(warnings.length, 1);
 });
 
+test('the plan label states why a session has no servers, in plain words', () => {
+  // An unset session kind is spelled out, so `none` cannot be mistaken for MCP being off.
+  const watch = planMcp(configWith({}), 'watch', undefined, {}, 'gemini', outFile())!;
+  assert.equal(watch.label, 'mcp: none — the watch query gets no MCP tools; set mcp.sessions.watch to add some');
+
+  const explicitEmpty = planMcp(configWith({ sessions: { watch: [] } }), 'watch', undefined, {}, 'gemini', outFile())!;
+  assert.equal(explicitEmpty.label, 'mcp: none — mcp.sessions.watch is empty');
+
+  const disabled = planMcp(configWith({ defaultServers: ['alpha'] }), 'task', undefined, { noMcp: true }, 'gemini', outFile())!;
+  assert.equal(disabled.label, 'mcp: none — MCP is off for this run (--no-mcp)');
+
+  const taskCfg = configWith({ defaultServers: ['alpha'] });
+  const taskPlan = planMcp(taskCfg, 'task', undefined, {}, 'gemini', outFile())!;
+  assert.equal(taskPlan.label, 'mcp: alpha [task/escalation default]');
+
+  const front = planMcp(taskCfg, 'task', taskWith({ mcp: 'alpha' }), {}, 'gemini', outFile())!;
+  assert.equal(front.label, 'mcp: alpha [task front matter]');
+});
+
 test('claude plan: strict config carries only the selected servers', () => {
   const cfg = configWith({
-    servers: { ghidra: { command: ['ghidra-mcp', '--stdio'], env: { GHIDRA_HOME: 'C:/g' } }, blender: { command: ['b-mcp'] }, docs: { url: 'https://example.test/mcp' } },
-    defaultServers: ['ghidra'],
+    servers: { alpha: { command: ['alpha-mcp', '--stdio'], env: { ALPHA_HOME: 'C:/alpha' } }, gamma: { command: ['gamma-mcp'] }, docs: { url: 'https://example.test/mcp' } },
+    defaultServers: ['alpha'],
   });
   const out = outFile();
   const plan = planMcp(cfg, 'task', undefined, {}, 'claude', out)!;
   assert.deepEqual(plan.args, ['--mcp-config', `${out}.mcp.json`, '--strict-mcp-config']);
   const written = JSON.parse(readFileSync(`${out}.mcp.json`, 'utf8')) as { mcpServers: Record<string, unknown> };
-  assert.deepEqual(Object.keys(written.mcpServers), ['ghidra']);
-  assert.deepEqual(written.mcpServers.ghidra, { command: 'ghidra-mcp', args: ['--stdio'], env: { GHIDRA_HOME: 'C:/g' } });
+  assert.deepEqual(Object.keys(written.mcpServers), ['alpha']);
+  assert.deepEqual(written.mcpServers.alpha, { command: 'alpha-mcp', args: ['--stdio'], env: { ALPHA_HOME: 'C:/alpha' } });
 
   // A selected server with no definition cannot be expressed in strict mode: it is noted and skipped.
   const nameOnly = planMcp(configWith({ defaultServers: ['ghost'] }), 'task', undefined, {}, 'claude', outFile())!;
@@ -68,23 +87,23 @@ test('claude plan: strict config carries only the selected servers', () => {
 test('codex plan: -c overrides enable the selection and disable every defined server', () => {
   const cfg = configWith({
     servers: {
-      ghidra: { command: ['ghidra-mcp', '--stdio'], env: { GHIDRA_HOME: 'C:/g' }, tools: ['decompile'] },
-      blender: { command: ['b-mcp'] },
-      unity: { url: 'http://127.0.0.1:8080/mcp' },
+      alpha: { command: ['alpha-mcp', '--stdio'], env: { ALPHA_HOME: 'C:/alpha' }, tools: ['inspect'] },
+      gamma: { command: ['gamma-mcp'] },
+      delta: { url: 'http://127.0.0.1:8080/mcp' },
       ghost: {},
     },
-    defaultServers: ['ghidra'],
+    defaultServers: ['alpha'],
   });
   const plan = planMcp(cfg, 'task', undefined, {}, 'codex', outFile())!;
   const line = plan.args.join(' ');
-  assert.ok(line.includes('mcp_servers.ghidra.command="ghidra-mcp"'));
-  assert.ok(line.includes('mcp_servers.ghidra.args=["--stdio"]'));
-  assert.ok(line.includes('mcp_servers.ghidra.env.GHIDRA_HOME="C:/g"'));
-  assert.ok(line.includes('mcp_servers.ghidra.enabled_tools=["decompile"]'));
-  assert.ok(line.includes('mcp_servers.ghidra.enabled=true'));
-  assert.ok(line.includes('mcp_servers.blender.enabled=false'));
-  assert.ok(line.includes('mcp_servers.unity.url="http://127.0.0.1:8080/mcp"'));
-  assert.ok(line.includes('mcp_servers.unity.enabled=false'));
+  assert.ok(line.includes('mcp_servers.alpha.command="alpha-mcp"'));
+  assert.ok(line.includes('mcp_servers.alpha.args=["--stdio"]'));
+  assert.ok(line.includes('mcp_servers.alpha.env.ALPHA_HOME="C:/alpha"'));
+  assert.ok(line.includes('mcp_servers.alpha.enabled_tools=["inspect"]'));
+  assert.ok(line.includes('mcp_servers.alpha.enabled=true'));
+  assert.ok(line.includes('mcp_servers.gamma.enabled=false'));
+  assert.ok(line.includes('mcp_servers.delta.url="http://127.0.0.1:8080/mcp"'));
+  assert.ok(line.includes('mcp_servers.delta.enabled=false'));
   assert.ok(!line.includes('mcp_servers.ghost'), 'a name-only server cannot be expressed (nor disabled) for codex');
   assert.ok(plan.notes.some((n) => /cannot disable "ghost"/.test(n)));
 });
@@ -92,37 +111,37 @@ test('codex plan: -c overrides enable the selection and disable every defined se
 test('opencode plan: 1.x LOCAL/REMOTE entries ride in OPENCODE_CONFIG_CONTENT', () => {
   const cfg = configWith({
     servers: {
-      ghidra: { command: ['ghidra-mcp'], env: { GHIDRA_HOME: 'C:/g' } },
-      blender: { command: ['b-mcp'] },
-      unity: { url: 'http://127.0.0.1:8080/mcp' },
+      alpha: { command: ['alpha-mcp'], env: { ALPHA_HOME: 'C:/alpha' } },
+      gamma: { command: ['gamma-mcp'] },
+      delta: { url: 'http://127.0.0.1:8080/mcp' },
     },
-    defaultServers: ['ghidra', 'unity'],
+    defaultServers: ['alpha', 'delta'],
   });
   const plan = planMcp(cfg, 'task', undefined, {}, 'opencode', outFile())!;
   assert.deepEqual(plan.args, []);
   const content = JSON.parse(plan.env!.OPENCODE_CONFIG_CONTENT) as { mcp: Record<string, unknown> };
-  assert.deepEqual(content.mcp.ghidra, { type: 'local', command: ['ghidra-mcp'], environment: { GHIDRA_HOME: 'C:/g' }, enabled: true });
-  assert.deepEqual(content.mcp.unity, { type: 'remote', url: 'http://127.0.0.1:8080/mcp', enabled: true });
-  assert.deepEqual(content.mcp.blender, { type: 'local', command: ['b-mcp'], enabled: false });
+  assert.deepEqual(content.mcp.alpha, { type: 'local', command: ['alpha-mcp'], environment: { ALPHA_HOME: 'C:/alpha' }, enabled: true });
+  assert.deepEqual(content.mcp.delta, { type: 'remote', url: 'http://127.0.0.1:8080/mcp', enabled: true });
+  assert.deepEqual(content.mcp.gamma, { type: 'local', command: ['gamma-mcp'], enabled: false });
 });
 
 test('gemini plan is a complete allowlist; cursor/antigravity keep their own config', () => {
-  const cfg = configWith({ servers: { ghidra: { command: ['g'] }, blender: { command: ['b'] } }, defaultServers: ['ghidra'] });
-  assert.deepEqual(applyMcp('gemini', resolveMcpProfile(cfg, 'task', undefined, {})!, outFile()).args, ['--allowed-mcp-server-names', 'ghidra']);
+  const cfg = configWith({ servers: { alpha: { command: ['a'] }, gamma: { command: ['g'] } }, defaultServers: ['alpha'] });
+  assert.deepEqual(applyMcp('gemini', resolveMcpProfile(cfg, 'task', undefined, {})!, outFile()).args, ['--allowed-mcp-server-names', 'alpha']);
   assert.deepEqual(applyMcp('gemini', resolveMcpProfile(cfg, 'watch', undefined, {})!, outFile()).args, ['--allowed-mcp-server-names'], 'an empty allowlist disables every server');
 
   for (const provider of ['cursor', 'antigravity'] as ProviderName[]) {
     const plan = applyMcp(provider, resolveMcpProfile(cfg, 'task', undefined, {})!, outFile());
     assert.deepEqual(plan.args, []);
-    assert.deepEqual(plan.selected, ['ghidra']);
+    assert.deepEqual(plan.selected, ['alpha']);
     assert.match(plan.notes[0], /has no effect/);
   }
 });
 
 test('mcpPromptNote names the servers and only appears with a non-empty selection', () => {
-  const cfg = configWith({ servers: { ghidra: { command: ['g'] }, blender: { command: ['b'] } }, defaultServers: ['ghidra', 'blender'] });
+  const cfg = configWith({ servers: { alpha: { command: ['a'] }, gamma: { command: ['g'] } }, defaultServers: ['alpha', 'gamma'] });
   const selected = resolveMcpProfile(cfg, 'task', undefined, {})!;
-  assert.match(mcpPromptNote(selected) ?? '', /ghidra, blender/);
+  assert.match(mcpPromptNote(selected) ?? '', /alpha, gamma/);
   assert.match(mcpPromptNote(selected) ?? '', /narrowest call/);
   assert.equal(mcpPromptNote(resolveMcpProfile(cfg, 'watch', undefined, {})!), undefined);
 });
@@ -133,21 +152,21 @@ test('config parsing: the mcp block is validated and per-session overrides are t
   writeFileSync(join(root, '.symphony', 'symphony.config.json'), JSON.stringify({
     mcp: {
       enabled: true,
-      servers: { ghidra: { command: ['ghidra-mcp'], tools: ['decompile', 'symbols'] }, ghost: {}, bad: { command: 'not-an-array' } },
-      capabilities: { reverse_engineering: ['ghidra', 'mesen'] },
-      defaultServers: ['ghidra'],
+      servers: { alpha: { command: ['alpha-mcp'], tools: ['inspect', 'lookup'] }, ghost: {}, bad: { command: 'not-an-array' } },
+      capabilities: { analysis: ['alpha', 'beta'] },
+      defaultServers: ['alpha'],
       sessions: { watch: [], nonsense: ['x'] },
     },
   }));
   const { config, warnings } = loadConfig(resolvePaths(root));
   assert.equal(config.mcp.enabled, true);
-  assert.deepEqual(config.mcp.servers.ghidra, { command: ['ghidra-mcp'], tools: ['decompile', 'symbols'] });
-  assert.deepEqual(config.mcp.capabilities, { reverse_engineering: ['ghidra', 'mesen'] });
-  assert.deepEqual(config.mcp.defaultServers, ['ghidra']);
+  assert.deepEqual(config.mcp.servers.alpha, { command: ['alpha-mcp'], tools: ['inspect', 'lookup'] });
+  assert.deepEqual(config.mcp.capabilities, { analysis: ['alpha', 'beta'] });
+  assert.deepEqual(config.mcp.defaultServers, ['alpha']);
   assert.deepEqual(config.mcp.sessions, { watch: [] });
   assert.ok(warnings.some((w) => /mcp.sessions.nonsense/.test(w)));
   assert.ok(warnings.some((w) => /mcp.servers.ghost: no "command" or "url"/.test(w)));
   assert.ok(warnings.some((w) => /mcp.servers.bad.command/.test(w)));
-  const profile = resolveMcpProfile(config, 'task', taskWith({ capabilities: 'reverse_engineering' }), {})!;
-  assert.deepEqual(profile.selected, ['ghidra', 'mesen']);
+  const profile = resolveMcpProfile(config, 'task', taskWith({ capabilities: 'analysis' }), {})!;
+  assert.deepEqual(profile.selected, ['alpha', 'beta']);
 });

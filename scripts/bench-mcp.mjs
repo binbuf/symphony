@@ -6,7 +6,7 @@
  *
  *   node --import tsx scripts/bench-mcp.mjs --provider claude \
  *     --profile none \
- *     --profile "ghidra=--mcp-config .symphony/mcp/ghidra.json --strict-mcp-config" \
+ *     --profile "alpha=--mcp-config .symphony/mcp/alpha.json --strict-mcp-config" \
  *     --runs 3
  *
  * A profile is `name=args`, where `args` are appended exactly as `providers.<name>.extraArgs`

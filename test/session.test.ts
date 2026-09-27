@@ -71,10 +71,10 @@ test('SpawnSpec.env reaches the child (the OpenCode 1.x MCP content channel)', a
     process.stdin.resume(); process.stdin.on('data', () => {});
     process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: process.env.OPENCODE_CONFIG_CONTENT ?? 'MISSING' }) + '\\n');
     process.exit(0);`;
-  const { s, sinks } = run(js, { spec: { bin: process.execPath, args: ['-e', js], stdinPayload: 'x', env: { OPENCODE_CONFIG_CONTENT: '{"mcp":{"ghidra":{"enabled":false}}}' } } });
+  const { s, sinks } = run(js, { spec: { bin: process.execPath, args: ['-e', js], stdinPayload: 'x', env: { OPENCODE_CONFIG_CONTENT: '{"mcp":{"alpha":{"enabled":false}}}' } } });
   const out = await s.done;
   await sinks.close();
-  assert.equal(out.result.text, '{"mcp":{"ghidra":{"enabled":false}}}');
+  assert.equal(out.result.text, '{"mcp":{"alpha":{"enabled":false}}}');
 });
 
 test('exit without result → synthesized error result, stderr captured', async () => {

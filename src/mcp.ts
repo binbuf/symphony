@@ -23,11 +23,11 @@ export interface McpPlan {
   notes: string[];
   /** The selected server names, for the session log. */
   selected: string[];
-  /** `mcp: ghidra, mesen [task front matter]` or `mcp: off [mcp.sessions.watch]`. */
+  /** `mcp: alpha, beta [task front matter]` or `mcp: none — the watch query gets no MCP tools; set mcp.sessions.watch to add some`. */
   label: string;
 }
 
-/** Split a front-matter list (`ghidra, mesen` / `ghidra mesen`) into names. */
+/** Split a front-matter list (`alpha, beta` / `alpha beta`) into names. */
 function splitList(s: string): string[] {
   return s.split(/[,\s]+/).map((x) => x.trim()).filter(Boolean);
 }
@@ -102,6 +102,41 @@ function claudeEntry(s: McpServerConfig): Record<string, unknown> | undefined {
   return undefined;
 }
 
+/** How to name each session kind in a log line written for a person, not the config file. */
+const KIND_NOUN: Record<McpSessionKind, string> = {
+  task: 'task session',
+  escalation: 'escalation session',
+  watch: 'watch query',
+  prepare: 'prepare session',
+  split: 'split session',
+  replan: 'replan session',
+  breakdown: 'breakdown session',
+};
+
+/** Where a non-empty selection came from: `mcp.defaultServers` reads as the task/escalation default. */
+function describeSource(source: string): string {
+  return source === 'mcp.defaultServers' ? 'task/escalation default' : source;
+}
+
+/**
+ * One line for the run log. With servers it names them and their source; with none it says in plain
+ * words why this session has no MCP tools, so an unset kind cannot be mistaken for MCP being off.
+ */
+function mcpLabel(profile: McpProfile): string {
+  if (profile.selected.length) return `mcp: ${profile.selected.join(', ')} [${describeSource(profile.source)}]`;
+  const kind = profile.kind;
+  switch (profile.source) {
+    case '--no-mcp': return 'mcp: none — MCP is off for this run (--no-mcp)';
+    case '--mcp': return 'mcp: none — --mcp listed no servers';
+    case 'task front matter': return 'mcp: none — the task names no MCP servers';
+    case 'mcp.defaultServers': return 'mcp: none — mcp.defaultServers is empty';
+    default:
+      if (profile.source === `mcp.sessions.${kind} default`) return `mcp: none — the ${KIND_NOUN[kind]} gets no MCP tools; set mcp.sessions.${kind} to add some`;
+      if (profile.source === `mcp.sessions.${kind}`) return `mcp: none — mcp.sessions.${kind} is empty`;
+      return `mcp: none — no servers selected (${profile.source})`;
+  }
+}
+
 /**
  * Translate a profile for one client.
  *
@@ -120,7 +155,7 @@ function claudeEntry(s: McpServerConfig): Record<string, unknown> | undefined {
 export function applyMcp(providerName: ProviderName, profile: McpProfile, outFile: string): McpPlan {
   const selected = new Set(profile.selected);
   const notes: string[] = [];
-  const label = `mcp: ${profile.selected.length ? profile.selected.join(', ') : 'off'} [${profile.source}]`;
+  const label = mcpLabel(profile);
   switch (providerName) {
     case 'claude': {
       const mcpServers: Record<string, unknown> = {};
