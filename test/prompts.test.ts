@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { docsContract } from '../src/contract.js';
 import type { LintReport } from '../src/lint.js';
 import { resolvePaths, type Paths } from '../src/paths.js';
-import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, type PromptCtx } from '../src/prompt.js';
+import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, buildWrapUpPrompt, type PromptCtx } from '../src/prompt.js';
 import { buildPreparePrompt } from '../src/prepare.js';
 import type { RunContext } from '../src/runner.js';
 import type { State } from '../src/state.js';
@@ -98,6 +98,28 @@ test('buildPreparePrompt renders from the template with no leftover placeholders
   assert.match(text, /## Rules/);
   assert.match(text, /- notes\/idea\.md/);
   assert.match(text, /SYMPHONY_RESULT/);
+});
+
+test('buildWrapUpPrompt closes the task out, with context only for a fresh session', () => {
+  const { ctx } = fixture();
+  const resumed = buildWrapUpPrompt(ctx, { resumed: true, verify: { command: 'npm run build' } });
+  assert.doesNotMatch(resumed, PLACEHOLDER);
+  assert.match(resumed, /close-out turn/);
+  assert.match(resumed, /You have been resumed with the full context/);
+  assert.match(resumed, /`npm run build`/, 'the verify command is named as the build check');
+  assert.match(resumed, /docs\/PROGRESS\.md/);
+  assert.match(resumed, /docs\/tasks\/01-first\.md/);
+  assert.match(resumed, /SYMPHONY_RESULT/);
+  assert.match(resumed, /SYMPHONY_RESULT[\s\S]*END_SYMPHONY_RESULT/, 'the result block is present');
+  assert.doesNotMatch(resumed, /## Context for this fresh session/, 'a resumed session needs no inlined context');
+
+  const fresh = buildWrapUpPrompt(ctx, { resumed: false });
+  assert.doesNotMatch(fresh, PLACEHOLDER);
+  assert.match(fresh, /This is a fresh session/);
+  assert.match(fresh, /## Goal\nDo it\./, 'the task file is inlined for a fresh close-out');
+  assert.match(fresh, /--- PROGRESS \(docs\/PROGRESS\.md\) ---/);
+  assert.match(fresh, /the project's build\/test command/, 'no verify command means a generic build hint');
+  assert.ok(fresh.indexOf('--- END PROGRESS ---') < fresh.indexOf('Do only this'), 'context precedes the instructions');
 });
 
 test('a very large task file is truncated with a pointer to the full path', () => {

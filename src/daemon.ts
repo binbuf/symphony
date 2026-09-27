@@ -60,6 +60,19 @@ export async function runWithDaemon(ctx: RunContext, run: () => Promise<number>)
         placeStop(ctx.paths);
         ctx.log.info('control: pause requested; will stop at the next boundary');
         return ok('pause requested');
+      case 'wrap-up':
+        // "Pause as soon as possible": stop the running session and let the runner close the task out
+        // (notes + clean build) before it commits and pauses. With no session in flight there is
+        // nothing to close out, so fall back to the ordinary boundary pause.
+        if (ctx.active) {
+          ctx.wrapUpRequest = true;
+          ctx.active.kill('interrupt');
+          ctx.log.info('control: pause-now requested; closing out the running task');
+          return ok('pause-now requested');
+        }
+        placeStop(ctx.paths);
+        ctx.log.info('control: pause-now requested with no session in flight; will stop at the next boundary');
+        return ok('pause requested (no session in flight)');
       case 'resume':
         clearStop(ctx.paths);
         ctx.log.info('control: resume requested; pause sentinel removed');

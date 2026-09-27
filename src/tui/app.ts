@@ -26,7 +26,8 @@ const WATCH_ROWS = 5;
 export type Layout = 'both' | 'top' | 'bottom';
 
 interface PanelState { vOffset: number; hOffset: number; follow: boolean }
-interface Dialog { title: string; lines: string[]; confirm: () => void }
+interface DialogChoice { key: string; run: () => void }
+interface Dialog { title: string; lines: string[]; confirm?: () => void; choices?: DialogChoice[] }
 interface Box { title: string; lines: string[] }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -337,7 +338,7 @@ export class TuiApp {
     if (char === 'b') return this.openSplit();
     if (char === 'c') return this.openClearHalt();
     if (char === 'p') return this.togglePause();
-    if (char === 'P') return this.togglePauseAt();
+    if (char === 'P') return this.openPauseMenu();
     if (char === 'w') return this.refreshWatch();
     if (char === 'e') return this.toggleExpand();
     if (char === 't') return this.toggleWrap();
@@ -349,7 +350,14 @@ export class TuiApp {
   private handleDialogKey(k: Key): void {
     const name = k.type === 'key' ? k.name : undefined;
     const char = k.type === 'char' ? k.char : undefined;
-    if (char === 'y' || name === 'enter') { const d = this.dialog!; this.dialog = undefined; d.confirm(); this.render(); return; }
+    const d = this.dialog!;
+    if (d.choices) {
+      const choice = char ? d.choices.find((c) => c.key === char) : undefined;
+      if (choice) { this.dialog = undefined; choice.run(); this.render(); return; }
+      if (char === 'n' || char === 'q' || name === 'escape' || name === 'ctrl-c') { this.dialog = undefined; this.render(); }
+      return;
+    }
+    if (char === 'y' || name === 'enter') { this.dialog = undefined; d.confirm?.(); this.render(); return; }
     if (char === 'n' || name === 'escape' || char === 'q' || name === 'ctrl-c') { this.dialog = undefined; this.render(); }
   }
 
@@ -543,9 +551,57 @@ export class TuiApp {
   }
 
   /**
-   * Queue a pause before the selected task (or clear it when it is already the target). Unlike `p`,
-   * which stops at the next boundary, the run keeps going and the sentinel is placed only when the
-   * pipeline reaches that task, so the stop lands exactly where the user asked.
+   * The pause menu (`P`): the three ways to pause, chosen deliberately instead of bound to separate
+   * keys. `1` pauses as soon as possible (stop the running session and close the task out), `2`
+   * pauses at the next boundary, and `3` queues a pause before the selected task. `p` stays the
+   * one-key pause/resume toggle for the common case.
+   */
+  private openPauseMenu(): void {
+    const id = this.selectedTaskId();
+    const status = id ? (this.model.state.tasks[id]?.status ?? 'pending') : undefined;
+    const running = this.model.tasks.find((t) => this.model.state.tasks[t.id]?.status === 'running');
+    const paused = this.model.stopPresent();
+    const targetable = id !== undefined && status !== 'done' && status !== 'accepted' && status !== 'blocked' && status !== 'running';
+    const choice3 = id === undefined
+      ? 'before the selected task (none selected)'
+      : !targetable
+        ? `before ${id} (${id} is ${status}; it will not run again)`
+        : this.model.pauseAt === id
+          ? `clear the queued pause before ${id}`
+          : `before ${id} (the selected task)`;
+    this.dialog = {
+      title: 'Pause',
+      lines: [
+        running ? `running now: ${running.id}` : 'nothing is running right now',
+        '',
+        '1  as soon as possible',
+        '   stop the session, close the task out (notes + clean',
+        '   build), commit the work and pause',
+        `2  ${paused ? 'resume — clear the pause sentinel' : 'at the next boundary (before the next task/slice)'}`,
+        `3  ${choice3}`,
+        '',
+        '1 / 2 / 3  choose        Esc  cancel',
+      ],
+      choices: [
+        { key: '1', run: () => this.requestWrapUp() },
+        { key: '2', run: () => this.togglePause() },
+        { key: '3', run: () => this.togglePauseAt() },
+      ],
+    };
+    this.render();
+  }
+
+  /** Pause as soon as possible: stop the session in flight and let the harness close the task out. */
+  private requestWrapUp(): void {
+    this.model.requestWrapUp();
+    this.toast('pause-now: closing out the running task, then pausing');
+    this.render();
+  }
+
+  /**
+   * Queue a pause before the selected task (or clear it when it is already the target). Unlike the
+   * boundary pause, the run keeps going and the sentinel is placed only when the pipeline reaches
+   * that task, so the stop lands exactly where the user asked.
    */
   private togglePauseAt(): void {
     if (this.layout === 'bottom') return this.toast('status panel hidden (press z)');
@@ -952,7 +1008,7 @@ export class TuiApp {
 
   private hintsLine(): string {
     if (this.haltMode) return 'c clear halt & retry · b split the halted task · q quit · ↑↓ scroll · Tab focus';
-    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · b split · c clear-halt · p pause · P pause-at · w watch · e expand · t wrap · z zoom · [ ] panels';
+    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · b split · c clear-halt · p pause · P pause menu · w watch · e expand · t wrap · z zoom · [ ] panels';
     return base;
   }
 
@@ -982,7 +1038,8 @@ export class TuiApp {
         'b            split the selected task into subtasks (T10 → T10a, T10b, …)',
         'c            clear a halt (asks for confirmation)',
         'p            pause / resume (toggles the .stop sentinel now)',
-        'P            queue a pause before the selected task (placed when the run reaches it)',
+        'P            pause menu: 1 as soon as possible (close the running task out, then pause),',
+        '             2 at the next boundary, 3 before the selected task',
         'w            run a pipeline-watch check now',
         'e            expand all status columns (pan the focused panel with ← →)',
         't            wrap long live-output lines (off = clip and pan)',

@@ -11,7 +11,7 @@ import { atomicWriteSync, ensureDir, nowIso, sleep } from './util.js';
  * inherit the project's permissions.
  */
 
-export type ControlAction = 'pause' | 'resume' | 'pause-at' | 'accept' | 'split' | 'clear-halt' | 'watch' | 'stop';
+export type ControlAction = 'pause' | 'resume' | 'pause-at' | 'wrap-up' | 'accept' | 'split' | 'clear-halt' | 'watch' | 'stop';
 
 export interface ControlRequest {
   id: string;

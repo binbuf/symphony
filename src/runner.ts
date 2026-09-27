@@ -12,7 +12,7 @@ import { createLogger, openRunSinks, type Logger, type RunSinks } from './logger
 import { writeTaskLog } from './logs.js';
 import { mcpPromptNote, planMcp, resolveMcpProfile } from './mcp.js';
 import { placeStop, stopPresent, type Paths } from './paths.js';
-import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
+import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, buildWrapUpPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
 import { applyPlan, loadProject, retargetFlags, sanitizeFlags } from './project.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { addUsage } from './providers/common.js';
@@ -101,6 +101,13 @@ export interface RunContext {
   pauseAt?: string;
   /** A split requested live from the TUI; the run stops, `split` runs, then the wrapper resumes it. */
   splitRequest?: SplitRequest;
+  /**
+   * A "pause as soon as possible" requested live from the run view: the session in flight is stopped,
+   * the agent is asked to close the task out (update the progress notes/Hand-off, leave a clean
+   * build), the harness commits the slice and pauses, so the task resumes at its next slice on the
+   * next run. Set only while a session is active; consumed by `runTask`.
+   */
+  wrapUpRequest?: boolean;
   /** Run an automatic breakdown for a task; the CLI wires this to `split` with the run's lock shared. */
   performSplit?: PerformSplit;
   /** Run an automatic plan rewrite for a task; the CLI wires this to `replan` with the run's lock shared. */
@@ -365,8 +372,8 @@ function mergeOutcome(first: SessionOutcome, second: SessionOutcome): SessionOut
 }
 
 interface SessionRun {
-  kind: 'task' | 'resume' | 'nudge' | 'continue' | 'escalate';
-  logKind: 'task' | 'retry' | 'nudge';
+  kind: 'task' | 'resume' | 'nudge' | 'continue' | 'escalate' | 'wrapup';
+  logKind: 'task' | 'retry' | 'nudge' | 'wrapup';
   attempt: number;
   resumeId?: string;
   timeoutMin: number;
@@ -378,7 +385,7 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
   let session: Session | undefined;
   try {
     ensureDir(paths.runs);
-    const suffix = r.logKind === 'nudge' ? '-nudge' : r.attempt > 1 ? `-r${r.attempt}` : '';
+    const suffix = r.logKind === 'nudge' ? '-nudge' : r.logKind === 'wrapup' ? '-wrapup' : r.attempt > 1 ? `-r${r.attempt}` : '';
     sinks = openRunSinks(paths.runs, `${task.id}-${stamp()}${suffix}`);
     writeFileSync(sinks.promptPath, prompt);
     const rel = (p: string) => relative(paths.root, p);
@@ -452,6 +459,81 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
 function snapshotText(outcome: SessionOutcome): string | undefined {
   const line = outcome.allText.split('\n').map((l) => l.trim()).filter(Boolean).pop();
   return line ? line.slice(0, 300) : undefined;
+}
+
+/** What a "pause as soon as possible" close-out produced: the session's outcome and its result block. */
+interface WrapUpResult {
+  outcome: SessionOutcome;
+  block: ResultBlock;
+}
+
+/**
+ * A "pause as soon as possible": the session in flight was just stopped, so resume it (or start a
+ * fresh one when the provider cannot resume) with a close-out prompt that stops new work, updates
+ * the progress notes and Hand-off, and leaves a clean build. The harness's own verify command is run
+ * afterwards as the independent build check. Best-effort throughout: whatever the close-out reports,
+ * the run commits the slice and pauses, so no work is lost and the task resumes next run.
+ */
+async function runWrapUp(
+  ctx: RunContext,
+  task: Task,
+  st: TaskState,
+  provider: Provider,
+  spec: SessionSpec,
+  pc: PromptCtx,
+  resumeId: string | undefined,
+  first: SessionOutcome,
+): Promise<WrapUpResult> {
+  const { paths, config, log } = ctx;
+  // Pause at the next boundary as well, so however the close-out reports (continue or done) the run
+  // stops after committing this task instead of launching the next slice.
+  try {
+    placeStop(paths);
+  } catch (e) {
+    log.warn(`${task.id}: could not place ${relative(paths.root, paths.stop)} (${(e as Error).message}); pausing anyway`);
+  }
+  const canResume = Boolean(resumeId) && provider.supportsResume;
+  const verify = resolveVerify(config, task, paths.root);
+  log.warn(`${task.id}: pause-now requested; ${canResume ? `resuming ${resumeId} to close out` : 'starting a fresh session to close out'}, then pausing`);
+  const prompt = buildWrapUpPrompt(pc, { resumed: canResume, verify });
+
+  let outcome: SessionOutcome;
+  try {
+    outcome = await runOneSession(ctx, task, st, provider, spec, prompt, {
+      kind: 'wrapup', logKind: 'wrapup', attempt: 1,
+      resumeId: canResume ? resumeId : undefined,
+      timeoutMin: Math.min(spec.timeoutMin, config.nudgeTimeoutMin),
+    });
+  } catch (e) {
+    log.warn(`${task.id}: close-out session could not run (${(e as Error).message}); committing what is on disk and pausing`);
+    return { outcome: first, block: { status: 'continue', summary: 'paused by request; the close-out session could not run' } };
+  }
+
+  let block = parseResultBlock(outcome.result.text) ?? parseResultBlock(outcome.allText);
+  if (!block) {
+    const why = outcome.spawnError ?? outcome.result.errorSubtype ?? (outcome.timedOut ? 'timeout' : outcome.stalled ? 'stalled' : outcome.interrupted ? 'interrupted' : 'no result block');
+    log.warn(`${task.id}: close-out session ended without a SYMPHONY_RESULT block (${why}); pausing anyway`);
+    block = { status: 'continue', summary: `paused by request; the close-out session ended without a result block (${why})` };
+  } else {
+    block = { ...block, summary: `${block.summary || 'paused by request'} | paused by request` };
+  }
+
+  // The independent build check, reusing the harness verify command. A `done` is verified by the
+  // ordinary path below; anything else is checked here so the pause never leaves a broken tree
+  // unrecorded. A failure is noted, not fatal: the pause still happens and the next run fixes it.
+  if (verify && block.status !== 'done') {
+    log.info(`${task.id}: wrap-up build check: ${verify.command}`);
+    const res = runVerify(paths.root, verify.command, verify.timeoutMin * 60_000);
+    st.verify = { command: verify.command, ok: res.ok, code: res.code ?? undefined, output: res.output.slice(-2000) || undefined, at: nowIso() };
+    if (res.ok) {
+      log.info(`${task.id}: wrap-up build check passed`);
+    } else {
+      const note = `build check did not pass (exit ${res.code ?? 'timeout'}): ${verify.command} — ${squash(res.output, 200) || 'no output'}`;
+      log.warn(`${task.id}: ${note}`);
+      block = { ...block, summary: `${block.summary} | ${note}` };
+    }
+  }
+  return { outcome, block };
 }
 
 /** Map a terminal task status to its Slack event. */
@@ -797,8 +879,22 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     resumeId = outcome.sessionId ?? resumeId;
     let block: ResultBlock | undefined = parseResultBlock(outcome.result.text) ?? parseResultBlock(outcome.allText);
 
+    // A live "pause as soon as possible" request cut the session above short. Have the agent close
+    // the task out (notes + a clean build) before the run commits and pauses; the close-out's block
+    // then takes the ordinary path, so `continue` commits the slice and `.stop` pauses before the
+    // next one. It always yields a block, so the pause cannot be lost to a silent close-out.
+    let wrapped = false;
+    if (ctx.wrapUpRequest && !ctx.interrupted) {
+      ctx.wrapUpRequest = false;
+      wrapped = true;
+      const w = await runWrapUp(ctx, task, st, provider, spec, pc, resumeId, outcome);
+      outcome = w.outcome;
+      resumeId = w.outcome.sessionId ?? resumeId;
+      block = w.block;
+    }
+
     const endedCleanly = outcome.result.ok && !outcome.timedOut && !outcome.stalled && !outcome.interrupted && !ctx.interrupted;
-    if (!block && endedCleanly && config.jev.enabled && config.jev.resultFallback) {
+    if (!block && endedCleanly && !wrapped && config.jev.enabled && config.jev.resultFallback) {
       // Jev first: one fast, typed decision instead of a whole resumed session. Any problem below
       // (no key, timeout, low confidence, an unaccepted disposition) falls through to the nudge.
       const problem = jevProblem(config.jev, process.env);
@@ -823,7 +919,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       }
     }
 
-    if (!block && endedCleanly && outcome.sessionId && config.nudge && provider.supportsResume) {
+    if (!block && endedCleanly && !wrapped && outcome.sessionId && config.nudge && provider.supportsResume) {
       log.warn(`${task.id}: session ended without a SYMPHONY_RESULT block; resuming ${outcome.sessionId} once to close out`);
       const nudge = await runOneSession(ctx, task, st, provider, spec, buildNudgePrompt(pc), { kind: 'nudge', logKind: 'nudge', attempt, resumeId: outcome.sessionId, timeoutMin: Math.min(spec.timeoutMin, config.nudgeTimeoutMin) });
       st.nudged = true;
@@ -848,7 +944,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       break;
     }
 
-    if (block && outcome.result.ok) {
+    if (block && (outcome.result.ok || wrapped)) {
       if (block.status === 'continue') {
         st.summary = block.summary || 'continuing in a fresh session';
         saveState(paths, state);
@@ -1238,6 +1334,14 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       }
       if (stopPresent(paths)) {
         log.warn(`${relative(paths.root, paths.stop)} present: pausing before ${task.id}. Remove it and re-run to continue.`);
+        return 0;
+      }
+      // A pause-now request that arrived with no session in flight (between tasks): there is nothing
+      // to close out, so pause here. The handler places the sentinel when no session is active, but
+      // consume the flag anyway so it cannot wrap up an unrelated task later.
+      if (ctx.wrapUpRequest) {
+        ctx.wrapUpRequest = false;
+        log.warn(`${task.id}: pause-now requested with no session in flight; pausing before ${task.id}.`);
         return 0;
       }
       // A queued pause target: the run has reached the task the user chose to stop before, so the

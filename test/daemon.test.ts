@@ -150,3 +150,45 @@ test('runWithDaemon services a pause request at the task boundary and publishes 
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
 });
+
+test('runWithDaemon: a wrap-up request stops the session, closes the task out and pauses', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-daemon-wrapup-'));
+  gitInit(dir);
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.tasksDir, { recursive: true });
+  writeFileSync(paths.roadmap, '# R\n\n## Phase 1\n\n- [ ] T01 — One → [tasks/01-one.md](tasks/01-one.md)\n- [ ] T02 — Two → [tasks/02-two.md](tasks/02-two.md)\n');
+  writeFileSync(join(paths.tasksDir, '01-one.md'), '# T01 — One\n\n## Goal\nx\n');
+  writeFileSync(join(paths.tasksDir, '02-two.md'), '# T02 — Two\n\n## Goal\ny\n');
+  writeFileSync(paths.progress, '# Progress\n');
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  writeFileSync(join(fixtures, 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'fake_sleep', ms: 1500 }),
+    result('done', 'should have been interrupted'),
+  ].join('\n') + '\n');
+  writeFileSync(join(fixtures, 'T01.wrapup.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'fake_write', path: 'closed.txt', content: 'closed out' }),
+    result('continue', 'wrapped up for resume'),
+  ].join('\n') + '\n');
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+
+  const log: Logger = { ...silent, info() {}, warn() {} };
+  const loaded = loadProject(paths, silent);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 3, watch: { ...DEFAULTS.watch, enabled: false } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log, roadmap: loaded.roadmap, tasks: loaded.tasks, state: loaded.state, interrupted: false, abort: new AbortController() };
+  try {
+    const run = runWithDaemon(ctx, () => runCommand(ctx));
+    void sendControl(paths, 'wrap-up', undefined, { timeoutMs: 5000 });
+    const code = await run;
+    assert.equal(code, 0, 'the run pauses cleanly');
+    assert.ok(stopPresent(paths), 'the pause sentinel is in place');
+    assert.ok(readFileSync(join(dir, 'closed.txt'), 'utf8').includes('closed out'), 'the close-out session ran');
+    assert.equal(ctx.state.tasks.T01.status, 'running');
+    assert.equal(ctx.state.tasks.T01.continuation, 1, 'the task resumes at its next slice');
+    assert.equal(ctx.state.tasks.T02?.status ?? 'pending', 'pending', 'T02 never ran');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});

@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import { DEFAULTS } from '../src/config.js';
 import { currentBranch } from '../src/git.js';
 import type { Logger } from '../src/logger.js';
-import { resolvePaths } from '../src/paths.js';
+import { resolvePaths, stopPresent } from '../src/paths.js';
 import { haltBanner, retryDelaySec, runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
 import { loadState, newTaskState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
@@ -88,6 +88,39 @@ test('a task that reports continue is re-run in a fresh session until done, comm
     const log = execFileSync('git', ['-C', dir, 'log', '--oneline'], { encoding: 'utf8' });
     assert.match(log, /T01: Do the thing \[continue\]/);
     assert.match(log, /T01: Do the thing \[done\]/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a pause-now request closes the task out, commits the slice, and pauses for the next run', async () => {
+  const { dir, paths, task } = project();
+  const fixtures = join(dir, 'fixtures');
+  writeFileSync(join(fixtures, 'T01.wrapup.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'fake_write', path: 'part1b.txt', content: 'wrapped up' }),
+    claudeResult('continue', 'paused with notes updated'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 3, verifyCommand: 'git --version' };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), wrapUpRequest: true };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.stopped, true, 'the task pauses instead of starting the next slice');
+    assert.equal(ctx.wrapUpRequest, false, 'the request is consumed');
+    assert.ok(stopPresent(paths), 'the pause sentinel is left in place');
+    assert.equal(state.tasks.T01.status, 'running');
+    assert.equal(state.tasks.T01.continuation, 1, 'the task resumes at its next slice, not from scratch');
+    // The first session's slice and the close-out both landed in one commit.
+    assert.ok(readFileSync(join(dir, 'part1.txt'), 'utf8').includes('part 1'));
+    assert.ok(readFileSync(join(dir, 'part1b.txt'), 'utf8').includes('wrapped up'));
+    const log = execFileSync('git', ['-C', dir, 'log', '--oneline'], { encoding: 'utf8' });
+    assert.match(log, /T01: Do the thing \[continue\]/);
+    // The independent build check ran and passed, and is recorded on the task.
+    assert.equal(state.tasks.T01.verify?.ok, true);
+    assert.equal(state.tasks.T01.verify?.command, 'git --version');
+    // The close-out session is recorded against the task.
+    assert.ok(state.tasks.T01.logs.some((l) => l.kind === 'wrapup'), 'the close-out session is recorded');
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

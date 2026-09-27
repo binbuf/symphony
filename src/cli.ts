@@ -80,18 +80,22 @@ Limits
 
 Controls
   --tui / --no-tui         full-screen run view: a self-updating status table above the live output,
-                           with scrolling, follow, pause/pause-at, accept and clear-halt keys. Default
+                           with scrolling, follow, pause, accept and clear-halt keys. Default
                            on when stdout and stdin are a terminal; off when piped, in CI, or with
                            --no-tui. Set "tui": false in the config to disable it by default.
   detached runs            symphony start launches the harness headless in the background; symphony
                            attach opens the run view as a client (q detaches, leaving it running);
-                           symphony stop stops it. pause/pause-at/accept/split/clear-halt all work
-                           from an attached view. The daemon publishes .symphony/runtime.json and
-                           services .symphony/control/.
+                           symphony stop stops it. pause / the pause menu / accept / split /
+                           clear-halt all work from an attached view. The daemon publishes
+                           .symphony/runtime.json and services .symphony/control/.
   touch .stop              pause at the next boundary: a task start or a continuation session end
                            (nothing is killed); configurable via paths.stop
-  P (in the TUI)           queue a pause before the selected task: the run continues and the .stop
-                           sentinel is placed when the pipeline reaches that task
+  P (in the TUI)           open the pause menu: 1 as soon as possible — stop the running session and
+                           have the agent close the task out (progress notes + Hand-off, a clean
+                           build), then commit the slice and pause so the task resumes next run;
+                           2 at the next boundary; 3 before the selected task, placing .stop only
+                           when the pipeline reaches it
+  p (in the TUI)           pause / resume now by toggling the .stop sentinel (stops at the next boundary)
   touch .symphony/STOP     legacy alias for the above
   Ctrl-C                   stop the current session, record it as unfinished, exit 130
   pipeline watch           while the run is in flight, a separate read-only model reads the harness

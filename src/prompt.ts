@@ -243,6 +243,50 @@ END_SYMPHONY_RESULT
 `, ctx);
 }
 
+/**
+ * The close-out prompt for a "pause as soon as possible": the operator asked the pipeline to stop
+ * now, so the session stops new work, makes the tree build cleanly, records the hand-off and reports
+ * — the harness then commits the slice and pauses, resuming the task on the next run. When the
+ * running session can be resumed this is a short note; when it cannot (a provider without resume) it
+ * is self-contained, inlining the task file and progress like a task prompt.
+ */
+export function buildWrapUpPrompt(ctx: PromptCtx, opts: { resumed: boolean; verify?: { command: string } }): string {
+  const { paths, task } = ctx;
+  const d = docPaths(paths);
+  const rel0 = task.taskFileRel ?? defaultTaskFileRel(paths, task);
+  const resumedPreamble = opts.resumed
+    ? 'You have been resumed with the full context of the turn that was just stopped, so continue from exactly where it left off.'
+    : 'This is a fresh session: read the context at the end of this prompt before you touch anything.';
+  const buildStep = opts.verify?.command
+    ? `\`${opts.verify.command}\``
+    : 'the project\'s build/test command in the foreground (for example `npm run build` or `npm test`)';
+  const designNote = ctx.designDocs ? ` If your work changed behaviour a ${d.design}/*.md doc describes, update that doc too.` : '';
+  const body = taskFileBody(task, ctx.maxTaskBytes);
+  const contextBlock = opts.resumed ? '' : `
+## Context for this fresh session
+
+--- TASK FILE (${task.taskFileRel ?? 'none'}) ---
+${body ?? `(no task file — the roadmap bullet is the whole task: "${task.id} — ${task.title}")`}
+--- END TASK FILE ---
+
+--- PROGRESS (${d.progress}) ---
+${readProgress(ctx, paths)}
+--- END PROGRESS ---
+`;
+  const text = renderPrompt('wrapup.md', {
+    projectName: basename(paths.root),
+    taskId: task.id,
+    taskTitle: task.title,
+    taskFile: rel0,
+    progress: d.progress,
+    resumedPreamble,
+    buildStep,
+    designNote,
+    contextBlock,
+  });
+  return withNotes(text, ctx);
+}
+
 export function buildResumePrompt(ctx: PromptCtx, errorMessage: string): string {
   const { task } = ctx;
   return withNotes(`The previous turn of this session was cut short by an infrastructure error (${errorMessage}), not by anything you did. You have been resumed with the same context.

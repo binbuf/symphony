@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { DEFAULTS } from '../src/config.js';
 import type { Logger } from '../src/logger.js';
-import { resolvePaths } from '../src/paths.js';
+import { resolvePaths, stopPresent } from '../src/paths.js';
 import { loadProject } from '../src/project.js';
 import type { RunContext, RunFlags } from '../src/runner.js';
 import { newTaskState, type State } from '../src/state.js';
@@ -239,7 +239,7 @@ test('TuiApp: t toggles live-output wrapping, which reflows a long line instead 
   assert.equal(priv.logLineCount(), 1, 'toggling back returns to one clipped row per line');
 });
 
-test('TuiApp: P queues a pause before the selected task and highlights it', () => {
+test('TuiApp: P opens the pause menu for asap, the next boundary, or the selected task', () => {
   const tasks = [task('T01', 1), task('T02', 2), task('T03', 3)];
   const state: State = {
     version: 1,
@@ -249,36 +249,60 @@ test('TuiApp: P queues a pause before the selected task and highlights it', () =
     },
   };
   const ctx = makeCtx(tasks, state);
+  let killed = 0;
+  ctx.active = { kill: () => { killed += 1; } } as unknown as RunContext['active'];
   const app = new TuiApp(ctx, new AnsiTerminal(() => {}));
   const priv = app as unknown as {
     handleKey(k: Key): void;
+    dialog?: { choices?: Array<{ key: string }> };
     selected: number;
     table(): StatusTable;
     metricsLine(t: StatusTable): string;
   };
   const press = (char: string) => priv.handleKey({ type: 'char', char });
 
-  // Select T02 and queue the pause there; the metrics bar names the target.
+  // P opens the three-way menu rather than acting directly.
+  press('P');
+  assert.equal(priv.dialog?.choices?.length, 3, 'P opens the pause menu');
+  // Esc cancels without touching anything.
+  priv.handleKey({ type: 'key', name: 'escape' });
+  assert.equal(priv.dialog, undefined);
+  assert.equal(ctx.wrapUpRequest, undefined);
+
+  // 1 = pause as soon as possible: flag the running task's session and stop it.
+  press('P');
+  press('1');
+  assert.equal(ctx.wrapUpRequest, true);
+  assert.equal(killed, 1, 'the session in flight is interrupted');
+  delete ctx.wrapUpRequest;
+
+  // 3 = queue a pause before the selected task; the metrics bar names the target.
   priv.selected = 1;
   press('P');
+  press('3');
   assert.equal(ctx.pauseAt, 'T02');
   assert.match(stripAnsi(priv.metricsLine(priv.table())), /pause@T02/);
-  // Move off the target so its highlight (not the selection inverter) is visible.
-  priv.selected = 2;
-  const row = app.renderLines(100, 20).find((l) => stripAnsi(l).startsWith('T02'));
-  assert.ok(row && row.startsWith('\x1b[33m'), 'the pause-target row is highlighted');
-
-  // Pressing P again on the target clears it.
+  // Pressing 3 again on the target clears it.
   priv.selected = 1;
   press('P');
+  press('3');
   assert.equal(ctx.pauseAt, undefined);
-  assert.doesNotMatch(stripAnsi(priv.metricsLine(priv.table())), /pause@T02/);
 
-  // A done task cannot be a target: P warns instead of queueing.
+  // A done task cannot be a target: 3 warns instead of queueing.
   priv.selected = 0;
   press('P');
+  press('3');
   assert.equal(ctx.pauseAt, undefined, 'no target is queued for a done task');
   assert.match(stripAnsi(app.renderLines(100, 20).join('\n')), /T01 is done; it will not run again/);
+
+  // 2 = toggle the boundary pause sentinel.
+  assert.equal(stopPresent(ctx.paths), false);
+  press('P');
+  press('2');
+  assert.equal(stopPresent(ctx.paths), true, '2 places the pause sentinel');
+  press('P');
+  press('2');
+  assert.equal(stopPresent(ctx.paths), false, '2 again resumes by clearing it');
 });
 
 test('TuiApp: the current task row is forest green while running and red when halted on failure', () => {

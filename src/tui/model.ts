@@ -50,6 +50,8 @@ export interface TuiModel {
   requestSplit(id: string, stopRunning: boolean): void;
   /** Queue a pause before a task (or clear it). */
   setPauseAt(id: string | undefined): void;
+  /** Pause as soon as possible: stop the running session and close the task out before pausing. */
+  requestWrapUp(): void;
   stopPresent(): boolean;
   placeStop(): void;
   clearStop(): void;
@@ -98,6 +100,14 @@ export class LocalTuiModel implements TuiModel {
   setPauseAt(id: string | undefined): void {
     if (id === undefined) delete this.ctx.pauseAt;
     else this.ctx.pauseAt = id;
+  }
+  requestWrapUp(): void {
+    if (this.ctx.active) {
+      this.ctx.wrapUpRequest = true;
+      this.ctx.active.kill('interrupt');
+    } else {
+      placeStop(this.ctx.paths);
+    }
   }
   stopPresent(): boolean { return stopPresent(this.ctx.paths); }
   placeStop(): void { placeStop(this.ctx.paths); }
@@ -236,6 +246,15 @@ export class RemoteTuiModel implements TuiModel {
     }
     dispatchControl(this.paths, 'pause-at', { id: id ?? null });
     this.pauseAt = id;
+  }
+
+  requestWrapUp(): void {
+    if (!this.isLive()) {
+      this.onMessage?.('the run is not active; nothing to pause');
+      return;
+    }
+    dispatchControl(this.paths, 'wrap-up');
+    this.onMessage?.('pause-now requested: closing out the running task');
   }
 
   stopPresent(): boolean { return stopPresent(this.paths); }
