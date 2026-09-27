@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { resolveSpawn } from '../spawn.js';
 import { isRecord, bool, num, str } from '../util.js';
-import { ATTACHED_BOOTSTRAP, addUsage, compactUsage, hintFromInput, newHints, sumCounts, toText, tryJson } from './common.js';
+import { addUsage, compactUsage, hintFromInput, newHints, sumCounts, toText, tryJson } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
 
 /**
@@ -235,16 +235,9 @@ export const opencodeProvider: Provider = {
     if (o.autoApprove) args.push('--auto');
     // A read-only session (the watcher) is the default here: without `--auto`, reads are permitted
     // and edits/shell commands need approval nobody can give, so it can read the named log only.
-    if (o.inlinePrompt) {
-      // A short self-contained prompt (the watcher's) goes straight on argv: no file, no bootstrap.
-      args.push(...o.extraArgs, o.prompt);
-      return { bin: o.bin, args };
-    }
-    // The full prompt is attached with `--file`; argv only carries a short bootstrap so an oversized
-    // prompt can never overflow the OS command-line limit. In the OpenCode 1.x CLI `--file` is an
-    // array flag that would swallow a following positional as another file, so the bootstrap message
-    // must come first and `--file` must be last.
-    args.push(...o.extraArgs, ATTACHED_BOOTSTRAP, '--file', o.promptFile);
+    // The prompt is passed as the trailing positional (never `--file` + a read-the-file bootstrap:
+    // that wrapper measurably dulls the model's answer). The runner still writes an auditable copy.
+    args.push(...o.extraArgs, o.prompt);
     return { bin: o.bin, args };
   },
   createParser: () => new OpenCodeParser(),

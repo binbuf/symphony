@@ -123,7 +123,7 @@ export const codexProvider: Provider = {
   supportsMcp: true,
   authCheckArgs: ['login', 'status'],
   buildCommand(o) {
-    // `codex exec [resume <id>] [flags] <prompt>`; `-` reads the prompt from stdin.
+    // `codex exec [resume <id>] [flags] <prompt>`.
     const args = ['exec'];
     if (o.resumeId) args.push('resume', o.resumeId);
     args.push('--json', '--color', 'never', '--skip-git-repo-check');
@@ -135,14 +135,9 @@ export const codexProvider: Provider = {
     else if (o.autoApprove) args.push('--dangerously-bypass-approvals-and-sandbox');
     else args.push('--sandbox', 'workspace-write', '--ask-for-approval', 'never');
     args.push(...o.extraArgs);
-    // `-` reads the prompt from stdin; never place the full task prompt on argv. A short inline
-    // prompt (the watcher's) is passed as the positional instead, with no bootstrap wrapper.
-    if (o.inlinePrompt) {
-      args.push(o.prompt);
-      return { bin: o.bin, args };
-    }
-    args.push('-');
-    return { bin: o.bin, args, stdinPayload: o.prompt };
+    // The prompt is the trailing positional (no `-`/stdin and no bootstrap wrapper).
+    args.push(o.prompt);
+    return { bin: o.bin, args };
   },
   createParser: () => new CodexParser(),
 };

@@ -3,7 +3,7 @@ export type ProviderName = 'claude' | 'cursor' | 'opencode' | 'codex' | 'gemini'
 export interface BuildCommandOpts {
   bin: string;
   prompt: string;
-  /** The prompt is always written here first; adapters may tell the agent to read it. */
+  /** The runner writes the prompt here first so every session keeps an auditable copy on disk. */
   promptFile: string;
   taskId: string;
   attempt: number;
@@ -15,12 +15,6 @@ export interface BuildCommandOpts {
   autoApprove: boolean;
   /** When true the session may read files but must not edit or run commands; adapters map this to their read-only mode. */
   readOnly?: boolean;
-  /**
-   * Pass `prompt` straight through as the session's instruction instead of pointing the CLI at
-   * `promptFile` (or prepending a read-the-file bootstrap). Used for short, self-contained prompts
-   * such as the pipeline watcher's, where the file/base-prompt wrapper measurably hurts the answer.
-   */
-  inlinePrompt?: boolean;
   budgetUsd?: number;
   extraArgs: string[];
   cwd: string;

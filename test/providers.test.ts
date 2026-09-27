@@ -3,7 +3,6 @@ import { test } from 'node:test';
 import { antigravityProvider } from '../src/providers/antigravity.js';
 import { ClaudeParser, claudeProvider } from '../src/providers/claude.js';
 import { CodexParser, codexProvider } from '../src/providers/codex.js';
-import { ATTACHED_BOOTSTRAP, fileBootstrap } from '../src/providers/common.js';
 import { CursorParser, cursorProvider } from '../src/providers/cursor.js';
 import { GenericParser } from '../src/providers/generic.js';
 import { geminiProvider } from '../src/providers/gemini.js';
@@ -50,15 +49,17 @@ test('claude parser: api_retry hints and error result', () => {
   assert.deepEqual(p.parse('not json'), [{ kind: 'raw', text: 'not json', stream: 'stdout' }]);
 });
 
-test('claude buildCommand: stdin prompt, bypass by default, safe mode flags', () => {
+test('claude buildCommand: prompt inline on -p, bypass by default, safe mode flags', () => {
   const c = claudeProvider.buildCommand(opts({ model: 'mm', budgetUsd: 5, resumeId: 'r1' }));
   assert.equal(c.bin, 'bin');
-  assert.equal(c.stdinPayload, 'do it');
+  assert.equal(c.stdinPayload, undefined, 'the prompt is on argv, never on stdin');
+  assert.deepEqual(c.args.slice(0, 2), ['-p', 'do it']);
   assert.ok(c.args.includes('--dangerously-skip-permissions'));
   assert.ok(c.args.join(' ').includes('--resume r1'));
   assert.ok(c.args.join(' ').includes('--model mm'));
   assert.ok(c.args.join(' ').includes('--max-budget-usd 5'));
   assert.ok(c.args.includes('--x'));
+  assert.ok(!c.args.join(' ').includes('Follow the instructions'), 'no base-prompt wrapper');
   const s = claudeProvider.buildCommand(opts({ autoApprove: false }));
   assert.ok(!s.args.includes('--dangerously-skip-permissions'));
   assert.ok(s.args.join(' ').includes('--permission-mode acceptEdits'));
@@ -69,12 +70,6 @@ test('claude buildCommand: stdin prompt, bypass by default, safe mode flags', ()
   assert.ok(roArgs.includes('--disallowedTools Edit Write NotebookEdit Bash'));
   assert.ok(roArgs.includes('--permission-mode acceptEdits'));
   assert.ok(!ro.args.includes('--dangerously-skip-permissions'), 'read-only beats the bypass flag');
-  // An inline prompt is passed to `-p` directly; the stdin bootstrap wrapper is dropped.
-  const inline = claudeProvider.buildCommand(opts({ inlinePrompt: true, readOnly: true }));
-  assert.equal(inline.args[0], '-p');
-  assert.equal(inline.args[1], 'do it');
-  assert.equal(inline.stdinPayload, undefined);
-  assert.ok(!inline.args.includes('Follow the instructions provided on stdin exactly.'));
 });
 
 test('cursor parser: tool_call reduction and result', () => {
@@ -91,9 +86,9 @@ test('cursor parser: tool_call reduction and result', () => {
   assert.deepEqual(r, { kind: 'result', ok: true, text: 'bye', sessionId: 'c1', durationMs: 5, errorSubtype: undefined });
 });
 
-test('cursor buildCommand: prompt file bootstrap is the last positional; --force only when auto-approving', () => {
+test('cursor buildCommand: prompt is the last positional; --force only when auto-approving', () => {
   const c = cursorProvider.buildCommand(opts({ model: 'm' }));
-  assert.equal(c.args[c.args.length - 1], fileBootstrap('/tmp/p.md'));
+  assert.equal(c.args[c.args.length - 1], 'do it');
   assert.ok(c.args.includes('--force') && c.args.includes('--trust') && c.args.includes('-p'));
   assert.equal(c.stdinPayload, undefined);
   assert.ok(!cursorProvider.buildCommand(opts({ autoApprove: false })).args.includes('--force'));
@@ -145,45 +140,38 @@ test('opencode parser: step_finish tokens accumulate, cache read/write folds int
   assert.equal(q.hints().usage, undefined);
 });
 
-test('opencode buildCommand: prompt attached via --file, --auto by default, --session on resume', () => {
+test('opencode buildCommand: prompt inline as the trailing positional, --auto by default, --session on resume', () => {
   const c = opencodeProvider.buildCommand(opts({ model: 'anthropic/x', resumeId: 'sess' }));
   assert.equal(c.args[0], 'run');
   assert.ok(c.args.includes('--auto'));
   assert.ok(c.args.join(' ').includes('--session sess'));
-  // `--file` is an array flag in the 1.x CLI: the bootstrap message is the positional and must come
-  // first, with `--file <path>` last so the bootstrap is never swallowed as a second file.
-  assert.equal(c.args[c.args.length - 2], '--file');
-  assert.equal(c.args[c.args.length - 1], '/tmp/p.md');
-  assert.equal(c.args[c.args.length - 3], ATTACHED_BOOTSTRAP);
+  // The prompt is the trailing positional: no `--file`, no read-the-file bootstrap.
+  assert.equal(c.args[c.args.length - 1], 'do it');
+  assert.equal(c.args[c.args.length - 2], '--x');
   assert.equal(c.stdinPayload, undefined);
+  assert.ok(!c.args.includes('--file'));
   assert.ok(!c.args.includes('--dir'));
   // OpenCode 1.x flags only: `--standalone` is a 2.x server flag the 1.x CLI rejects.
   assert.ok(!c.args.includes('--standalone'));
   assert.ok(c.args.join(' ').includes('--format json'));
   assert.ok(c.args.includes('--thinking'));
-  // An inline prompt (the watcher's) is the trailing positional: no `--file`, no bootstrap.
-  const inline = opencodeProvider.buildCommand(opts({ inlinePrompt: true, prompt: 'watch this', readOnly: true }));
-  assert.equal(inline.args[inline.args.length - 1], 'watch this');
-  assert.ok(!inline.args.includes('--file'));
-  assert.ok(!inline.args.includes(ATTACHED_BOOTSTRAP));
-  assert.equal(inline.stdinPayload, undefined);
 });
 
-test('every file-bootstrap provider passes the prompt inline when asked, with no wrapper', () => {
+test('every provider passes the prompt on argv with no base-prompt or file wrapper', () => {
   const expected: Array<[string, ReturnType<typeof antigravityProvider.buildCommand>]> = [
-    ['gemini', geminiProvider.buildCommand(opts({ inlinePrompt: true, prompt: 'watch this' }))],
-    ['cursor', cursorProvider.buildCommand(opts({ inlinePrompt: true, prompt: 'watch this' }))],
-    ['antigravity', antigravityProvider.buildCommand(opts({ inlinePrompt: true, prompt: 'watch this' }))],
-    ['codex', codexProvider.buildCommand(opts({ inlinePrompt: true, prompt: 'watch this' }))],
+    ['gemini', geminiProvider.buildCommand(opts({ prompt: 'watch this' }))],
+    ['cursor', cursorProvider.buildCommand(opts({ prompt: 'watch this' }))],
+    ['antigravity', antigravityProvider.buildCommand(opts({ prompt: 'watch this' }))],
+    ['codex', codexProvider.buildCommand(opts({ prompt: 'watch this' }))],
+    ['claude', claudeProvider.buildCommand(opts({ prompt: 'watch this' }))],
+    ['opencode', opencodeProvider.buildCommand(opts({ prompt: 'watch this' }))],
   ];
   for (const [name, c] of expected) {
     const text = c.args.join(' ');
-    assert.ok(c.args.includes('watch this'), `${name} carries the prompt inline`);
-    assert.ok(!text.includes(fileBootstrap('/tmp/p.md')), `${name} drops the file bootstrap`);
-    assert.ok(!text.includes('Follow the instructions in the attached file'), `${name} drops the attached-file bootstrap`);
+    assert.ok(c.args.includes('watch this'), `${name} carries the prompt on argv`);
+    assert.ok(!text.includes('Follow the instructions'), `${name} drops the base-prompt wrapper`);
     assert.equal(c.stdinPayload, undefined, `${name} sends nothing on stdin`);
   }
-  assert.equal(expected[3][1].args[expected[3][1].args.length - 1], 'watch this', 'codex sends the prompt as the positional');
 });
 
 test('codex parser: thread, items, turn.completed → result with last message; turn.failed → error result', () => {
@@ -211,13 +199,13 @@ test('codex parser: thread, items, turn.completed → result with last message; 
   assert.ok(q.hints().errorTexts[0].includes('usage limit'));
 });
 
-test('codex buildCommand: full bypass by default, sandbox in safe mode, resume subcommand, prompt on stdin', () => {
+test('codex buildCommand: full bypass by default, sandbox in safe mode, resume subcommand, prompt inline', () => {
   const c = codexProvider.buildCommand(opts({ model: 'o3' }));
   assert.deepEqual(c.args.slice(0, 2), ['exec', '--json']);
   assert.ok(c.args.includes('--dangerously-bypass-approvals-and-sandbox'));
   assert.ok(c.args.join(' ').includes('--cd /proj'));
-  assert.equal(c.args[c.args.length - 1], '-');
-  assert.equal(c.stdinPayload, 'do it');
+  assert.equal(c.args[c.args.length - 1], 'do it');
+  assert.equal(c.stdinPayload, undefined);
   const s = codexProvider.buildCommand(opts({ autoApprove: false, resumeId: 'th1' }));
   assert.deepEqual(s.args.slice(0, 3), ['exec', 'resume', 'th1']);
   assert.ok(s.args.join(' ').includes('--sandbox workspace-write'));
@@ -228,8 +216,8 @@ test('codex buildCommand: full bypass by default, sandbox in safe mode, resume s
   assert.ok(!ro.args.join(' ').includes('workspace-write'));
   assert.ok(!ro.args.includes('--dangerously-bypass-approvals-and-sandbox'));
   const big = codexProvider.buildCommand(opts({ prompt: 'x'.repeat(9000) }));
-  assert.equal(big.args[big.args.length - 1], '-');
-  assert.equal(big.stdinPayload?.length, 9000);
+  assert.equal(big.args[big.args.length - 1].length, 9000, 'even a large prompt rides on argv');
+  assert.equal(big.stdinPayload, undefined);
 });
 
 test('generic parser: gemini-style stats models fold into hints usage', () => {
@@ -241,11 +229,6 @@ test('generic parser: gemini-style stats models fold into hints usage', () => {
   q.parse('just text');
   q.parse(j({ type: 'result', subtype: 'success', response: 'done' }));
   assert.equal(q.hints().usage, undefined);
-});
-
-test('prompt channels: bootstrap names the prompt file, never the payload', () => {
-  assert.ok(fileBootstrap('/tmp/x.prompt.md').includes('/tmp/x.prompt.md'));
-  assert.ok(ATTACHED_BOOTSTRAP.length > 0);
 });
 
 test('variant args: every provider with an effort knob gets its own flag, and only when set', () => {

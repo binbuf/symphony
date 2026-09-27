@@ -1,4 +1,3 @@
-import { fileBootstrap } from './common.js';
 import { GenericParser } from './generic.js';
 import type { Provider } from './types.js';
 
@@ -20,7 +19,7 @@ export const antigravityProvider: Provider = {
     if (o.model) args.push('--model', o.model);
     // Antigravity's session reasoning effort: low | medium | high.
     if (o.variant) args.push('--effort', o.variant);
-    args.push(...o.extraArgs, o.inlinePrompt ? o.prompt : fileBootstrap(o.promptFile));
+    args.push(...o.extraArgs, o.prompt);
     return { bin: o.bin, args };
   },
   createParser: () => new GenericParser(),

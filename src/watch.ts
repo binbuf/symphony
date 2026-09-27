@@ -181,7 +181,7 @@ async function oneCheck(ctx: RunContext, spec: SessionSpec, provider: Provider):
   const cmd = provider.buildCommand({
     bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: WATCH_TASK_ID, attempt: 1, kind: 'task',
     model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, readOnly: spec.readOnly,
-    inlinePrompt: true, extraArgs: [...spec.extraArgs, ...(mcp?.args ?? [])], cwd: ctx.paths.root,
+    extraArgs: [...spec.extraArgs, ...(mcp?.args ?? [])], cwd: ctx.paths.root,
   });
   if (mcp?.env) cmd.env = { ...(cmd.env ?? {}), ...mcp.env };
   if (mcp) ctx.log.info(`${WATCH_TASK_ID}: ${mcp.label}`);

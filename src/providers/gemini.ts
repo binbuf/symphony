@@ -1,11 +1,10 @@
-import { fileBootstrap } from './common.js';
 import { GenericParser } from './generic.js';
 import type { Provider } from './types.js';
 
 /**
  * Google Gemini CLI (`gemini`). Non-interactive with `-p/--prompt`; `--yolo` bypasses approval
- * prompts. Output is parsed best-effort (see GenericParser); the prompt is written to a file by the
- * runner and argv carries only a short bootstrap that names it (never the payload).
+ * prompts. Output is parsed best-effort (see GenericParser); the prompt is passed to `--prompt`
+ * directly (the runner also keeps an auditable copy on disk).
  */
 export const geminiProvider: Provider = {
   name: 'gemini',
@@ -18,7 +17,7 @@ export const geminiProvider: Provider = {
     if (o.model) args.push('--model', o.model);
     if (o.autoApprove) args.push('--yolo');
     args.push(...o.extraArgs);
-    args.push('--prompt', o.inlinePrompt ? o.prompt : fileBootstrap(o.promptFile));
+    args.push('--prompt', o.prompt);
     return { bin: o.bin, args };
   },
   createParser: () => new GenericParser(),

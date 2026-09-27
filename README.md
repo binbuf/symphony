@@ -525,12 +525,12 @@ token usage next to cost, so the saving stays measurable per task.
 
 | provider | binary | how it is launched | bypass flag (default) | `--safe` |
 |---|---|---|---|---|
-| `claude` | `claude` | `-p --output-format stream-json --verbose`, prompt on stdin | `--dangerously-skip-permissions` | `--permission-mode acceptEdits --permission-prompts none` |
-| `cursor` | `agent` | `-p --output-format stream-json --workspace <root> --trust` + prompt-file bootstrap | `--force` | no `--force` |
-| `opencode` | `opencode` | `run --format json --thinking <bootstrap> --file <prompt>` | `--auto` | no `--auto` |
-| `codex` | `codex` | `exec --json --color never --skip-git-repo-check --cd <root> -`, prompt on stdin | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write --ask-for-approval never` |
-| `gemini` | `gemini` | `--output-format json --prompt <bootstrap>` (prompt-file) | `--yolo` | no `--yolo` |
-| `antigravity` | `agy` | `-p --output-format json --workspace <root>` + prompt-file bootstrap | `--dangerously-skip-permissions` | no bypass flag |
+| `claude` | `claude` | `-p <prompt> --output-format stream-json --verbose` (prompt inline on argv) | `--dangerously-skip-permissions` | `--permission-mode acceptEdits --permission-prompts none` |
+| `cursor` | `agent` | `-p --output-format stream-json --workspace <root> --trust` + `<prompt>` positional | `--force` | no `--force` |
+| `opencode` | `opencode` | `run --format json --thinking <prompt>` (prompt inline as the trailing positional) | `--auto` | no `--auto` |
+| `codex` | `codex` | `exec --json --color never --skip-git-repo-check --cd <root> <prompt>` (prompt inline on argv) | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write --ask-for-approval never` |
+| `gemini` | `gemini` | `--output-format json --prompt <prompt>` (prompt inline on argv) | `--yolo` | no `--yolo` |
+| `antigravity` | `agy` | `-p --output-format json --workspace <root>` + `<prompt>` positional | `--dangerously-skip-permissions` | no bypass flag |
 | `fake` | node | replays an NDJSON fixture; for tests | | |
 
 - **Read-only sessions:** the pipeline watcher runs pinned to `autoApprove: false` and `readOnly: true`, so it can read the log file the prompt names but not edit the tree. Where the CLI supports it the adapter maps that to a read-only mode: `claude` gets `--allowedTools Read` with the write/shell tools listed on `--disallowedTools`, and `codex` runs `--sandbox read-only`. The others rely on their default, where reads are permitted and writes are not auto-approved.
@@ -542,7 +542,7 @@ token usage next to cost, so the saving stays measurable per task.
 - **Session resume** for retries and nudges uses `--resume` (Claude, Cursor), `--session` (OpenCode) and `exec resume <id>` (Codex); Gemini and Antigravity do not advertise resume, so retries start fresh.
 - **Cost** is surfaced for Claude (per session) and OpenCode (cumulative); `--budget` is Claude-only. Codex reports token usage instead.
 - **Correcting an adapter:** each provider's argv can be adjusted for your install with `providers.<name>.extraArgs`; unknown stream shapes are parsed best-effort.
-- **Prompt size:** prompts are always written to a file first; providers get them over stdin, as an attached file, or via a short bootstrap that names the file, so OS command-line limits are never a problem.
+- **Prompt delivery:** every prompt is passed to the CLI as inline text (no `--file`, no read-the-file bootstrap, no stdin wrapper), which keeps the model's instructions undiluted. Each session is still written to an auditable prompt file under `.symphony/runs/` first. Because the prompt rides on argv, keep an eye on OS command-line limits if you generate very large task briefings.
 
 ## Escalation
 
