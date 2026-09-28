@@ -14,6 +14,7 @@ import { buildStatusTable } from '../src/status.js';
 import type { Task } from '../src/tasks.js';
 import { TuiApp } from '../src/tui/app.js';
 import { runWithResume, runWithTui } from '../src/tui/index.js';
+import type { TuiModel } from '../src/tui/model.js';
 import { KeyParser, type Key, type MouseButton, type MouseKey } from '../src/tui/keys.js';
 import { AnsiTerminal } from '../src/tui/terminal.js';
 import { displayWidth, fit, padTo, sanitizeLine, sliceColumns, splice, stripAnsi, wrapColumns, wrapText } from '../src/tui/text.js';
@@ -303,6 +304,46 @@ test('TuiApp: P opens the pause menu for asap, the next boundary, or the selecte
   press('P');
   press('2');
   assert.equal(stopPresent(ctx.paths), false, '2 again resumes by clearing it');
+});
+
+test('TuiApp: an attach quit offers detach or stopping the harness itself', () => {
+  const tasks = [task('T01', 1)];
+  const state: State = { version: 1, tasks: { T01: { ...newTaskState('t1'), status: 'running' } } };
+  let stopped = 0;
+  let left = 0;
+  const log: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner() {} };
+  const model = {
+    tasks, state, config: { provider: 'fake' }, paths: resolvePaths(mkdtempSync(join(tmpdir(), 'symphony-attach-quit-'))),
+    log, detachOnQuit: true, tickMs: 300, isLive: () => true, poll() {}, takeOutput: () => '',
+    accept() {}, clearHalt() {}, requestSplit() {}, setPauseAt() {}, requestWrapUp() {},
+    stopPresent: () => false, placeStop() {}, clearStop() {}, refreshWatch() {},
+    quit() {}, stopHarness() { stopped += 1; },
+  } as unknown as TuiModel;
+  const app = new TuiApp(model, new AnsiTerminal(() => {}));
+  app.onQuit = () => { left += 1; };
+  const priv = app as unknown as { handleKey(k: Key): void; dialog?: { choices?: Array<{ key: string }> } };
+  const press = (char: string) => priv.handleKey({ type: 'char', char });
+
+  // q opens the two-way dialog rather than detaching immediately.
+  press('q');
+  assert.equal(priv.dialog?.choices?.length, 4, 'detach and stop are both offered');
+  // Esc stays attached: nothing is left or stopped.
+  priv.handleKey({ type: 'key', name: 'escape' });
+  assert.equal(priv.dialog, undefined);
+  assert.equal(left, 0);
+  assert.equal(stopped, 0);
+
+  // 1 = detach: leave the view, leave the harness running.
+  press('q');
+  press('1');
+  assert.equal(left, 1);
+  assert.equal(stopped, 0);
+
+  // 2 = stop the harness: ask the daemon to stop, then leave the view.
+  press('q');
+  press('2');
+  assert.equal(left, 2);
+  assert.equal(stopped, 1);
 });
 
 test('TuiApp: the current task row is forest green while running and red when halted on failure', () => {

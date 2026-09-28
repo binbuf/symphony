@@ -192,3 +192,41 @@ test('runWithDaemon: a wrap-up request stops the session, closes the task out an
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
 });
+
+test('an attach client can stop the harness through the control channel', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-daemon-attach-stop-'));
+  gitInit(dir);
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.tasksDir, { recursive: true });
+  writeFileSync(paths.roadmap, '# R\n\n## Phase 1\n\n- [ ] T01 — One → [tasks/01-one.md](tasks/01-one.md)\n- [ ] T02 — Two → [tasks/02-two.md](tasks/02-two.md)\n');
+  writeFileSync(join(paths.tasksDir, '01-one.md'), '# T01 — One\n\n## Goal\nx\n');
+  writeFileSync(join(paths.tasksDir, '02-two.md'), '# T02 — Two\n\n## Goal\ny\n');
+  writeFileSync(paths.progress, '# Progress\n');
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  writeFileSync(join(fixtures, 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'fake_sleep', ms: 2000 }),
+    result('done', 'should have been stopped'),
+  ].join('\n') + '\n');
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+
+  const log: Logger = { ...silent, info() {}, warn() {} };
+  const loaded = loadProject(paths, silent);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 3, watch: { ...DEFAULTS.watch, enabled: false } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log, roadmap: loaded.roadmap, tasks: loaded.tasks, state: loaded.state, interrupted: false, abort: new AbortController() };
+  const model = new RemoteTuiModel({ paths, config: { provider: 'fake' }, log: silent });
+  try {
+    const run = runWithDaemon(ctx, () => runCommand(ctx));
+    // Wait until the daemon owns the lock and the view sees it as live.
+    for (let i = 0; i < 60 && !model.isLive(); i += 1) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(model.isLive(), 'the daemon is live before we ask it to stop');
+    model.stopHarness();
+    const code = await run;
+    assert.equal(code, 143, 'the harness stops the run instead of finishing it');
+    assert.equal(ctx.state.tasks.T01.status, 'running', 'the stopped task is recorded unfinished');
+    assert.equal(ctx.state.tasks.T02?.status ?? 'pending', 'pending', 'T02 never ran');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});

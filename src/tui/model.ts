@@ -59,6 +59,8 @@ export interface TuiModel {
   refreshWatch(): void;
   /** Quit the view. For a local run this stops the session; for attach it just detaches. */
   quit(): void;
+  /** Stop the backing harness itself (the daemon), not just the view. */
+  stopHarness(): void;
 }
 
 /** True when the value is a live run context rather than an already-built model. */
@@ -118,6 +120,7 @@ export class LocalTuiModel implements TuiModel {
     this.ctx.abort.abort();
     this.ctx.active?.kill('interrupt');
   }
+  stopHarness(): void { this.quit(); }
 }
 
 export interface RemoteModelOptions {
@@ -270,6 +273,11 @@ export class RemoteTuiModel implements TuiModel {
   }
 
   quit(): void { /* attach only detaches */ }
+
+  stopHarness(): void {
+    if (!this.isLive()) return;
+    dispatchControl(this.paths, 'stop');
+  }
 
   private refreshState(): void {
     try { this.state = loadState(this.paths); } catch { /* keep the last good state */ }

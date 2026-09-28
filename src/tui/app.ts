@@ -416,32 +416,57 @@ export class TuiApp {
   }
 
   private openQuit(): void {
-    const attached = this.model.detachOnQuit;
+    if (this.model.detachOnQuit) return this.openAttachQuit();
     this.dialog = {
-      title: attached ? 'Detach from the run?' : 'Quit symphony run?',
-      lines: attached
-        ? [
-            'The harness keeps running in the background; you can',
-            're-attach later with `symphony attach`. Stop it with',
-            '`symphony stop`.',
-            '',
-            'y / Enter  detach now      n / Esc  stay attached',
-          ]
-        : [
-            'The current session is stopped and recorded unfinished,',
-            'exactly like pressing Ctrl-C. The task is retried next run.',
-            '',
-            'y / Enter  quit now        n / Esc  keep running',
-          ],
+      title: 'Quit symphony run?',
+      lines: [
+        'The current session is stopped and recorded unfinished,',
+        'exactly like pressing Ctrl-C. The task is retried next run.',
+        '',
+        'y / Enter  quit now        n / Esc  keep running',
+      ],
       confirm: () => {
         this.quitRequested = true;
         this.model.quit();
-        if (attached) { this.onQuit?.(); return; }
         if (this.haltResolve) { this.resolveHalt('quit'); return; }
         this.toast('quitting: stopping the current session…');
       },
     };
     this.render();
+  }
+
+  /**
+   * An attach client (`symphony attach`) can either leave the view and let the daemon keep running,
+   * or stop the harness itself — asking the daemon to quit and closing this view with it.
+   */
+  private openAttachQuit(): void {
+    this.dialog = {
+      title: 'Detach, or stop the harness?',
+      lines: [
+        'detach   leave this view; the harness keeps running in the',
+        '         background — re-attach later with `symphony attach`',
+        'stop     quit the harness now: stop the run and close this view',
+        '',
+        '1 / d  detach       2 / s  stop the harness       Esc  stay attached',
+      ],
+      choices: [
+        { key: '1', run: () => this.leaveAttached(false) },
+        { key: 'd', run: () => this.leaveAttached(false) },
+        { key: '2', run: () => this.leaveAttached(true) },
+        { key: 's', run: () => this.leaveAttached(true) },
+      ],
+    };
+    this.render();
+  }
+
+  /** Leave an attached view, optionally stopping the daemon first, then let the wrapper tear down. */
+  private leaveAttached(stopHarness: boolean): void {
+    this.quitRequested = true;
+    if (stopHarness) {
+      this.model.stopHarness();
+      this.toast('stopping the harness…');
+    }
+    this.onQuit?.();
   }
 
   private openAccept(): void {
