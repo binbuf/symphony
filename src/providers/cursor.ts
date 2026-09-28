@@ -1,5 +1,5 @@
 import { isRecord, num, str } from '../util.js';
-import { hintFromInput, newHints, toText, tryJson, usageFrom } from './common.js';
+import { hintFromInput, newHints, promptFileHint, promptOverflowsArgv, toText, tryJson, usageFrom } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
 
 /** Cursor CLI `agent -p --output-format stream-json`. */
@@ -82,7 +82,7 @@ export const cursorProvider: Provider = {
     if (o.resumeId) args.push('--resume', o.resumeId);
     if (o.model) args.push('--model', o.model);
     if (o.autoApprove) args.push('--force');
-    args.push(...o.extraArgs, o.prompt);
+    args.push(...o.extraArgs, promptOverflowsArgv(o) ? promptFileHint(o.promptFile) : o.prompt);
     return { bin: o.bin, args };
   },
   createParser: () => new CursorParser(),

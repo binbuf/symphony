@@ -561,7 +561,7 @@ token usage next to cost, so the saving stays measurable per task.
 - **Session resume** for retries and nudges uses `--resume` (Claude, Cursor), `--session` (OpenCode) and `exec resume <id>` (Codex); Gemini and Antigravity do not advertise resume, so retries start fresh.
 - **Cost** is surfaced for Claude (per session) and OpenCode (cumulative); `--budget` is Claude-only. Codex reports token usage instead.
 - **Correcting an adapter:** each provider's argv can be adjusted for your install with `providers.<name>.extraArgs`; unknown stream shapes are parsed best-effort.
-- **Prompt delivery:** every prompt is passed to the CLI as inline text (no `--file`, no read-the-file bootstrap, no stdin wrapper), which keeps the model's instructions undiluted. Each session is still written to an auditable prompt file under `.symphony/runs/` first. Because the prompt rides on argv, keep an eye on OS command-line limits if you generate very large task briefings.
+- **Prompt delivery:** every prompt is passed to the CLI as inline text (no `--file`, no read-the-file bootstrap, no stdin wrapper), which keeps the model's instructions undiluted. Each session is still written to an auditable prompt file under `.symphony/runs/` first. A prompt large enough to overflow the command line is the one exception: on Windows an npm `.cmd`/`.bat` shim runs through `cmd.exe`, which caps the whole line near 8191 characters, so a prompt past ~6000 bytes is replaced by a short pointer to that auditable file — `opencode` attaches it with `--file`, `codex` reads it from stdin, and `claude`/`cursor`/`gemini`/`antigravity` name the path. Native `.exe` bins use CreateProcess's ~32 KB limit and stay inline.
 
 ## Escalation
 

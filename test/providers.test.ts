@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { antigravityProvider } from '../src/providers/antigravity.js';
 import { ClaudeParser, claudeProvider } from '../src/providers/claude.js';
 import { CodexParser, codexProvider } from '../src/providers/codex.js';
+import { ARGV_PROMPT_LIMIT, ATTACHED_PROMPT, promptFileHint, promptOverflowsArgv } from '../src/providers/common.js';
 import { CursorParser, cursorProvider } from '../src/providers/cursor.js';
 import { GenericParser } from '../src/providers/generic.js';
 import { geminiProvider } from '../src/providers/gemini.js';
@@ -171,6 +172,49 @@ test('every provider passes the prompt on argv with no base-prompt or file wrapp
     assert.ok(c.args.includes('watch this'), `${name} carries the prompt on argv`);
     assert.ok(!text.includes('Follow the instructions'), `${name} drops the base-prompt wrapper`);
     assert.equal(c.stdinPayload, undefined, `${name} sends nothing on stdin`);
+  }
+});
+
+test('prompt overflow predicate: only a Windows .cmd/.bat shim past the limit offloads', () => {
+  const big = 'x'.repeat(ARGV_PROMPT_LIMIT + 1);
+  const atLimit = 'x'.repeat(ARGV_PROMPT_LIMIT);
+  // Wrong platform, a native .exe, or a prompt at/under the limit all stay inline.
+  assert.equal(promptOverflowsArgv({ bin: 'opencode.cmd', prompt: big, cwd: '/p' }, 'linux'), false);
+  assert.equal(promptOverflowsArgv({ bin: 'C:\\tools\\opencode.exe', prompt: big, cwd: '/p' }, 'win32'), false);
+  assert.equal(promptOverflowsArgv({ bin: 'C:\\tools\\opencode.cmd', prompt: atLimit, cwd: '/p' }, 'win32'), false);
+  assert.equal(promptOverflowsArgv({ bin: 'C:\\tools\\opencode.cmd', prompt: big, cwd: '/p' }, 'win32'), true);
+  assert.equal(promptOverflowsArgv({ bin: 'C:\\tools\\opencode.bat', prompt: big, cwd: '/p' }, 'win32'), true);
+  // The limit is bytes, not UTF-16 code units, so a multibyte prompt past it offloads.
+  assert.equal(promptOverflowsArgv({ bin: 'C:\\tools\\opencode.cmd', prompt: 'é'.repeat(ARGV_PROMPT_LIMIT), cwd: '/p' }, 'win32'), true);
+});
+
+test('an oversized prompt offloads to the runner prompt file for a Windows .cmd shim', { skip: process.platform !== 'win32' }, () => {
+  const big = 'x'.repeat(ARGV_PROMPT_LIMIT + 1);
+  const shim = { bin: 'opencode.cmd', cwd: '/proj' };
+
+  // opencode attaches the file; the pointer must precede `--file` (an array flag).
+  const oc = opencodeProvider.buildCommand(opts({ ...shim, prompt: big }));
+  assert.deepEqual(oc.args.slice(-3), [ATTACHED_PROMPT, '--file', '/tmp/p.md']);
+  assert.ok(!oc.args.includes(big), 'opencode keeps the payload off argv');
+  assert.equal(oc.stdinPayload, undefined);
+
+  // codex reads the prompt from stdin (`-`); claude names the file on `-p`.
+  const cd = codexProvider.buildCommand(opts({ ...shim, prompt: big }));
+  assert.equal(cd.args[cd.args.length - 1], '-');
+  assert.equal(cd.stdinPayload, big);
+  const cl = claudeProvider.buildCommand(opts({ ...shim, prompt: big }));
+  assert.deepEqual(cl.args.slice(0, 2), ['-p', promptFileHint('/tmp/p.md')]);
+  assert.ok(!cl.args.includes(big));
+
+  // cursor/gemini/antigravity have no attach flag, so the message names the path.
+  const others = [
+    ['cursor', cursorProvider.buildCommand(opts({ ...shim, prompt: big }))],
+    ['gemini', geminiProvider.buildCommand(opts({ ...shim, prompt: big }))],
+    ['antigravity', antigravityProvider.buildCommand(opts({ ...shim, prompt: big }))],
+  ] as const;
+  for (const [name, c] of others) {
+    assert.ok(c.args.includes(promptFileHint('/tmp/p.md')), `${name} names the prompt file`);
+    assert.ok(!c.args.includes(big), `${name} keeps the payload off argv`);
   }
 });
 

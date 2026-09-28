@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { resolveSpawn } from '../spawn.js';
 import { isRecord, bool, num, str } from '../util.js';
-import { addUsage, compactUsage, hintFromInput, newHints, sumCounts, toText, tryJson } from './common.js';
+import { ATTACHED_PROMPT, addUsage, compactUsage, hintFromInput, newHints, promptOverflowsArgv, sumCounts, toText, tryJson } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
 
 /**
@@ -235,9 +235,16 @@ export const opencodeProvider: Provider = {
     if (o.autoApprove) args.push('--auto');
     // A read-only session (the watcher) is the default here: without `--auto`, reads are permitted
     // and edits/shell commands need approval nobody can give, so it can read the named log only.
-    // The prompt is passed as the trailing positional (never `--file` + a read-the-file bootstrap:
-    // that wrapper measurably dulls the model's answer). The runner still writes an auditable copy.
-    args.push(...o.extraArgs, o.prompt);
+    // The prompt is normally the trailing positional (never `--file` + a read-the-file bootstrap:
+    // that wrapper measurably dulls the model's answer). It leaves argv only when a Windows `.cmd`
+    // shim would otherwise overflow cmd.exe; then the runner's audit copy is attached instead.
+    if (promptOverflowsArgv(o)) {
+      // `--file` is an array flag that would swallow a following positional, so the pointer comes
+      // first and `--file` last.
+      args.push(...o.extraArgs, ATTACHED_PROMPT, '--file', o.promptFile);
+    } else {
+      args.push(...o.extraArgs, o.prompt);
+    }
     return { bin: o.bin, args };
   },
   createParser: () => new OpenCodeParser(),

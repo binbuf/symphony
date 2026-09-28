@@ -1,3 +1,4 @@
+import { promptFileHint, promptOverflowsArgv } from './common.js';
 import { GenericParser } from './generic.js';
 import type { Provider } from './types.js';
 
@@ -17,7 +18,7 @@ export const geminiProvider: Provider = {
     if (o.model) args.push('--model', o.model);
     if (o.autoApprove) args.push('--yolo');
     args.push(...o.extraArgs);
-    args.push('--prompt', o.prompt);
+    args.push('--prompt', promptOverflowsArgv(o) ? promptFileHint(o.promptFile) : o.prompt);
     return { bin: o.bin, args };
   },
   createParser: () => new GenericParser(),

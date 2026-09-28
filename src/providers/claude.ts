@@ -1,5 +1,5 @@
 import { isRecord, num, str } from '../util.js';
-import { compactUsage, hintFromInput, newHints, sumCounts, toText, tryJson } from './common.js';
+import { compactUsage, hintFromInput, newHints, promptFileHint, promptOverflowsArgv, sumCounts, toText, tryJson } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider, TokenUsage } from './types.js';
 
 /**
@@ -97,8 +97,11 @@ export const claudeProvider: Provider = {
   supportsMcp: true,
   authCheckArgs: ['auth', 'status'],
   buildCommand(o) {
-    // The prompt is the positional argument after `-p`; no stdin and no base-prompt wrapper.
-    const args = ['-p', o.prompt, '--output-format', 'stream-json', '--verbose'];
+    // The prompt is the argument after `-p`; no stdin and no base-prompt wrapper. It only leaves
+    // argv when a Windows `.cmd` shim would overflow cmd.exe, when the file the runner already
+    // wrote is named instead.
+    const prompt = promptOverflowsArgv(o) ? promptFileHint(o.promptFile) : o.prompt;
+    const args = ['-p', prompt, '--output-format', 'stream-json', '--verbose'];
     if (o.resumeId) args.push('--resume', o.resumeId);
     if (o.model) args.push('--model', o.model);
     // Claude Code's session effort knob: low | medium | high | xhigh | max.

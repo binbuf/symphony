@@ -1,5 +1,5 @@
-import { isRecord, num, squash, str } from '../util.js';
-import type { ClassifyHints, TokenUsage } from './types.js';
+import { isRecord, num, resolveBinary, squash, str } from '../util.js';
+import type { BuildCommandOpts, ClassifyHints, TokenUsage } from './types.js';
 
 export function tryJson(line: string): unknown {
   try { return JSON.parse(line); } catch { return undefined; }
@@ -102,4 +102,44 @@ export function usageFrom(record: unknown): TokenUsage | undefined {
     }));
   }
   return agg;
+}
+
+/**
+ * Replacing an oversized prompt: the full text stays in `promptFile` (the runner writes it before
+ * the adapter builds its command), so argv carries only a pointer. For a CLI that can attach the
+ * file this is the whole message; otherwise it also names the path. Kept deliberately terse — a
+ * chatty wrapper measurably dilutes the model's answer (see the inline-first decision in the
+ * provider adapters).
+ */
+export const ATTACHED_PROMPT = 'Read attached prompt.';
+
+/** The prompt-file pointer for CLIs with no attach flag: they get the path in the message itself. */
+export function promptFileHint(promptFile: string): string {
+  return `Read ${promptFile}`;
+}
+
+/**
+ * Byte size at which a prompt is assumed to overflow a `cmd.exe` command line. cmd.exe caps the
+ * whole line at ~8191 chars; escaping (quote-wrapping and `^`-prefixing every meta character) and
+ * the provider's flags add overhead, so 6000 bytes of prompt leaves headroom. Only ever consulted
+ * for a Windows `.cmd`/`.bat` shim: a native `.exe` uses CreateProcess's ~32 KB limit instead.
+ */
+export const ARGV_PROMPT_LIMIT = 6000;
+
+/**
+ * Whether `bin` resolves to a Windows `.cmd`/`.bat` shim, which `resolveSpawn` launches through
+ * cmd.exe. A bare configured name is resolved on PATH so the npm-install case (`opencode` →
+ * `…\node_modules\.bin\opencode.cmd`) is caught; a native `.exe` is not.
+ */
+export function isCmdShim(bin: string, cwd?: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'win32') return false;
+  return /\.(?:cmd|bat)$/i.test(resolveBinary(bin, { cwd }));
+}
+
+/**
+ * Whether this prompt must leave argv for the session to launch. Only a cmd.exe shim can overflow
+ * (native binaries get ~32 KB), and only past `ARGV_PROMPT_LIMIT`, so ordinary prompts stay inline.
+ */
+export function promptOverflowsArgv(o: Pick<BuildCommandOpts, 'bin' | 'prompt' | 'cwd'>, platform: NodeJS.Platform = process.platform): boolean {
+  return Buffer.byteLength(o.prompt, 'utf8') > ARGV_PROMPT_LIMIT && isCmdShim(o.bin, o.cwd, platform);
 }

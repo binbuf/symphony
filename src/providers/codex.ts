@@ -1,5 +1,5 @@
 import { isRecord, num, str } from '../util.js';
-import { hintFromInput, newHints, toText, tryJson, usageFrom, addUsage } from './common.js';
+import { hintFromInput, newHints, promptOverflowsArgv, toText, tryJson, usageFrom, addUsage } from './common.js';
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
 
 /**
@@ -135,7 +135,12 @@ export const codexProvider: Provider = {
     else if (o.autoApprove) args.push('--dangerously-bypass-approvals-and-sandbox');
     else args.push('--sandbox', 'workspace-write', '--ask-for-approval', 'never');
     args.push(...o.extraArgs);
-    // The prompt is the trailing positional (no `-`/stdin and no bootstrap wrapper).
+    // The prompt is normally the trailing positional (no `-`/stdin and no bootstrap wrapper). When
+    // a Windows `.cmd` shim would overflow cmd.exe it goes over stdin instead: `-` reads it there.
+    if (promptOverflowsArgv(o)) {
+      args.push('-');
+      return { bin: o.bin, args, stdinPayload: o.prompt };
+    }
     args.push(o.prompt);
     return { bin: o.bin, args };
   },
