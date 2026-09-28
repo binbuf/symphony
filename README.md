@@ -151,6 +151,24 @@ docs/
 7. **Commits everything** with `git add -A && git commit -m "T01: <title> [<status>]"` (template configurable). Before staging, an ephemeral-file guard keeps secrets and build junk out of the commit by adding them to `.gitignore` — agent-created source files still land. A failed commit is retried once; if it still fails the task is demoted to `failed` rather than recorded `done`, because its work is not in git. Commits also refuse to run if a session switched branches (`HEAD` is checked against the branch the run started on).
 8. **Starts the next task in a new session.** Each session is also instructed to append a `## Txx` section to `PROGRESS.md`, fill the task file's `## Hand-off`, run the named tests in the foreground, and update the design docs/ADRs its work touched.
 
+### Keeping task prompts small
+
+The task body and execution rules are always included in a first task session. Completed-task status is summarized as counts; the roadmap holds the full list. The result format comes last, after any inlined context. Fresh continuation sessions read the task and its Hand-off from disk and retain the same scope, verification, Git and documentation rules.
+
+For existing deployments, check `.symphony/symphony.config.json`: upgrades preserve that file, so old inlining settings can still produce large prompts even though current defaults are lean. Use:
+
+```json
+{
+  "maxProgressBytes": 0,
+  "inlineDesignDocs": false,
+  "maxIndexBytes": 0
+}
+```
+
+These settings leave the notebook, design docs and generated index available for the agent to read as needed. `progressDigest` and `repoMap` can stay enabled. Inspect the exact prompt with `run --dry-run` or in the saved `.symphony/runs/*.prompt.md` files.
+
+When you opt into inlining, `maxProgressBytes` covers the entire progress body, including the digest, recent-section headings and omission notices. Recent facts are included once; the digest summarizes older sections and uses at most half the budget, up to 8 KB. `maxIndexBytes` applies equally to saved and dry-run indexes, and `maxTaskBytes` includes its truncation notice. Block delimiters and execution rules sit outside those individual content budgets. A truncated task explicitly requires reading the full file before implementation; truncated design docs name their full paths.
+
 ### The run view (TUI)
 
 When `run` starts with stdout **and** stdin attached to a terminal, it opens a full-screen view instead of scrolling output:
@@ -824,8 +842,8 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `nudge`, `nudgeTimeoutMin` | `true`, `45` | resume once to collect a missing result block |
 | `timeoutMin`, `idleTimeoutMin` | `240`, `20` | max wall clock per session; kill after this long with no output |
 | `prepareTimeoutMin` | `60` | wall clock for the `prepare` session |
-| `maxProgressBytes` | `0` | byte cap for `PROGRESS.md` content inlined into each prompt; `0` inlines nothing and points the session at the file |
-| `progressDigest` | `true` | maintain a generated "Key facts" digest at the top of `PROGRESS.md` (inlined only when `maxProgressBytes > 0`) |
+| `maxProgressBytes` | `0` | total byte cap for inlined progress, including digest, recent headings and notices; `0` points at the file |
+| `progressDigest` | `true` | maintain a generated "Key facts" digest at the top of `PROGRESS.md`; inlined prompts summarize older sections without repeating recent facts |
 | `inlineDesignDocs` | `false` | inline the design docs a task names, not just point at `docs/design/` |
 | `repoMap` | `true` | generate `docs/INDEX.md` (design-doc summaries + a source map) before each task |
 | `maxIndexBytes` | `0` | byte cap for the project index inlined into each prompt; `0` inlines nothing and points the session at `docs/INDEX.md` |

@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import { docsContract } from '../src/contract.js';
 import type { LintReport } from '../src/lint.js';
 import { resolvePaths, type Paths } from '../src/paths.js';
-import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, buildWrapUpPrompt, type PromptCtx } from '../src/prompt.js';
+import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, buildWrapUpPrompt, taskFileBody, type PromptCtx } from '../src/prompt.js';
 import { buildPreparePrompt } from '../src/prepare.js';
 import type { RunContext } from '../src/runner.js';
 import type { State } from '../src/state.js';
@@ -77,12 +77,62 @@ test('buildTaskPrompt points at files by path and inlines only the task by defau
 
 test('the full profile inlines PROGRESS, the named design docs and the index', () => {
   const { ctx } = fixture();
+  writeFileSync(ctx.paths.progress, '# Progress\n\n' + Array.from({ length: 5 }, (_, i) => `## T0${i + 1}\n- fact ${i + 1}`).join('\n\n'));
   const text = buildTaskPrompt({ ...ctx, maxProgressBytes: 4096, inlineDesignDocs: true, maxIndexBytes: 16384 });
   assert.match(text, /--- PROGRESS \(docs\/PROGRESS\.md\) ---/);
   assert.match(text, /Key facts \(maintained by symphony/);
   assert.match(text, /--- DESIGN DOCS NAMED BY THIS TASK ---/);
   assert.match(text, /### docs\/design\/overview\.md/);
   assert.match(text, /--- PROJECT INDEX \(docs\/INDEX\.md\) ---/);
+  assert.ok(text.trimEnd().endsWith('END_SYMPHONY_RESULT'), 'the result contract follows all context');
+});
+
+test('execution rules remain bounded as the roadmap grows', () => {
+  const { ctx } = fixture();
+  const small = buildTaskPrompt(ctx);
+  const tasks = Array.from({ length: 2000 }, (_, i) => ({ ...ctx.task, id: `T${i + 1}`, order: i }));
+  const state: State = { version: 1, tasks: Object.fromEntries(tasks.map((t) => [t.id, { ...ctx.state.tasks.T01, status: 'done' }])) };
+  const large = buildTaskPrompt({ ...ctx, tasks, state });
+  assert.match(large, /Progress: 2000 completed/);
+  assert.doesNotMatch(large, /T1999/);
+  assert.ok(Buffer.byteLength(large) - Buffer.byteLength(small) < 100);
+  assert.ok(Buffer.byteLength(small) < 4000, 'keep the baseline execution contract compact');
+});
+
+test('fresh continuations retain execution rules without pasting context again', () => {
+  const { ctx } = fixture();
+  const text = buildContinuePrompt({ ...ctx, continuation: 2, lastError: 'verify failed', maxProgressBytes: 4096, maxIndexBytes: 4096, inlineDesignDocs: true });
+  assert.match(text, /Continuation 2 of T01/);
+  assert.match(text, /verify failed/);
+  assert.match(text, /Never push, switch branches/);
+  assert.match(text, /Update affected docs/);
+  assert.match(text, /Run the acceptance checks/);
+  assert.match(text, /Preserve other sections/);
+  assert.doesNotMatch(text, /--- TASK FILE|--- PROGRESS|--- DESIGN DOCS|--- PROJECT INDEX/);
+  assert.ok(text.trimEnd().endsWith('END_SYMPHONY_RESULT'));
+  assert.doesNotMatch(buildTaskPrompt({ ...ctx, designDocs: false }).split('--- TASK FILE')[0], /docs\/design/);
+});
+
+test('dry-run and saved index obey the same cap, including omission notices', () => {
+  const { ctx } = fixture();
+  const index = '# Project index\n' + '- `src/app.ts` — 描述 🥭\n'.repeat(300);
+  writeFileSync(ctx.paths.index, index);
+  const disk = buildTaskPrompt({ ...ctx, maxIndexBytes: 512 });
+  const preview = buildTaskPrompt({ ...ctx, maxIndexBytes: 512, indexBody: index });
+  assert.equal(preview, disk);
+  const body = /--- PROJECT INDEX \([^\n]+\) ---\n([\s\S]*?)\n--- END PROJECT INDEX ---/.exec(preview)![1];
+  assert.ok(Buffer.byteLength(body) <= 512);
+  assert.match(body, /read docs\/INDEX.md/);
+  assert.doesNotMatch(body, /�/);
+});
+
+test('task budget includes the full-file warning and preserves Unicode boundaries', () => {
+  const { ctx } = fixture();
+  writeFileSync(ctx.task.taskFile!, '# Goal\n' + '描述 🥭'.repeat(300));
+  const body = taskFileBody(ctx.task, 256)!;
+  assert.ok(Buffer.byteLength(body) <= 256);
+  assert.doesNotMatch(body, /�/);
+  assert.match(body, /read docs\/tasks\/01-first.md for the full text before implementing/);
 });
 
 test('docsContract renders the numbered rules, with design rules only when enabled', () => {

@@ -2,11 +2,11 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { readProgressContext, renderInlinedDocs, selectTaskDesignDocs } from './context.js';
 import { rel, type Paths } from './paths.js';
-import { readIndexCapped } from './repomap.js';
+import { capIndexBody, readIndexCapped } from './repomap.js';
 import { DONE_STATES, type State } from './state.js';
 import { parseFrontMatter, type Task } from './tasks.js';
 import { renderPrompt } from './templates.js';
-import { ensureDir, slugify } from './util.js';
+import { capUtf8, ensureDir, slugify } from './util.js';
 
 export interface PromptCtx {
   paths: Paths;
@@ -71,9 +71,7 @@ export function nextAdrNumber(adrDir: string): string {
 /** Keep the head of a long task file (Goal/Scope matter most) and say where the full file is. */
 function capTaskBody(text: string, maxBytes: number | undefined, displayName: string): string {
   if (!maxBytes || Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
-  const buf = Buffer.from(text, 'utf8');
-  const kb = (n: number): string => `${Math.round(n / 1024)} KB`;
-  return `${buf.subarray(0, maxBytes).toString('utf8')}\n\n[… task file truncated: showing the first ${kb(maxBytes)} of ${kb(buf.length)}; read ${displayName} for the full text …]`;
+  return capUtf8(text, maxBytes, `\n\n[… task file truncated: showing the first part; read ${displayName} for the full text before implementing …]`);
 }
 
 export function taskFileBody(task: Task, maxBytes?: number): string | undefined {
@@ -82,9 +80,8 @@ export function taskFileBody(task: Task, maxBytes?: number): string | undefined 
   return capTaskBody(body, maxBytes, task.taskFileRel ?? task.taskFile);
 }
 
-function ids(ctx: PromptCtx, pick: (status: string) => boolean): string {
-  const out = ctx.tasks.filter((t) => pick(ctx.state.tasks[t.id]?.status ?? 'pending')).map((t) => t.id);
-  return out.length ? out.join(', ') : '-';
+function countTasks(ctx: PromptCtx, pick: (status: string) => boolean): number {
+  return ctx.tasks.filter((t) => pick(ctx.state.tasks[t.id]?.status ?? 'pending')).length;
 }
 
 function docPaths(paths: Paths) {
@@ -104,36 +101,40 @@ function defaultTaskFileRel(paths: Paths, task: Task): string {
 }
 
 export function buildTaskPrompt(ctx: PromptCtx): string {
+  return buildExecutionPrompt(ctx, false);
+}
+
+/** Fresh continuations keep the execution contract but read their task and hand-off from disk. */
+function buildExecutionPrompt(ctx: PromptCtx, continuing: boolean): string {
   const { paths, task } = ctx;
   const d = docPaths(paths);
-  const body = taskFileBody(task, ctx.maxTaskBytes);
+  const body = continuing ? undefined : taskFileBody(task, ctx.maxTaskBytes);
   const taskFileRel = task.taskFileRel ?? defaultTaskFileRel(paths, task);
-  const noTaskFileNote = body === undefined
+  const noTaskFileNote = !task.taskFile && !continuing
     ? `- No task file exists for this task. The roadmap bullet is the entire specification. Before implementing, create ${taskFileRel} with Goal, Scope, Done when, and Hand-off sections, and put your understanding of the task there.\n`
     : '';
   const retryNote = ctx.lastError
-    ? `\nPrevious attempt of this task ended with: ${ctx.lastError}. The working tree may contain partial work from it: inspect \`git status\` and \`git log -3\` before continuing, and build on what is already there.\n`
+    ? `\nPrevious attempt failed: ${ctx.lastError}. Inspect \`git status\` and \`git log -3\`; build on partial work.\n`
     : '';
-  const continuationNote = ctx.continuation > 0
-    ? `\nThis is continuation session ${ctx.continuation} of ${task.id}: a previous session deliberately reported "continue" after finishing part of the task. Read the task's Hand-off and your own "## ${task.id}" section in ${d.progress}, inspect \`git status\` and \`git log -5\`, and do the next unfinished slice only. Do not redo completed work.\n`
+  const continuationNote = continuing || ctx.continuation > 0
+    ? `\nContinuation ${ctx.continuation} of ${task.id}: read ${taskFileRel} (especially Hand-off) and the "## ${task.id}" notes in ${d.progress}. Inspect \`git status\` and \`git log -5\`. Finish only the remaining scope; do not redo completed work.\n`
     : '';
 
   const steps: string[] = [
-    `Read the task file (inlined below)${ctx.designDocs ? ' and every Context or design doc it names' : ''}, then implement exactly its Scope. Out-of-scope items belong to other tasks: note them in the Hand-off instead of doing them.`,
-    'Keep the work verifiable. Write or update the unit/integration tests the task\'s "Done when" names, run them in the foreground, and paste the real command and result into the Hand-off. Do not claim done unless those tests actually pass; if the task names no tests, add at least one meaningful automated check that would fail if your change regressed.',
+    `Implement only this task's Scope. Read its Context${ctx.designDocs ? ' and referenced design docs' : ''} as needed. Put out-of-scope discoveries in Follow-ups. If the inlined task is truncated, read the full file before implementing.`,
+    'Run the acceptance checks and relevant tests in the foreground; record actual commands and results in Hand-off. Add meaningful regression coverage for changed behavior. Report done only when acceptance criteria are met and checks pass.',
   ];
   if (ctx.designDocs) {
-    steps.push(`Keep the design docs honest. If your change makes a ${d.design}/*.md doc untrue, update it in the same session; if a decision now constrains later tasks, add an ADR under ${d.adr}/ (next free number, Status / Context / Decision / Consequences, one page max) and list it in the Hand-off.`);
+    steps.push(`Update affected docs in ${d.design}/. Record decisions that constrain later tasks in ${d.adr}/NNNN-title.md (next free number; Status, Context, Decision, Consequences; one page max). List changed docs in Hand-off.`);
   }
   steps.push(
-    `If the task is too large for one session, do not rush or fake completion. Finish the largest coherent slice that leaves the tree green, record what remains under "## Hand-off" and in ${d.progress}, and report status "continue" (see the block below). The harness will start a fresh session to finish the rest; the next session reads your notes and continues. Only use "continue" when real, committed progress was made and a later session can pick it up.`,
-    'Only report "blocked" when a human decision or an external dependency genuinely stops you and no further useful work is possible. Before blocking, finish every part that does not depend on the human, and write precisely what is needed under "## Hand-off".',
-    `Git: when you finish, the harness runs \`git add -A && git commit -m "${task.id}: ${task.title} [<status>]"\` in the project root. You may also commit yourself with a message starting "${task.id}:". Never push, never amend or rebase commits you did not create, never switch branches.`,
-    `This is a single non-interactive session. The moment you end your turn the process exits, every background job you started is killed, and no notification can ever reach you. Never end a turn waiting on background work. Run long commands in the foreground (raise the tool timeout; split anything longer than about ten minutes into chunks). Write the Hand-off, the ${basename(paths.progress)} section, and the result block in that same final turn.`,
+    `Before finishing, fill "## Hand-off" in ${taskFileRel}: changes, deviations, check results, and exact remaining work or blockers. Append "## ${task.id} — ${task.title}" to ${d.progress} with reusable facts (paths, commands, gotchas). Preserve other sections; replace hand-off placeholders. Put follow-up tasks under "## Follow-ups" in ${d.progress}.`,
+    `Git: the harness stages and commits task changes. You may commit with a "${task.id}:" prefix. Never push, switch branches, or amend/rebase commits you did not create.`,
+    'Finish in this non-interactive session; nobody can answer questions. Ending your final turn exits the process; background work cannot notify you afterward. Run commands in the foreground, raise tool timeouts or split long commands into chunks, and write notes and the result before ending.',
   );
   const howTo = steps.map((s, i) => `${i + 1}. ${s}`).join('\n');
-  const finalStep = steps.length + 1;
-  const inlinedContext = inlineContextBlocks(ctx, paths, body, d);
+  const inlinedContext = continuing ? '' : inlineContextBlocks(ctx, paths, body, d);
+  const taskContext = continuing ? '' : `--- TASK FILE (${task.taskFileRel ?? 'none'}) ---\n${body ?? `(no task file — the roadmap bullet is the whole task: "${task.id} — ${task.title}")`}\n--- END TASK FILE ---\n`;
 
   const vars: Record<string, string | number> = {
     projectName: basename(paths.root),
@@ -151,22 +152,16 @@ export function buildTaskPrompt(ctx: PromptCtx): string {
     taskFile: task.taskFileRel ?? '(none)',
     attempt: ctx.attempt,
     continuation: ctx.continuation,
-    provider: ctx.providerName,
-    model: ctx.model ?? 'provider default',
-    variant: ctx.variant ?? 'provider default',
     progress: d.progress,
     logs: d.logs,
     index: d.index,
-    design: d.design,
-    adr: d.adr,
     noTaskFileNote,
-    doneIds: ids(ctx, (s) => (DONE_STATES as string[]).includes(s)),
-    blockedIds: ids(ctx, (s) => s === 'blocked' || s === 'failed'),
+    designPaths: ctx.designDocs ? `- ${d.design}/ and ${d.adr}/ — architecture and decisions.\n` : '',
+    doneCount: countTasks(ctx, (s) => (DONE_STATES as string[]).includes(s)),
+    blockedCount: countTasks(ctx, (s) => s === 'blocked' || s === 'failed'),
     howTo,
-    finalStep,
     inlinedContext,
-    taskFileForBlock: task.taskFileRel ?? 'none',
-    taskBody: body ?? `(no task file — the roadmap bullet is the whole task: "${task.id} — ${task.title}")`,
+    taskContext,
   };
   return renderPrompt('task.md', vars);
 }
@@ -186,11 +181,13 @@ function inlineContextBlocks(ctx: PromptCtx, paths: Paths, body: string | undefi
     blocks.push(`--- PROGRESS (${d.progress}) ---\n${progress}\n--- END PROGRESS ---`);
   }
   if (ctx.designDocs && ctx.inlineDesignDocs === true) {
-    const inlined = renderInlinedDocs(selectTaskDesignDocs(paths, body)).trim();
+    const inlined = renderInlinedDocs(selectTaskDesignDocs(paths, body, { taskFile: ctx.task.taskFile })).trim();
     if (inlined) blocks.push(inlined);
   }
   if ((ctx.maxIndexBytes ?? 0) > 0) {
-    const map = ctx.indexBody ?? readIndexCapped(paths.index, ctx.maxIndexBytes as number, d.index);
+    const map = ctx.indexBody === undefined
+      ? readIndexCapped(paths.index, ctx.maxIndexBytes as number, d.index)
+      : capIndexBody(ctx.indexBody, ctx.maxIndexBytes as number, d.index);
     blocks.push(`--- PROJECT INDEX (${d.index}) ---\n${map}\n--- END PROJECT INDEX ---`);
   }
   return blocks.length ? `\n${blocks.join('\n\n')}\n` : '';
@@ -217,23 +214,7 @@ function withNotes(text: string, ctx: PromptCtx): string {
 }
 
 export function buildContinuePrompt(ctx: PromptCtx): string {
-  const { paths, task } = ctx;
-  const d = docPaths(paths);
-  const rel0 = task.taskFileRel ?? defaultTaskFileRel(paths, task);
-  return withNotes(`This is a continuation session for ${task.id} — ${task.title}. A previous session completed part of this task and reported status "continue"; the harness has started you in a fresh session to finish it.
-
-Nobody can answer questions. Work only on what remains:
-1. Read ${rel0} (especially "## Hand-off"), the "## ${task.id}" section in ${d.progress}, and run \`git status\` and \`git log -5\` to see what already landed.
-2. Finish the remaining scope. Keep tests passing. Do not redo completed work.
-3. Update the "## Hand-off" and ${d.progress} to reflect the new state; if still unfinished, report "continue" again with what remains, otherwise "done".
-4. Run everything in the foreground and finish in this single turn.
-5. End your final message with exactly this block, as plain text, no code fence, nothing after it:
-
-SYMPHONY_RESULT
-status: <exactly one word: done, continue, blocked, or failed>
-summary: <one line>
-END_SYMPHONY_RESULT
-`, ctx);
+  return buildExecutionPrompt(ctx, true);
 }
 
 export function buildNudgePrompt(ctx: PromptCtx, extraNote?: string): string {

@@ -113,7 +113,7 @@ test('the prompt note names a launcher that matches the platform', () => {
   assert.equal(visionCommand(), process.platform === 'win32' ? String.raw`.\.symphony\symphony.cmd vision` : './.symphony/symphony vision');
   assert.match(visionPromptNote(), /Image analysis tool \(enabled\)/);
   assert.ok(visionPromptNote().includes(visionCommand()));
-  assert.match(visionPromptNote(), /omit it when you need a general description/);
+  assert.match(visionPromptNote(), /Omit `--context` for a general description/);
   assert.match(visionPromptNote(), /--context.*--prompt/s);
   assert.doesNotMatch(visionCommand(), /<image>/);
 });

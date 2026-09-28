@@ -67,6 +67,40 @@ test('readProgressContext keeps the digest and only the newest sections', () => 
 
   const noDigest = readProgressContext(paths.progress, 'docs/PROGRESS.md', { digest: false });
   assert.doesNotMatch(noDigest, /Key facts/);
+  assert.equal((out.match(/fact 6/g) ?? []).length, 1, 'recent facts are not repeated in the digest');
+});
+
+test('progress budget includes digest, headings and truncation notices', () => {
+  const paths = project();
+  writeFileSync(paths.progress, '# Progress\n\n' + Array.from({ length: 80 }, (_, i) => `## T${i} — 🥭\n- fact ${i}\n${'描述 '.repeat(200)}`).join('\n\n'));
+  for (const digest of [true, false]) {
+    for (const maxBytes of [0, 1, 7, 64, 1024, 4096]) {
+      const text = readProgressContext(paths.progress, 'docs/PROGRESS.md', { digest, maxBytes });
+      assert.ok(Buffer.byteLength(text) <= maxBytes, `${digest}: ${maxBytes} bytes`);
+      assert.doesNotMatch(text, /�/);
+      if (maxBytes >= 1024) {
+        assert.match(text, /read docs\/PROGRESS.md/);
+        assert.match(text, /描述/);
+      }
+    }
+  }
+});
+
+test('design links use the task directory, preserve reference order and disclose truncation', () => {
+  const paths = project();
+  const nested = join(paths.tasksDir, 'nested');
+  mkdirSync(nested);
+  const taskFile = join(nested, '01-task.md');
+  writeFileSync(join(paths.designDir, 'linked.md'), '# Linked\n' + '描述 🥭'.repeat(300));
+  writeFileSync(join(paths.designDir, 'coded.md'), '# Coded');
+  const body = '[Linked](../../design/linked.md#section)\n`docs/design/coded.md`\n[Again](../../design/linked.md)';
+  const docs = selectTaskDesignDocs(paths, body, { taskFile, maxDocBytes: 256, maxBytes: 512 });
+  assert.deepEqual(docs.map((d) => d.rel), ['docs/design/linked.md', 'docs/design/coded.md']);
+  assert.match(docs[0].content, /read docs\/design\/linked.md/);
+  assert.doesNotMatch(docs[0].content, /�/);
+  const capped = selectTaskDesignDocs(paths, body, { taskFile, maxDocBytes: 512, maxBytes: 200 });
+  assert.ok(capped.reduce((n, d) => n + Buffer.byteLength(d.content), 0) <= 200);
+  assert.deepEqual(selectTaskDesignDocs(paths, body, { maxDocs: 0 }), []);
 });
 
 test('selectTaskDesignDocs inlines only the design docs the task names', () => {

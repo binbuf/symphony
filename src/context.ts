@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { isAbsolute, resolve } from 'node:path';
+import { dirname, isAbsolute, resolve } from 'node:path';
 import { rel, type Paths } from './paths.js';
-import { atomicWriteSync, squash } from './util.js';
+import { atomicWriteSync, capUtf8, squash } from './util.js';
 
 /*
  * Context assembly. Inlining is opt-in: the prompt normally names PROGRESS.md, docs/design/ and
@@ -67,7 +67,7 @@ export function buildProgressDigest(text: string, opts: DigestOptions = {}): str
   const linesPerSection = opts.linesPerSection ?? DIGEST_LINES_PER_SECTION;
   const maxBytes = opts.maxBytes ?? DIGEST_MAX_BYTES;
   const sections = parseProgressSections(text);
-  if (!sections.length) return `${DIGEST_HEADING}\n\n_(no progress recorded yet)_`;
+  if (!sections.length) return capUtf8(`${DIGEST_HEADING}\n\n_(no progress recorded yet)_`, maxBytes);
 
   const items = sections.map((s) => {
     const facts = factsFor(s.body, linesPerSection);
@@ -80,7 +80,7 @@ export function buildProgressDigest(text: string, opts: DigestOptions = {}): str
     omitted += 1;
   }
   const head = omitted ? `${DIGEST_HEADING}\n\n_(${omitted} earlier section${omitted === 1 ? '' : 's'} omitted)_` : DIGEST_HEADING;
-  return `${head}\n\n${kept.join('\n')}`;
+  return capUtf8(`${head}\n\n${kept.join('\n')}`, maxBytes);
 }
 
 /** Replace the digest block in place, or insert it after the file's first heading. */
@@ -104,13 +104,7 @@ export function writeProgressDigest(path: string, opts: DigestOptions = {}): boo
 
 function capTail(text: string, maxBytes: number, displayName: string): string {
   const t = text.trim();
-  if (Buffer.byteLength(t, 'utf8') <= maxBytes) return t || '(empty)';
-  const buf = Buffer.from(t, 'utf8');
-  let start = buf.length - maxBytes;
-  const nl = buf.indexOf(0x0a, start);
-  if (nl !== -1 && nl < buf.length - 1) start = nl + 1;
-  const kb = (n: number): string => `${Math.round(n / 1024)} KB`;
-  return `[… truncated: showing the last ${kb(buf.length - start)} of ${kb(buf.length)}; read ${displayName} for the full history …]\n\n${buf.subarray(start).toString('utf8').trim()}`;
+  return capUtf8(t || '(empty)', maxBytes, `[… truncated; read ${displayName} for the full history …]\n\n`, true);
 }
 
 export interface ProgressContextOptions extends DigestOptions {
@@ -118,36 +112,45 @@ export interface ProgressContextOptions extends DigestOptions {
   digest?: boolean;
   /** How many of the newest full sections to inline (default 3). */
   recentSections?: number;
-  /** Byte cap for the inlined recent sections (default 32768). */
+  /** Total byte cap for digest, recent sections and omission notices (default 32768). */
   maxBytes?: number;
 }
 
 /**
- * What the prompt sees for PROGRESS.md: the generated digest plus the most recent sections, capped.
- * The digest is always kept; only the recent-section block is byte-capped.
+ * Inline recent sections and a digest of older sections, with no duplicate facts and one total cap.
+ * Reserve at most half the budget (up to 8 KB) for the digest so recent hand-offs stay visible.
  */
 export function readProgressContext(path: string, displayName = 'PROGRESS.md', opts: ProgressContextOptions = {}): string {
-  if (!existsSync(path)) return '(PROGRESS.md does not exist yet)';
-  const text = readFileSync(path, 'utf8');
   const maxBytes = opts.maxBytes ?? 32768;
+  if (!existsSync(path)) return capUtf8('(PROGRESS.md does not exist yet)', maxBytes);
+  const text = readFileSync(path, 'utf8');
   const recentSections = opts.recentSections ?? RECENT_SECTIONS;
   const parts: string[] = [];
-  if (opts.digest !== false) {
-    parts.push(buildProgressDigest(text, { linesPerSection: opts.linesPerSection, maxBytes: Math.min(opts.maxBytes ?? DIGEST_MAX_BYTES, DIGEST_MAX_BYTES) }));
-  }
   const sections = parseProgressSections(text);
-  if (recentSections > 0 && sections.length) {
-    const recent = sections.slice(-recentSections);
+  const recent = recentSections > 0 ? sections.slice(-recentSections) : [];
+  const older = sections.slice(0, sections.length - recent.length);
+  if (opts.digest !== false && older.length) {
+    const history = older.map((s) => `## ${s.heading}\n\n${s.body}`).join('\n\n');
+    parts.push(buildProgressDigest(history, {
+      linesPerSection: opts.linesPerSection,
+      maxBytes: Math.min(Math.floor(maxBytes / 2), DIGEST_MAX_BYTES),
+    }));
+  }
+  if (recent.length) {
     const label = recent.length < sections.length ? `last ${recent.length} of ${sections.length}` : 'all';
     const body = recent.map((s) => `## ${s.heading}\n\n${s.body}`.trim()).join('\n\n');
-    parts.push(`### Recent progress (${label} sections)\n\n${capTail(body, maxBytes, displayName)}`);
+    const heading = `### Recent progress (${label} sections)\n\n`;
+    const used = Buffer.byteLength(parts.join('\n\n'), 'utf8') + (parts.length ? 2 : 0) + Buffer.byteLength(heading, 'utf8');
+    parts.push(`${heading}${capTail(body, Math.max(0, maxBytes - used), displayName)}`);
   }
-  return parts.join('\n\n');
+  return capUtf8(parts.join('\n\n') || '(no progress recorded yet)', maxBytes);
 }
 
 export interface InlinedDoc { rel: string; content: string }
 
 export interface InlineOptions {
+  /** Resolve Markdown links relative to this task file, including nested task directories. */
+  taskFile?: string;
   maxDocs?: number;
   maxDocBytes?: number;
   maxBytes?: number;
@@ -156,21 +159,22 @@ export interface InlineOptions {
 const IN_BACKTICKS = /`([^`\n]+)`/g;
 const IN_LINK = /\]\(([^)\n]+)\)/g;
 
-function extractCandidates(text: string): string[] {
-  const out: string[] = [];
+function extractCandidates(text: string): Array<{ raw: string; link: boolean }> {
+  const out: Array<{ raw: string; link: boolean; offset: number }> = [];
   for (const re of [IN_BACKTICKS, IN_LINK]) {
     re.lastIndex = 0;
-    for (let m = re.exec(text); m; m = re.exec(text)) out.push(m[1]);
+    for (let m = re.exec(text); m; m = re.exec(text)) out.push({ raw: m[1], link: re === IN_LINK, offset: m.index });
   }
-  return out;
+  return out.sort((a, b) => a.offset - b.offset);
 }
 
-function resolveDoc(paths: Paths, raw: string): string | undefined {
+function resolveDoc(paths: Paths, raw: string, taskFile?: string, link = false): string | undefined {
   const cleaned = raw.trim().replace(/^<|>$/g, '').split('#')[0].split(/\s+/)[0];
   if (!cleaned || /^(https?:|mailto:)/i.test(cleaned)) return undefined;
+  const local = taskFile ? [resolve(dirname(taskFile), cleaned)] : [];
   const candidates = isAbsolute(cleaned)
     ? [cleaned]
-    : [resolve(paths.root, cleaned), resolve(paths.docs, cleaned), resolve(paths.designDir, cleaned), resolve(paths.tasksDir, cleaned)];
+    : [...(link ? local : []), resolve(paths.root, cleaned), resolve(paths.docs, cleaned), resolve(paths.designDir, cleaned), resolve(paths.tasksDir, cleaned), ...(!link ? local : [])];
   return candidates.find((c) => {
     try { return existsSync(c) && statSync(c).isFile() && /\.md$/i.test(c); } catch { return false; }
   });
@@ -181,10 +185,8 @@ function isDesignDoc(paths: Paths, file: string): boolean {
   return rel(paths.root, file).startsWith(prefix);
 }
 
-function capDoc(text: string, maxBytes: number): string {
-  const t = text.trim();
-  if (Buffer.byteLength(t, 'utf8') <= maxBytes) return t;
-  return `${Buffer.from(t, 'utf8').subarray(0, maxBytes).toString('utf8')}…`;
+function capDoc(text: string, maxBytes: number, displayName: string): string {
+  return capUtf8(text.trim(), maxBytes, `\n[… truncated; read ${displayName} for the full document …]`);
 }
 
 /** The design docs a task file names (backticked paths or links), deduped and capped. */
@@ -193,19 +195,19 @@ export function selectTaskDesignDocs(paths: Paths, taskBody: string | undefined,
   const maxDocs = opts.maxDocs ?? 6;
   const maxDocBytes = opts.maxDocBytes ?? 8192;
   const maxBytes = opts.maxBytes ?? 24576;
+  if (maxDocs <= 0 || maxDocBytes <= 0 || maxBytes <= 0) return [];
   const seen = new Set<string>();
   const out: InlinedDoc[] = [];
   let total = 0;
-  for (const raw of extractCandidates(taskBody)) {
-    const file = resolveDoc(paths, raw);
+  for (const { raw, link } of extractCandidates(taskBody)) {
+    const file = resolveDoc(paths, raw, opts.taskFile, link);
     if (!file || seen.has(file) || !isDesignDoc(paths, file)) continue;
     seen.add(file);
-    const content = capDoc(readFileSync(file, 'utf8'), maxDocBytes);
+    const content = capDoc(readFileSync(file, 'utf8'), Math.min(maxDocBytes, maxBytes - total), rel(paths.root, file));
     const size = Buffer.byteLength(content, 'utf8');
-    if (out.length && total + size > maxBytes) break;
     out.push({ rel: rel(paths.root, file), content });
     total += size;
-    if (out.length >= maxDocs) break;
+    if (out.length >= maxDocs || total >= maxBytes) break;
   }
   return out;
 }

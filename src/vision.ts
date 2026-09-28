@@ -163,5 +163,5 @@ export function visionCommand(): string {
  */
 export function visionPromptNote(): string {
   return `## Image analysis tool (enabled)
-If a photo, screenshot, mockup, diagram, or other image matters to this task, inspect it rather than guessing from its filename or surrounding text. From the project root, run \`${visionCommand()} "path/to/image.png" --context "Read the exact error text."\` (replace the path and question for your task). The command also accepts an http(s) image URL and prints a description to stdout. Use \`--context\` when you have a specific question or area of focus; omit it when you need a general description. \`--prompt\` replaces the configured base instruction when needed. Use the answer as evidence, and distinguish visible details from the model's inferences. Skip this tool when the task has no relevant image.`;
+For relevant images, run \`${visionCommand()} "path/to/image.png" --context "Your question"\` from the project root. Accepts local paths or http(s) URLs; prints analysis to stdout. Omit \`--context\` for a general description; \`--prompt\` overrides the base instruction. Distinguish visible evidence from inference. Skip when no image is relevant.`;
 }

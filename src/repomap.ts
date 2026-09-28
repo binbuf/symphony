@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { rel, type Paths } from './paths.js';
-import { atomicWriteSync, clip, squash } from './util.js';
+import { atomicWriteSync, capUtf8, clip, squash } from './util.js';
 
 /*
  * A cheap, deterministic repo map: one-line summaries of the design docs plus a source-file list with
@@ -178,13 +178,11 @@ export function writeIndex(paths: Paths, opts: RepoMapOptions = {}): { changed: 
 
 /** Inline the index, capped, with a pointer to the full file. */
 export function readIndexCapped(path: string, maxBytes: number, displayName: string): string {
-  if (!existsSync(path)) return '(not generated yet; the harness writes it before the first task)';
-  const text = readFileSync(path, 'utf8');
-  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text.trim();
-  const buf = Buffer.from(text, 'utf8');
-  let start = buf.length - maxBytes;
-  const nl = buf.indexOf(0x0a, start);
-  if (nl !== -1 && nl < buf.length - 1) start = nl + 1;
-  const kb = (n: number): string => `${Math.round(n / 1024)} KB`;
-  return `[… index truncated: showing the last ${kb(buf.length - start)} of ${kb(buf.length)}; read ${displayName} for the rest …]\n\n${buf.subarray(start).toString('utf8').trim()}`;
+  if (!existsSync(path)) return capUtf8('(not generated yet; the harness writes it before the first task)', maxBytes);
+  return capIndexBody(readFileSync(path, 'utf8'), maxBytes, displayName);
+}
+
+/** Apply the same inline budget to generated dry-run text and the saved index. */
+export function capIndexBody(text: string, maxBytes: number, displayName: string): string {
+  return capUtf8(text.trim(), maxBytes, `[… index truncated; read ${displayName} for the rest …]\n\n`, true);
 }

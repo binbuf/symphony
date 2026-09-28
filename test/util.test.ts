@@ -4,7 +4,21 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { resolveExecutable } from '../src/util.js';
-import { clip, fmtDateTime, fmtTime, headAndTail, parseTimeZone, squash, squashTail } from '../src/util.js';
+import { capUtf8, clip, fmtDateTime, fmtTime, headAndTail, parseTimeZone, squash, squashTail } from '../src/util.js';
+
+test('capUtf8 keeps complete code points and counts the notice in either direction', () => {
+  const text = 'a🥭中é'.repeat(5);
+  for (const tail of [true, false]) {
+    for (let max = 0; max <= Buffer.byteLength(text) + 1; max++) {
+      const out = capUtf8(text, max, '…', tail);
+      assert.ok(Buffer.byteLength(out) <= max);
+      assert.doesNotMatch(out, /�/);
+    }
+  }
+  assert.equal(capUtf8('a🥭b', 4), 'a');
+  assert.equal(capUtf8('a🥭b', 4, '', true), 'b');
+  assert.equal(capUtf8('a🥭b', 6), 'a🥭b');
+});
 
 test('fmtTime: a zero-padded local clock time, not a date', () => {
   assert.equal(fmtTime(new Date(2026, 0, 2, 3, 4, 5)), '03:04:05');

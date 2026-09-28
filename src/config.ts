@@ -352,11 +352,11 @@ export interface Config {
   nudgeTimeoutMin: number;
   prepareTimeoutMin: number;
   /**
-   * Byte cap for PROGRESS.md content inlined into a prompt. `0` (default) inlines nothing: the prompt
+   * Total byte cap for inlined PROGRESS.md (digest, recent sections and notices). `0` inlines nothing: the prompt
    * names the file and the session reads it with its own tools.
    */
   maxProgressBytes: number;
-  /** Maintain a generated "Key facts" digest at the top of PROGRESS.md. The digest is inlined only when `maxProgressBytes > 0`. */
+  /** Maintain a generated "Key facts" digest; prompts summarize older sections only when maxProgressBytes > 0. */
   progressDigest: boolean;
   /** Inline the design docs a task names, not just point to the design folder. Off by default. */
   inlineDesignDocs: boolean;

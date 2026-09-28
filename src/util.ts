@@ -41,6 +41,25 @@ export function clip(s: string, max: number): string {
   return t.length > max ? `${t.slice(0, Math.max(0, max - 1))}…` : t;
 }
 
+/** Cap UTF-8 bytes without splitting a code point; an omission notice shares the budget. */
+export function capUtf8(text: string, maxBytes: number, notice = '', tail = false): string {
+  const buf = Buffer.from(text, 'utf8');
+  const limit = Math.max(0, Math.floor(maxBytes));
+  if (buf.length <= limit) return text;
+  const prefix = (s: string, bytes: number): string => {
+    const b = Buffer.from(s, 'utf8');
+    let end = Math.min(bytes, b.length);
+    while (end > 0 && (b[end] & 0xc0) === 0x80) end--;
+    return b.subarray(0, end).toString('utf8');
+  };
+  const marker = prefix(notice, limit);
+  const budget = limit - Buffer.byteLength(marker, 'utf8');
+  if (!tail) return `${prefix(text, budget)}${marker}`;
+  let start = buf.length - budget;
+  while (start < buf.length && (buf[start] & 0xc0) === 0x80) start++;
+  return `${marker}${buf.subarray(start).toString('utf8')}`;
+}
+
 /**
  * Truncate a long document to `max` while keeping both ends: for a task file the `## Goal` and
  * acceptance criteria sit at the top and the hand-off notes at the bottom, and a decision model
