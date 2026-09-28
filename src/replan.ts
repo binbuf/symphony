@@ -51,6 +51,44 @@ export interface ReplanStatePlan {
   removed: string[];
 }
 
+/** One phase's id block: the ids already used in it and the next free id that keeps the block growing. */
+export interface PhaseIdBlock {
+  phase: string;
+  min: number;
+  max: number;
+  nextId: string;
+}
+
+/**
+ * The next free id in each phase, so tracks/id blocks can grow independently instead of every new task
+ * being appended after the global maximum. Gaps between blocks are expected; the returned next id skips
+ * any number already used anywhere, so an interleaved roadmap cannot produce a collision.
+ */
+export function phaseIdBlocks(tasks: Task[]): PhaseIdBlock[] {
+  const used = new Set(tasks.map((t) => t.num));
+  const span = new Map<string, { min: number; max: number }>();
+  for (const t of tasks) {
+    const cur = span.get(t.phase);
+    if (!cur) span.set(t.phase, { min: t.num, max: t.num });
+    else span.set(t.phase, { min: Math.min(cur.min, t.num), max: Math.max(cur.max, t.num) });
+  }
+  const out: PhaseIdBlock[] = [];
+  for (const [phase, { min, max }] of span) {
+    let n = max + 1;
+    while (used.has(n)) n++;
+    used.add(n);
+    out.push({ phase, min, max, nextId: idFromNum(n) });
+  }
+  return out;
+}
+
+/** The per-phase id blocks as a prompt section, one line each. */
+function formatIdBlocks(tasks: Task[]): string {
+  const blocks = phaseIdBlocks(tasks);
+  if (!blocks.length) return '(no tasks yet — start at T01)';
+  return blocks.map((b) => `- ${b.phase}: ids up to ${idFromNum(b.max)} used; next free ${b.nextId}`).join('\n');
+}
+
 /** Resolve the direction document, defaulting to `<docs>/REPLAN.md`. */
 export function resolveDirection(paths: Paths, direction: string | undefined): ReplanDirection {
   const fallback = join(paths.docs, 'REPLAN.md');
@@ -154,6 +192,7 @@ export function buildReplanPrompt(ctx: RunContext, report: LintReport, direction
     designPhrase: design ? ` and the design docs under ${d.design}/` : '',
     designDir: d.design,
     nextId: idFromNum(maxNum + 1),
+    idBlocks: formatIdBlocks(ctx.tasks),
     designRules,
     lintCommand: lintCommand(ctx),
   };
@@ -335,6 +374,7 @@ export function buildAutoReplanPrompt(ctx: RunContext, ev: BreakdownEvidence, re
     progress: d.progress,
     tasks: d.tasks,
     nextId: idFromNum(maxNum + 1),
+    idBlocks: formatIdBlocks(ctx.tasks),
     lintCommand: lintCommand(ctx),
   };
   return renderPrompt('replan-auto.md', vars);

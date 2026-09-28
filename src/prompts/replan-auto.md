@@ -17,6 +17,9 @@ Project root: {root}  (your working directory; never touch files outside it)
 ## Current {roadmapPath}
 {roadmapContent}
 
+## Id blocks per phase (grow each track in its own block)
+{idBlocks}
+
 ## What the linter found (fix every ✗; fix ! and · where the source material allows)
 {findings}
 
@@ -26,7 +29,7 @@ Project root: {root}  (your working directory; never touch files outside it)
 ## Rules
 - Preserve finished work. A task marked [x] or a blocked task has already run: never delete, renumber, retitle or repurpose it, and never reuse an id that has run for different work. If the new plan supersedes a blocked task, leave that task exactly as it is and add a new task that says so in its Context.
 - Reshape only work that has not run: reorder tasks, re-size them, merge or split them, move work between them, and add new tasks.
-- New tasks take the next free ids after the highest id currently in use (at least {nextId}), so no id is ever reused.
+- New tasks take a free id inside the id block of the phase they belong to (the per-phase next free ids above), so each track keeps growing in its own block instead of interleaving. A brand-new phase starts after the highest id currently in use (at least {nextId}). Never reuse an id; gaps between phase blocks are fine, and ids stay unique and increasing in file order.
 - Remove the task file of any task you remove or replace; leave the files of tasks you keep.
 - The triggering task {taskId} is part of what you may reshape: re-scope it, replace it, or remove it if the new plan makes it unnecessary.
 - Rewrite every task file you change using the template: Goal / Context / Scope / Out of scope / Design notes / Done when / Hand-off. Size each for one unattended coding session in dependency order, and name at least one automated test under "Done when".

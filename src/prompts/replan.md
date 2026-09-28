@@ -13,6 +13,9 @@ From: {directionPath}
 ## Current {roadmapPath}
 {roadmapContent}
 
+## Id blocks per phase (grow each track in its own block)
+{idBlocks}
+
 ## What the linter found (fix every ✗; fix ! and · where the source material allows)
 {findings}
 
@@ -20,7 +23,7 @@ From: {directionPath}
 {tree}
 
 ## Rules
-- Preserve finished work. Do not delete, renumber or repurpose a task that already ran. If its work still stands, keep its id and title exactly. New tasks take the next free ids after the highest id currently in use (at least {nextId}), so no id is reused for different work.
+- Preserve finished work. Do not delete, renumber or repurpose a task that already ran. If its work still stands, keep its id and title exactly. New tasks take a free id inside the id block of the phase they belong to (see the per-phase next free ids above), so each track keeps growing in its own block instead of interleaving. A brand-new phase starts after the highest id currently in use (at least {nextId}). Never reuse an id; gaps between phase blocks are fine, and ids stay unique and increasing in file order.
 - Never reuse the id of a task that already ran for different work. If the pivot invalidates a task that has not run, remove it and its file. If it invalidates finished work, add a new task that supersedes it and say so in that task's Context.
 - Rewrite every task file for the new plan using the template: Goal / Context / Scope / Out of scope / Design notes / Done when / Hand-off. Size each for one unattended coding session in dependency order, and name at least one automated test under "Done when".
 {designRules}

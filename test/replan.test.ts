@@ -8,7 +8,7 @@ import { DEFAULTS } from '../src/config.js';
 import type { LintReport } from '../src/lint.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths, type Paths } from '../src/paths.js';
-import { applyReplanState, buildAutoReplanPrompt, buildReplanPrompt, checkAutoReplanState, planReplanState, resolveDirection } from '../src/replan.js';
+import { applyReplanState, buildAutoReplanPrompt, buildReplanPrompt, checkAutoReplanState, phaseIdBlocks, planReplanState, resolveDirection } from '../src/replan.js';
 import type { BreakdownEvidence } from '../src/breakdown.js';
 import type { RunContext } from '../src/runner.js';
 import { newTaskState, type State } from '../src/state.js';
@@ -40,6 +40,31 @@ test('resolveDirection defaults to <docs>/REPLAN.md and requires content', () =>
   assert.match(d.body, /queue-based/);
   // An explicit path that does not exist is an error.
   assert.throws(() => resolveDirection(paths, 'nope.md'), UsageError);
+});
+
+test('phaseIdBlocks grows each phase in its own block and skips used ids', () => {
+  const blocks = phaseIdBlocks([
+    { ...task('T01', 'Base one', 1), phase: 'Base' },
+    { ...task('T02', 'Base two', 2), phase: 'Base' },
+    { ...task('T11', 'Field one', 11), phase: 'Fields' },
+    { ...task('T13', 'Field two', 13), phase: 'Fields' },
+    { ...task('T21', 'Battle one', 21), phase: 'Battle' },
+    { ...task('T22', 'Battle two', 22), phase: 'Battle' },
+  ]);
+  assert.deepEqual(blocks, [
+    { phase: 'Base', min: 1, max: 2, nextId: 'T03' },
+    { phase: 'Fields', min: 11, max: 13, nextId: 'T14' },
+    { phase: 'Battle', min: 21, max: 22, nextId: 'T23' },
+  ]);
+  // A number already used elsewhere (interleaved roadmap) is never proposed again.
+  const interleaved = phaseIdBlocks([
+    { ...task('T01', 'A one', 1), phase: 'A' },
+    { ...task('T02', 'B one', 2), phase: 'B' },
+  ]);
+  assert.deepEqual(interleaved, [
+    { phase: 'A', min: 1, max: 1, nextId: 'T03' },
+    { phase: 'B', min: 2, max: 2, nextId: 'T04' },
+  ]);
 });
 
 test('planReplanState finds removed rows and ids reused for different work', () => {
@@ -161,7 +186,8 @@ test('buildReplanPrompt renders from the template with no leftover placeholders'
   assert.doesNotMatch(text, /\{[a-zA-Z_]\w*\}/);
   assert.match(text, /Switch to a queue-based design\./);
   assert.match(text, /## Rules/);
-  assert.match(text, /New tasks take the next free ids after the highest id currently in use \(at least T03\)/);
+  assert.match(text, /A brand-new phase starts after the highest id currently in use \(at least T03\)/);
+  assert.match(text, /- Phase 1: ids up to T02 used; next free T03/);
   assert.match(text, /SYMPHONY_RESULT/);
 });
 
