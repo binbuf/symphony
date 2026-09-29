@@ -1,8 +1,12 @@
 # symphony
 
-**A thin harness that drives an LLM coding agent through your project's roadmap — one fresh session per task, a git commit after each, resumable, and safe to leave unattended.**
+A reasonably thin LLM task harness. Chain complex task sets together, use multiple LLM providers, escalate to frontier model or break down to smaller tickets automatically, system 1 model decision making (w/ jev), Slack notifications, interactive TUI, and much more.
 
-symphony lives in `<your target project>/.symphony/` (gitignored) and reads its plan from `<project>/docs/` and launches using your provider's LLM CLI tool.
+<p align="center">
+  <img src="resources/app.png" alt="Symphony TUI shown inside of VS Code on Windows" width="70%">
+</p>
+
+`symphony` temporarily lives in `<your target project>/.symphony/` (gitignored) and reads its plan from `<project>/docs/` and launches using your provider's LLM CLI tool.
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output. An optional [`mcp` block](#mcp-selection) can scope each session to a chosen subset of servers, so unrelated toolchains cost nothing.
 
