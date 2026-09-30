@@ -22,13 +22,22 @@ export interface Task {
 export const TASK_FILE_RE = /^T?(\d{1,3})([a-z]\d*)?(?:[-_. ].*)?\.md$/i;
 const FRONT_MATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
+/** Strip one pair of matching surrounding quotes, leaving a bare or partially-quoted value untouched. */
+function stripQuotes(value: string): string {
+  const first = value[0];
+  if ((first === '"' || first === "'") && value.length >= 2 && value.endsWith(first)) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
 export function parseFrontMatter(md: string): { meta: Record<string, string>; body: string } {
   const m = FRONT_MATTER_RE.exec(md);
   if (!m) return { meta: {}, body: md };
   const meta: Record<string, string> = {};
   for (const line of m[1].split(/\r?\n/)) {
     const kv = /^([A-Za-z][\w-]*)\s*:\s*(.*?)\s*$/.exec(line);
-    if (kv) meta[kv[1]] = kv[2].replace(/^["']|["']$/g, '');
+    if (kv) meta[kv[1]] = stripQuotes(kv[2]);
   }
   return { meta, body: md.slice(m[0].length) };
 }

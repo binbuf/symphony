@@ -13,7 +13,7 @@ import { parseRoadmap } from '../src/roadmap.js';
 import type { RunContext, RunFlags } from '../src/runner.js';
 import { applySplitState, buildSplitPrompt, checkSplit, childIdSequence, childIdsFor, splitCommand } from '../src/split.js';
 import { loadState, newTaskState, type State } from '../src/state.js';
-import { discoverTasks, type Task } from '../src/tasks.js';
+import { discoverTasks, parseFrontMatter, type Task } from '../src/tasks.js';
 import { UsageError } from '../src/util.js';
 
 const silent: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner() {} };
@@ -216,6 +216,22 @@ test('discoverTasks matches a suffixed id to its file by link or id prefix, and 
 
   writeFileSync(join(paths.tasksDir, '10b-other.md'), '# y\n');
   assert.throws(() => discoverTasks(paths, rm), /both claim task T10b/);
+});
+
+test('parseFrontMatter strips only matching surrounding quotes, keeping inner quotes intact', () => {
+  const { meta } = parseFrontMatter([
+    '---',
+    "verify: npm run verify",
+    'quoted: "make check"',
+    "single: 'make check'",
+    "shell: grep -q 'm7=GREEN'",
+    '---',
+    'body line',
+  ].join('\n'));
+  assert.equal(meta.verify, 'npm run verify');
+  assert.equal(meta.quoted, 'make check');
+  assert.equal(meta.single, 'make check');
+  assert.equal(meta.shell, "grep -q 'm7=GREEN'");
 });
 
 test('splitCommand --dry-run prints the prompt for the subtasks and touches nothing', async () => {
