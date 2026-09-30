@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { DEFAULTS, composeModel, findTaskSet, loadConfig, resolveBreakdown, resolveEscalation, resolveSession, resolveVerify, resolveWatch } from '../src/config.js';
+import { DEFAULTS, composeModel, findTaskSet, loadConfig, resolveBreakdown, resolveEscalation, resolveFallback, resolveSession, resolveVerify, resolveWatch } from '../src/config.js';
 import { resolvePaths, taskSetOverrides } from '../src/paths.js';
 import type { Task } from '../src/tasks.js';
 
@@ -413,6 +413,52 @@ test('escalation defaults to GLM-5.3 via OpenCode, is off until enabled, and res
   assert.throws(() => loadConfig(paths, {}), /unknown provider/);
 });
 
+test('fallback defaults to off, resolves to a spec, and validates its keys', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-fb-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  assert.equal(DEFAULTS.fallback.enabled, false);
+  assert.equal(DEFAULTS.fallback.afterAttempts, 2);
+  const off = loadConfig(paths, {}).config;
+  assert.equal(off.fallback.enabled, false);
+  assert.equal(resolveFallback(off, resolveSession(off, task(), {}, {}).spec), undefined);
+
+  // The motivating case: a second OpenCode routed through a MorphLLM provider, after two retries.
+  writeFileSync(paths.config, JSON.stringify({
+    provider: 'opencode',
+    fallback: { enabled: true, provider: 'opencode', model: 'morph-v3-fast', modelProvider: 'morphllm', afterAttempts: 3, onCategories: ['server', 'network'] },
+  }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.fallback.enabled, true);
+  assert.equal(config.fallback.provider, 'opencode');
+  assert.equal(config.fallback.model, 'morph-v3-fast');
+  assert.equal(config.fallback.modelProvider, 'morphllm');
+  assert.equal(config.fallback.afterAttempts, 3);
+  assert.deepEqual(config.fallback.onCategories, ['server', 'network']);
+  assert.equal(warnings.length, 0);
+  const resolved = resolveFallback(config, resolveSession(config, task(), {}, {}).spec);
+  assert.equal(resolved?.spec.providerName, 'opencode');
+  assert.equal(resolved?.spec.model, 'morphllm/morph-v3-fast');
+  assert.equal(resolved?.spec.sources.provider, 'fallback');
+  assert.equal(resolved?.spec.sources.model, 'fallback');
+
+  // modelProvider is OpenCode-only: switching the block to Codex drops it with a warning.
+  writeFileSync(paths.config, JSON.stringify({ fallback: { enabled: true, provider: 'codex', model: 'gpt-6-sol', modelProvider: 'morphllm' } }));
+  const codex = loadConfig(paths, {});
+  assert.equal(codex.config.fallback.modelProvider, undefined);
+  assert.ok(codex.warnings.some((w) => /fallback\.modelProvider/.test(w)));
+
+  // An enabled fallback with no model is turned off with a warning rather than guessing.
+  writeFileSync(paths.config, JSON.stringify({ fallback: { enabled: true, model: '' } }));
+  const empty = loadConfig(paths, {});
+  assert.equal(empty.config.fallback.enabled, false);
+  assert.ok(empty.warnings.some((w) => /fallback\.model is empty/.test(w)));
+
+  // An unknown fallback provider is rejected outright.
+  writeFileSync(paths.config, JSON.stringify({ fallback: { enabled: true, provider: 'nope' } }));
+  assert.throws(() => loadConfig(paths, {}), /unknown provider/);
+});
+
 test('jev config parses, defaults to OpenRouter with typesafe/jev-1.13, and validates its keys', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-jev-'));
   const paths = resolvePaths(dir);
@@ -648,6 +694,7 @@ test('modelProvider composes the OpenCode "provider/model" reference for every b
     providers: { opencode: { model: 'qwen/qwen3-vl-235b-a22b-instruct', modelProvider: 'openrouter' } },
     watch: { provider: 'opencode', model: 'deepseek/deepseek-v4.1-flash', modelProvider: 'openrouter' },
     escalation: { enabled: true, provider: 'opencode', model: 'z-ai/glm-5.3', modelProvider: 'openrouter' },
+    fallback: { enabled: true, provider: 'opencode', model: 'morph-v3-fast', modelProvider: 'morphllm' },
     breakdown: { enabled: true, model: 'anthropic/claude-3-5-haiku', modelProvider: 'openrouter' },
   }));
   const { config, warnings } = loadConfig(paths, {});
@@ -676,6 +723,7 @@ test('modelProvider composes the OpenCode "provider/model" reference for every b
   assert.equal(resolveWatch(config).spec.model, 'openrouter/deepseek/deepseek-v4.1-flash');
   assert.equal(resolveWatch(config).spec.sources.modelProvider, 'watch');
   assert.equal(resolveEscalation(config, s)?.spec.model, 'openrouter/z-ai/glm-5.3');
+  assert.equal(resolveFallback(config, s)?.spec.model, 'morphllm/morph-v3-fast');
   assert.equal(resolveBreakdown(config).spec.model, 'openrouter/anthropic/claude-3-5-haiku');
 
   // Existing fully-qualified values keep working with no modelProvider.

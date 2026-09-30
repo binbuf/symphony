@@ -83,6 +83,23 @@
       "verify"
     ]
   },
+  "fallback": {
+    "_fallback": "When the primary provider keeps dying on a transient infrastructure fault (dropped connection, 5xx, model not available, resource busy), switch the task to this provider/model after `afterAttempts` exponential retries. Unlike escalation this reacts to infrastructure faults, not task failures. Example: a second OpenCode routed through a MorphLLM provider. Listing a normally-fatal category such as \"model\" also routes a model-unavailable failure here instead of halting.",
+    "enabled": false,
+    "provider": "opencode",
+    "model": "morph-dsv41flash",
+    "modelProvider": "morphllm",
+    "afterAttempts": 2,
+    "onCategories": [
+      "rate_limit",
+      "overloaded",
+      "server",
+      "network",
+      "stall",
+      "crash",
+      "model"
+    ]
+  },
   "jev": {
     "enabled": false,
     "resultFallback": true,

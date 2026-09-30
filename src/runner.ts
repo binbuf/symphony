@@ -2,7 +2,7 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { decideBreakdown, type BreakdownEvidence, type BreakdownStage, type BreakdownVerdict } from './breakdown.js';
 import { classifyFailure, evidenceText, makeClassified, type Classified, type FailureEvidence } from './classify.js';
-import { resolveEscalation, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
+import { resolveEscalation, resolveFallback, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
 import { writeProgressDigest } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { commitAll, currentBranch, describeCommit } from './git.js';
@@ -372,7 +372,7 @@ function mergeOutcome(first: SessionOutcome, second: SessionOutcome): SessionOut
 }
 
 interface SessionRun {
-  kind: 'task' | 'resume' | 'nudge' | 'continue' | 'escalate' | 'wrapup';
+  kind: 'task' | 'resume' | 'nudge' | 'continue' | 'escalate' | 'fallback' | 'wrapup';
   logKind: 'task' | 'retry' | 'nudge' | 'wrapup';
   attempt: number;
   resumeId?: string;
@@ -720,6 +720,13 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   const escalationCategories = new Set(config.escalation.onCategories);
   let escalations = 0;
   let escalating = false;
+  // Fallback: a second provider/model the task switches to when the primary keeps dying on transient
+  // infrastructure faults. Distinct from escalation, which only reacts to task failures.
+  const fallback = resolveFallback(config, spec, (p) => getProvider(p).supportsBudget, variantSupported);
+  fallback?.warnings.forEach((w) => log.warn(`${task.id}: ${w}`));
+  const fallbackCategories = new Set(config.fallback.onCategories);
+  const fallbackAfter = Math.max(0, config.fallback.afterAttempts);
+  let onFallback = false;
   const maxAttempts = Math.max(1, config.retry.maxAttempts);
   const maxContinuations = Math.max(0, config.maxContinuations);
   const maxIterations = Math.max(0, config.maxIterationsPerTask);
@@ -810,6 +817,24 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   };
 
   /**
+   * Hand the task to the fallback provider/model, once per task. Eligible only when a fallback is
+   * configured and the failure category is in `fallback.onCategories`. Resets the retry budget (the
+   * fallback is a fresh route) and drops resume state (the new provider never saw the old session).
+   * Returns true when the switch happened.
+   */
+  const switchToFallback = (c: Classified): boolean => {
+    if (!fallback || onFallback || !fallbackCategories.has(c.category)) return false;
+    const from = spec;
+    onFallback = true;
+    spec = fallback.spec;
+    provider = getProvider(spec.providerName);
+    resumeId = undefined;
+    retryCount = 0;
+    log.warn(`${task.id}: ${c.category} — ${c.message}. Switching from ${sessionLabel(from)} to fallback ${sessionLabel(spec)}${c.transient ? ` after ${fallbackAfter} transient retr${fallbackAfter === 1 ? 'y' : 'ies'}` : ''}.`);
+    return true;
+  };
+
+  /**
    * Arm a transient retry for a classified infrastructure failure: give back the session's attempt,
    * record the retry, and let the caller `continue` so the outer loop backs off and resumes. Returns
    * false when the failure is not transient or the retry budget is spent, so the caller takes the
@@ -817,7 +842,13 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
    * provider/tool hiccup (a dropped MCP/plugin session) rather than a genuine task failure.
    */
   const scheduleTransientRetry = (c: Classified, summary: string, sessionId: string | undefined): boolean => {
-    if (!c.transient || retryCount >= maxAttempts) return false;
+    if (!c.transient) return false;
+    // The primary has now taken `fallbackAfter` transient retries without recovering. Switch the rest
+    // of this task's attempts to the fallback provider, so a flaky upstream never fails work a
+    // different route could still do. Gated by category, and switched at most once per task; the
+    // fallback gets its own fresh retry budget so the primary's exhaustion does not carry over.
+    if (retryCount >= fallbackAfter) switchToFallback(c);
+    if (retryCount >= maxAttempts) return false;
     retryCount += 1;
     // A transient infra fault (rate limit, 5xx, dropped socket) is not a task attempt: give the
     // attempt back so provider throttling cannot exhaust `halt.maxAttemptsPerTask` and halt the run.
@@ -874,7 +905,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       : continuation > 0
         ? buildContinuePrompt(pc)
         : buildTaskPrompt(pc);
-    const sessionKind: SessionRun['kind'] = escalating ? 'escalate' : continuation > 0 && !lastTransient ? 'continue' : resumeId ? 'resume' : 'task';
+    const sessionKind: SessionRun['kind'] = escalating ? 'escalate' : onFallback ? 'fallback' : continuation > 0 && !lastTransient ? 'continue' : resumeId ? 'resume' : 'task';
     let outcome = await runOneSession(ctx, task, st, provider, spec, prompt, { kind: sessionKind, logKind: escalating || retryCount > 0 ? 'retry' : 'task', attempt, resumeId, timeoutMin: spec.timeoutMin });
     resumeId = outcome.sessionId ?? resumeId;
     let block: ResultBlock | undefined = parseResultBlock(outcome.result.text) ?? parseResultBlock(outcome.allText);
@@ -1077,6 +1108,9 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     const summary = block ? `${block.summary} | ${classified.category}: ${classified.message}` : `${classified.category}: ${classified.message}`;
     const lastError = mkError(classified);
     if (classified.fatal) {
+      // A fatal category the user listed for fallback (e.g. a model that went unavailable) still gets
+      // one fresh session on the fallback route instead of halting the run.
+      if (switchToFallback(classified)) continue;
       final = { status: 'failed', summary, lastError };
       halt = { at: nowIso(), taskId: task.id, category: classified.category, reason: classified.message };
       break;
@@ -1193,6 +1227,12 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   escPreflight?.warnings.forEach((w) => log.warn(w));
   if (escPreflight && !seenProviders.has(escPreflight.spec.providerName)) {
     extraProviders.push({ spec: escPreflight.spec, provider: getProvider(escPreflight.spec.providerName), label: 'escalation' });
+  }
+  // Likewise the fallback target, which only launches after repeated transient faults.
+  const fbPreflight = resolveFallback(config, spec, (p) => getProvider(p).supportsBudget, variantSupported);
+  fbPreflight?.warnings.forEach((w) => log.warn(w));
+  if (fbPreflight && !seenProviders.has(fbPreflight.spec.providerName)) {
+    extraProviders.push({ spec: fbPreflight.spec, provider: getProvider(fbPreflight.spec.providerName), label: 'fallback' });
   }
   if (!preflight(ctx, spec, provider, { skipAuth: flags.dryRun, ignoreHalt: flags.dryRun, extraProviders })) {
     log.error('preflight failed; fix the ✗ items above (or run: symphony doctor)');

@@ -65,6 +65,31 @@ export interface EscalationConfig {
   onCategories: string[];
 }
 
+/**
+ * Fallback provider: a second provider/model the harness hands a task to when the *primary* provider
+ * keeps dying on transient infrastructure faults — a dropped connection, a 5xx, "model not available",
+ * "resource busy" — rather than on the task itself. After `afterAttempts` exponential retries on the
+ * primary (counted by the existing `retry` budget) the task switches to the fallback, which gets its
+ * own fresh retry budget, so a flaky upstream never fails work a different route could still do.
+ * Distinct from escalation, which only reacts to *task* failures and never to infrastructure faults.
+ * Off by default.
+ */
+export interface FallbackConfig {
+  enabled: boolean;
+  /** Provider the fallback sessions run on; defaults to OpenCode. */
+  provider?: ProviderName;
+  /** Model the fallback provider runs. For OpenCode this is a bare id; `modelProvider` names the upstream provider. */
+  model: string;
+  /** OpenCode only: upstream provider for a bare `model` (e.g. "morphllm", "openrouter"). */
+  modelProvider?: string;
+  /** Optional reasoning-effort override for the fallback; inherited from the provider config when unset. */
+  variant?: string;
+  /** Transient retries on the primary before switching to the fallback (0 = on the first transient fault). */
+  afterAttempts: number;
+  /** Transient failure categories that trigger a switch; an unset list means every transient category. */
+  onCategories: string[];
+}
+
 /** Where a System One (Jev) decision call is routed. Only OpenRouter is built in. */
 export const JEV_PROVIDERS = ['openrouter'] as const;
 export type JevProviderName = (typeof JEV_PROVIDERS)[number];
@@ -413,6 +438,8 @@ export interface Config {
   git: GitConfig;
   /** Second provider/model a failed task can be handed to. See EscalationConfig. */
   escalation: EscalationConfig;
+  /** Provider/model a task is switched to after repeated transient faults. See FallbackConfig. */
+  fallback: FallbackConfig;
   /** Optional Jev decision calls as a nudge fallback. See JevConfig. */
   jev: JevConfig;
   /** Optional image-analysis tool a task session can invoke. See VisionConfig. */
@@ -499,6 +526,14 @@ export const DEFAULTS: Config = {
     modelProvider: 'openrouter',
     maxAttempts: 1,
     onCategories: ['task', 'verify'],
+  },
+  fallback: {
+    enabled: false,
+    provider: 'opencode',
+    model: 'z-ai/glm-5.3',
+    modelProvider: 'openrouter',
+    afterAttempts: 2,
+    onCategories: ['rate_limit', 'overloaded', 'server', 'network', 'stall', 'crash'],
   },
   jev: {
     enabled: false,
@@ -824,6 +859,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const hooksRaw = isRecord(raw.hooks) ? raw.hooks : {};
   const gitRaw = isRecord(raw.git) ? raw.git : {};
   const escRaw = isRecord(raw.escalation) ? raw.escalation : {};
+  const fallbackRaw = isRecord(raw.fallback) ? raw.fallback : {};
   const jevRaw = isRecord(raw.jev) ? raw.jev : {};
   const visionRaw = isRecord(raw.vision) ? raw.vision : {};
   const slackRaw = isRecord(raw.slack) ? raw.slack : {};
@@ -943,6 +979,37 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         modelProvider,
         maxAttempts: Math.max(0, numberOr(escRaw.maxAttempts, DEFAULTS.escalation.maxAttempts, 'escalation.maxAttempts', warnings)),
         onCategories: stringArray(escRaw.onCategories, DEFAULTS.escalation.onCategories, 'escalation.onCategories', warnings),
+      };
+    })(),
+    fallback: (() => {
+      const model = typeof fallbackRaw.model === 'string' ? fallbackRaw.model.trim() : DEFAULTS.fallback.model;
+      let enabled = boolOr(fallbackRaw.enabled, DEFAULTS.fallback.enabled, 'fallback.enabled', warnings);
+      if (enabled && !model) {
+        warnings.push('fallback.enabled is true but fallback.model is empty; fallback stays off');
+        enabled = false;
+      }
+      const provider = fallbackRaw.provider === undefined || fallbackRaw.provider === null
+        ? DEFAULTS.fallback.provider
+        : asProviderName(fallbackRaw.provider, 'symphony.config.json fallback.provider');
+      let modelProvider = typeof fallbackRaw.modelProvider === 'string' && fallbackRaw.modelProvider.trim() ? fallbackRaw.modelProvider.trim() : DEFAULTS.fallback.modelProvider;
+      if (provider !== 'opencode' && modelProvider) {
+        warnings.push('fallback.modelProvider is only used by opencode; ignored');
+        modelProvider = undefined;
+      }
+      return {
+        enabled,
+        provider,
+        model,
+        modelProvider,
+        variant: (() => {
+          const v = fallbackRaw.variant;
+          if (v === undefined || v === null) return undefined;
+          if (typeof v === 'string') return v.trim() || undefined;
+          warnings.push(`fallback.variant: expected a string, got ${JSON.stringify(v)}; using provider default`);
+          return undefined;
+        })(),
+        afterAttempts: Math.max(0, numberOr(fallbackRaw.afterAttempts, DEFAULTS.fallback.afterAttempts, 'fallback.afterAttempts', warnings)),
+        onCategories: stringArray(fallbackRaw.onCategories, DEFAULTS.fallback.onCategories, 'fallback.onCategories', warnings),
       };
     })(),
     jev: (() => {
@@ -1401,6 +1468,56 @@ export function resolveEscalation(
       idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
       autoApprove: config.autoApprove,
       sources: { provider: 'escalation', model: 'escalation', modelProvider: config.escalation.modelProvider ? 'escalation' : pc.modelProvider ? 'config' : 'provider default', variant: variant ? 'config' : 'provider default' },
+    },
+    warnings,
+  };
+}
+
+/**
+ * The fallback target, when one is configured and enabled. Returns undefined when fallback is off or
+ * has no usable model (so the caller falls back to its ordinary fatal/retry path). Like escalation
+ * the spec is built from config alone: fallback is its own provider/model, not a per-task knob.
+ */
+export function resolveFallback(
+  config: Config,
+  primary: SessionSpec,
+  supportsBudget: (p: ProviderName) => boolean = () => true,
+  variantSupport: (p: ProviderName, bin: string, model: string | undefined, variant: string) => boolean = () => false,
+): { spec: SessionSpec; warnings: string[] } | undefined {
+  if (!config.fallback.enabled) return undefined;
+  const warnings: string[] = [];
+  const providerName = config.fallback.provider ?? primary.providerName;
+  const rawModel = config.fallback.model.trim();
+  if (!rawModel) {
+    warnings.push('fallback.model is empty; fallback stays off');
+    return undefined;
+  }
+  const pc = config.providers[providerName];
+  const modelProvider = config.fallback.modelProvider ?? pc.modelProvider;
+  if (config.fallback.modelProvider && providerName !== 'opencode') warnings.push('fallback.modelProvider is only used by opencode; ignored');
+  const model = composeModel(providerName, modelProvider, rawModel)!;
+  let budgetUsd = pc.budgetUsd;
+  if (budgetUsd !== undefined && !supportsBudget(providerName)) {
+    warnings.push(`fallback budget ${budgetUsd} USD ignored: provider ${providerName} has no budget flag`);
+    budgetUsd = undefined;
+  }
+  let variant = config.fallback.variant ?? pc.variant;
+  if (variant && !variantSupport(providerName, pc.bin, model, variant)) variant = undefined;
+  if (providerName === 'opencode' && !model.includes('/')) {
+    warnings.push(`opencode addresses a model as "provider/model"; set fallback.modelProvider (or use a "provider/model" model); got "${model}"`);
+  }
+  return {
+    spec: {
+      providerName,
+      bin: pc.bin,
+      model,
+      variant,
+      extraArgs: pc.extraArgs,
+      budgetUsd,
+      timeoutMin: config.timeoutMin,
+      idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
+      autoApprove: config.autoApprove,
+      sources: { provider: 'fallback', model: 'fallback', modelProvider: config.fallback.modelProvider ? 'fallback' : pc.modelProvider ? 'config' : 'provider default', variant: variant ? (config.fallback.variant ? 'fallback' : 'config') : 'provider default' },
     },
     warnings,
   };

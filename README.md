@@ -10,7 +10,7 @@ A reasonably thin LLM task harness. Chain complex task sets together, use multip
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output. An optional [`mcp` block](#mcp-selection) can scope each session to a chosen subset of servers, so unrelated toolchains cost nothing.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [MCP selection](#mcp-selection) · [Providers](#providers) · [Escalation](#escalation) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Slack notifications](#slack-notifications) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [MCP selection](#mcp-selection) · [Providers](#providers) · [Escalation](#escalation) · [Fallback](#fallback) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Slack notifications](#slack-notifications) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -227,7 +227,7 @@ The previous behaviour is unchanged: `symphony run` (or `symphony run --no-tui`)
 | event | what happens |
 |---|---|
 | session ends cleanly but with **no result block** | it is resumed once with a close-out prompt (a "nudge"); `--no-nudge` disables |
-| **transient error** — rate limit, overloaded, 5xx, dropped socket, stalled output, crash, a dropped MCP/plugin/tool session | retried in place with exponential backoff (30 s base, doubling, capped at 15 min, jittered, a provider `Retry-After` honoured), **resuming the same session** when the provider supports it, so work is kept. A transient retry does **not** count as a task attempt, so a provider throttle can never trip the attempts halt. The same backoff retries a `verify` that dies on a transport fault (a dropped MCP/plugin session, a reset connection) rather than failing a task whose work is already done |
+| **transient error** — rate limit, overloaded, 5xx, dropped socket, stalled output, crash, a dropped MCP/plugin/tool session | retried in place with exponential backoff (30 s base, doubling, capped at 15 min, jittered, a provider `Retry-After` honoured), **resuming the same session** when the provider supports it, so work is kept. A transient retry does **not** count as a task attempt, so a provider throttle can never trip the attempts halt. The same backoff retries a `verify` that dies on a transport fault (a dropped MCP/plugin session, a reset connection) rather than failing a task whose work is already done. With the [`fallback` block](#fallback) on, a task that has already spent `afterAttempts` retries on the primary is switched to the fallback provider instead of retrying it again |
 | **fatal error** — auth, no credits, usage limit, unknown model, bad config, missing binary | the run **halts**: banner, exit `3`, sticky in `state.json`; later `run`s refuse to start |
 | task fails **twice in a row**, or one task fails **3 times** | the run halts (thresholds configurable) |
 | `continue` past `maxContinuations` | treated as failed |
@@ -595,6 +595,39 @@ It is off by default, and the shipped default target is OpenCode running **GLM-5
 
 Escalation is bounded: `maxAttempts` caps it, and `maxIterationsPerTask` still caps the task as a whole, so a task can never ping-pong between models forever. Every session records the provider and model that ran it in `docs/logs/TNN.md`, so an escalated task is visible in the committed log. The escalation provider is also checked during preflight, so a missing binary is reported before the run starts rather than mid-task.
 
+## Fallback
+
+Escalation reacts to the *task* failing. Its opposite number, **fallback**, reacts to the *provider* failing: when the primary provider keeps dying on a transient infrastructure fault — a dropped connection, a `500`/`503`, "model not available", "resource busy" — the task is switched to a second provider/model for the rest of its retries. This is the case where a flaky upstream (or a routing provider having a bad day) would otherwise fail work that a different route — say a second OpenCode routed through another gateway — could still do.
+
+It is off by default and triggered only after `afterAttempts` transient retries on the primary have already been spent (the same exponential backoff described by the [`retry` block](#config)). The switch happens at most once per task; the fallback then gets its own fresh retry budget, and if it also exhausts it the task fails as usual. Fatal failures (auth, billing, an exhausted usage limit) never switch — those halt the run exactly as before.
+
+```json
+"fallback": {
+  "enabled": true,
+  "provider": "opencode",
+  "model": "morph-v3-fast",
+  "modelProvider": "morphllm",
+  "afterAttempts": 2,
+  "onCategories": ["rate_limit", "overloaded", "server", "network", "stall", "crash", "model"]
+}
+```
+
+The example above routes the fallback through an OpenCode provider named `morphllm` (a second OpenCode install or the same binary with a different upstream), so a task the primary can no longer reach is retried there.
+
+A category that is normally fatal (the shipped defaults halt on `model`, so a retired or unknown model id stops the run) can also be listed in `onCategories`; the task is then handed to the fallback once instead of halting, and only halts if the fallback fails too. That is the "model is not available" case: add `model` to the list (as the shipped example config does) and a model the primary can no longer reach is retried on the fallback route.
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | turn fallback on |
+| `provider` | `opencode` | provider the fallback sessions run on |
+| `model` | `z-ai/glm-5.3` | model the fallback provider runs |
+| `modelProvider` | `openrouter` | OpenCode only: the upstream provider `model` belongs to (composed as `modelProvider/model`); e.g. `morphllm` |
+| `variant` | – | optional reasoning-effort override; defaults to the provider's own |
+| `afterAttempts` | `2` | transient retries on the primary before switching (0 = on the first transient fault) |
+| `onCategories` | `[rate_limit, overloaded, server, network, stall, crash]` | transient categories that trigger a switch |
+
+Every session records the provider and model that ran it in `docs/logs/TNN.md`, so a switched task is visible in the committed log, and the fallback provider is checked during preflight like any other.
+
 ## Jev
 
 **Jev** — TypeSafe's System One decision model — makes fast, typed calls that replace brittle hand-written decisions in the harness. It is reached through [OpenRouter](https://openrouter.ai/settings/keys), so your OpenRouter key is all you need. Jev is off by default. When it is enabled, at least one workflow is armed, and its API key is missing, the run halts rather than run with the decision workflows silently disabled (with no workflow armed there is nothing to disable, so the run proceeds); a timeout or a low-confidence answer still falls back to the harness's own deterministic behavior.
@@ -865,6 +898,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `retry.maxAttempts`, `retry.exponential`, `retry.baseSec`, `retry.factor`, `retry.maxSec`, `retry.jitter`, `retry.honorRetryAfter`, `retry.backoffSec` | `8`, `true`, `30`, `2`, `900`, `0.2`, `true`, `[30,120,300]` | transient-error retries: exponential by default (`baseSec × factor^n`, capped, jittered, a provider `Retry-After` honoured), or the fixed `backoffSec` schedule when `exponential` is false |
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
 | `escalation.enabled`, `.provider`, `.model`, `.modelProvider`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
+| `fallback.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.afterAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, –, `2`, `[rate_limit, overloaded, server, network, stall, crash]` | switch a task to a second provider/model after repeated transient infrastructure faults (see [Fallback](#fallback)) |
 | `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `true`, `openrouter`, `typesafe/jev-1.13`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, adaptive image description, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt explains it (see [Vision tool](#vision-tool)) |
 | `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true` except `watch`, `10000` | post lifecycle events to a Slack channel or DM a user, threading a task's later events under its start (see [Slack notifications](#slack-notifications)) |

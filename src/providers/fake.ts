@@ -11,7 +11,7 @@ import type { Provider } from './types.js';
  *
  * Fixture directory: SYMPHONY_FAKE_FIXTURES (default <cwd>/.symphony/fixtures). Lookup order:
  *   <taskId>.<kind>.jsonl  →  <taskId>.jsonl  →  default.<kind>.jsonl  →  default.jsonl
- * where kind is task | resume | nudge | continue | escalate | wrapup. Control lines the fake agent
+ * where kind is task | resume | nudge | continue | escalate | fallback | wrapup. Control lines the fake agent
  * interprets instead of echoing:
  *   {"type":"fake_write","path":"rel/file","content":"..."}   write a file (simulated work)
  *   {"type":"fake_rm","path":"rel/file-or-dir"}                   delete a file or directory

@@ -868,6 +868,103 @@ test('an infrastructure failure is not escalated even when escalation is enabled
   }
 });
 
+test('a task that keeps failing transiently switches to the fallback provider and finishes', async () => {
+  const { dir, paths, task } = project();
+  const transient503 = (sid: string) => JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: sid, result: 'API error 503: service unavailable, try again.' });
+  // The primary fails on its task and every resume; the fallback session (a distinct kind) finishes.
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    transient503('s1'),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.resume.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    transient503('s1'),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.fallback.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    JSON.stringify({ type: 'fake_write', path: 'by-fallback.txt', content: 'done by the fallback' }),
+    claudeResult('done', 'recovered on the fallback route'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    nudge: false,
+    retry: { ...DEFAULTS.retry, maxAttempts: 8, backoffSec: [0], exponential: false },
+    fallback: { ...DEFAULTS.fallback, enabled: true, provider: 'fake' as const, model: 'fallback-model', afterAttempts: 2 },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.status, 'done');
+    // Two retries on the primary, then the switch; the fallback's session is an attempt, retries are not.
+    assert.equal(state.tasks.T01.transientRetries, 3);
+    assert.equal(state.tasks.T01.attempts, 1);
+    assert.equal(state.tasks.T01.model, 'fallback-model');
+    assert.ok(readFileSync(join(dir, 'by-fallback.txt'), 'utf8').includes('fallback'));
+    assert.match(readFileSync(paths.roadmap, 'utf8'), /\[x\] T01/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('the fallback is not used when the failure is fatal (an auth error still halts)', async () => {
+  const { dir, paths, task } = project();
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', result: 'Invalid API key' }),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    nudge: false,
+    retry: { ...DEFAULTS.retry, maxAttempts: 8, backoffSec: [0], exponential: false },
+    fallback: { ...DEFAULTS.fallback, enabled: true, provider: 'fake' as const, model: 'fallback-model', afterAttempts: 0 },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'failed');
+    assert.equal(out.halt?.category, 'auth');
+    assert.equal(state.tasks.T01.attempts, 1);
+    assert.notEqual(state.tasks.T01.model, 'fallback-model');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a normally-fatal model-unavailable failure falls back instead of halting when listed', async () => {
+  const { dir, paths, task } = project();
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', result: 'model gpt-6-sol does not exist or is not available' }),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.fallback.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    JSON.stringify({ type: 'fake_write', path: 'by-fallback.txt', content: 'done by the fallback' }),
+    claudeResult('done', 'finished on the fallback route'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    nudge: false,
+    retry: { ...DEFAULTS.retry, maxAttempts: 8, backoffSec: [0], exponential: false },
+    fallback: { ...DEFAULTS.fallback, enabled: true, provider: 'fake' as const, model: 'fallback-model', afterAttempts: 2, onCategories: [...DEFAULTS.fallback.onCategories, 'model'] },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(out.halt, undefined, 'the model-unavailable failure was routed to the fallback, not halted');
+    assert.equal(state.tasks.T01.model, 'fallback-model');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
 /** A fetch double for the Jev System One call. */
 function jevFetch(choice: string, confidence: number): typeof fetch {
   return (async () => new Response(JSON.stringify({
