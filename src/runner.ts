@@ -1405,8 +1405,16 @@ export async function runCommand(ctx: RunContext): Promise<number> {
 
       // Before the task starts: the preferred moment to notice it is too big, or that the plan
       // around it is wrong. A successful split or replan rewrites the plan, so the queue is
-      // re-selected and this task never runs as it was.
-      const bd = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'start'));
+      // re-selected and this task never runs as it was. A fault while assembling the evidence (for
+      // example the task file vanished under a rewrite) must not kill the whole run: fall through and
+      // let the ordinary task path handle it.
+      let bd: AutoBreakdown;
+      try {
+        bd = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'start'));
+      } catch (e) {
+        ctx.log.warn(`${task.id}: start breakdown check failed (${(e as Error).message}); running the task as it is`);
+        bd = { split: false, replan: false };
+      }
       if (bd.split || bd.replan) {
         afterRewrite();
         continue;

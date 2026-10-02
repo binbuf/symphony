@@ -75,7 +75,9 @@ function capTaskBody(text: string, maxBytes: number | undefined, displayName: st
 }
 
 export function taskFileBody(task: Task, maxBytes?: number): string | undefined {
-  if (!task.taskFile) return undefined;
+  // The file can disappear under the task (a split rewrote the plan, a human moved it): treat it as
+  // "no task file" rather than crashing the run with an ENOENT mid-finalisation.
+  if (!task.taskFile || !existsSync(task.taskFile)) return undefined;
   const body = parseFrontMatter(readFileSync(task.taskFile, 'utf8')).body.trim();
   return capTaskBody(body, maxBytes, task.taskFileRel ?? task.taskFile);
 }

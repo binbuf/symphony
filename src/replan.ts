@@ -4,7 +4,7 @@ import type { BreakdownEvidence } from './breakdown.js';
 import { scaffoldDocs } from './commands.js';
 import { resolveSession } from './config.js';
 import { docsContract } from './contract.js';
-import { commitAll, currentBranch, describeCommit, ensureGitignore } from './git.js';
+import { commitAll, currentBranch, describeCommit, ensureGitignore, restoreWorktree, snapshotWorktree } from './git.js';
 import { docsTree, formatLint, lintDocs, type LintReport } from './lint.js';
 import type { Logger } from './logger.js';
 import { rel, stopIgnoreEntry, type Paths } from './paths.js';
@@ -425,6 +425,15 @@ export async function replanForBreakdown(ctx: RunContext, ev: BreakdownEvidence,
     return fail(3, `halted on ${state.halted.taskId ?? '?'} (${state.halted.category})`);
   }
 
+  // A refused automatic replan must not leave its half-written plan in the worktree: the run carries
+  // on with the task afterwards and its final commit would otherwise sweep the rejected rewrite in.
+  const snapshot = snapshotWorktree(paths.root);
+  const reject = (code: number, error: string): ReplanResult => {
+    restoreWorktree(paths.root, snapshot);
+    log.warn(`replan: restored the working tree; the refused rewrite around ${ev.task.id} was discarded`);
+    return fail(code, error);
+  };
+
   let findings = lintDocs(paths, { design: config.designDocs });
   log.plain('--- lint (before)');
   formatLint(findings).forEach((l) => log.plain(l));
@@ -452,14 +461,14 @@ export async function replanForBreakdown(ctx: RunContext, ev: BreakdownEvidence,
   const { outcome, early } = await runDocsSession(ctx, spec, provider, {
     prompt, runName: `replan-${ev.task.id}`, taskId: `replan-${ev.task.id}`, label, timeoutMin: config.prepareTimeoutMin,
   });
-  if (early !== undefined) return fail(early, `replan session ended early (exit ${early})`);
+  if (early !== undefined) return reject(early, `replan session ended early (exit ${early})`);
 
   const after = lintDocs(paths, { design: config.designDocs });
   log.plain('--- lint (after)');
   formatLint(after).forEach((l) => log.plain(l));
   if (!after.ok) {
     log.error(`${docsRel}/ is still not in the expected format after the replan; fix the ✗ items by hand or let a later run try again`);
-    return fail(2, `${docsRel}/ is still not in the expected format after the replan`);
+    return reject(2, `${docsRel}/ is still not in the expected format after the replan`);
   }
 
   // The agent rewrote the plan on disk: reload it and check the rewrite before committing.
@@ -471,14 +480,14 @@ export async function replanForBreakdown(ctx: RunContext, ev: BreakdownEvidence,
     discovered.warnings.forEach((w) => log.warn(w));
   } catch (e) {
     log.error(`replan: the rewritten plan does not parse (${(e as Error).message}); refusing to commit.`);
-    return fail(2, 'the rewritten plan does not parse');
+    return reject(2, 'the rewritten plan does not parse');
   }
 
   const check = checkAutoReplanState(state, newTasks);
   if (!check.ok) {
     check.errors.forEach((e) => log.error(`replan: ${e}`));
     log.error('replan: refusing to commit. Nothing was recorded.');
-    return fail(2, check.errors[0]);
+    return reject(2, check.errors[0]);
   }
 
   const plan = planReplanState(state, newTasks);

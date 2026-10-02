@@ -3,7 +3,7 @@ import { basename, relative } from 'node:path';
 import { scaffoldDocs } from './commands.js';
 import { resolveSession } from './config.js';
 import { docsContract } from './contract.js';
-import { commitAll, currentBranch, describeCommit, ensureGitignore } from './git.js';
+import { commitAll, currentBranch, describeCommit, ensureGitignore, restoreWorktree, snapshotWorktree } from './git.js';
 import { docsTree, formatLint, lintDocs, type LintReport } from './lint.js';
 import { rel, stopIgnoreEntry, type Paths } from './paths.js';
 import { lintCommand, runDocsSession } from './prepare.js';
@@ -276,6 +276,20 @@ export async function splitTask(ctx: RunContext, opts: SplitOptions): Promise<Sp
     return fail(4, parent.id, 'preflight failed');
   }
 
+  // An automatic breakdown runs inside a live run and must never leave a refused rewrite in the
+  // worktree: the run continues the task afterwards and its own final commit would sweep the rejected
+  // rewrite in. Snapshot the pre-split state (when inside a run) so validation failures can be undone;
+  // the standalone command intentionally leaves the rewrite on disk for a human to repair.
+  const keepSnapshot = opts.keepLock === true;
+  const snapshot = keepSnapshot ? snapshotWorktree(paths.root) : undefined;
+  const reject = (code: number, error: string): SplitResult => {
+    if (keepSnapshot) {
+      restoreWorktree(paths.root, snapshot);
+      log.warn(`split: restored the working tree; the refused rewrite of ${parent.id} was discarded`);
+    }
+    return fail(code, parent.id, error);
+  };
+
   // Deterministic skeleton first, so the session always has tasks/ and design/ to write into, and a
   // PROGRESS.md to append to.
   let findings = before;
@@ -301,7 +315,7 @@ export async function splitTask(ctx: RunContext, opts: SplitOptions): Promise<Sp
     const { outcome, early } = await runDocsSession(ctx, spec, provider, {
       prompt, runName: `split-${parent.id}`, taskId: `split-${parent.id}`, label, timeoutMin: config.prepareTimeoutMin,
     });
-    if (early !== undefined) return fail(early, parent.id, `split session ended early (exit ${early})`);
+    if (early !== undefined) return reject(early, `split session ended early (exit ${early})`);
 
     // The agent rewrote the plan on disk: reload it and check it against the rules before committing.
     const text = readFileSync(paths.roadmap, 'utf8');
@@ -314,20 +328,20 @@ export async function splitTask(ctx: RunContext, opts: SplitOptions): Promise<Sp
       discovered.warnings.forEach((w) => log.warn(w));
     } catch (e) {
       log.error(`split: the rewritten plan does not parse (${(e as Error).message}); refusing to commit. Fix it by hand or run \`symphony split\` again.`);
-      return fail(2, parent.id, 'the rewritten plan does not parse');
+      return reject(2, 'the rewritten plan does not parse');
     }
     const check = checkSplit({ parent, before: ctx.tasks, after, roadmap, sequence, expected, paths });
     if (!check.ok) {
       check.errors.forEach((e) => log.error(`split: ${e}`));
       log.error(`split: refusing to commit. Nothing was recorded; fix ${rel(paths.root, paths.roadmap)} by hand or run \`symphony split ${parent.id}\` again.`);
-      return fail(2, parent.id, check.errors[0] ?? 'the rewrite failed validation');
+      return reject(2, check.errors[0] ?? 'the rewrite failed validation');
     }
     const afterLint = lintDocs(paths, { design: config.designDocs });
     log.plain('--- lint (after)');
     formatLint(afterLint).forEach((l) => log.plain(l));
     if (!afterLint.ok) {
       log.error(`${docsRel}/ is still not in the expected format after the split; fix the ✗ items by hand or run \`symphony split ${parent.id}\` again`);
-      return fail(2, parent.id, `${docsRel}/ is still not in the expected format after the split`);
+      return reject(2, `${docsRel}/ is still not in the expected format after the split`);
     }
 
     applySplitState(paths, state, parent.id, log);

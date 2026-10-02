@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { resetCommand } from '../src/commands.js';
-import { commitAll, commitPrefix, commitsForTask, currentBranch, guardGitignore, untrackedFiles } from '../src/git.js';
+import { commitAll, commitPrefix, commitsForTask, currentBranch, dirtyFiles, guardGitignore, restoreWorktree, snapshotWorktree, untrackedFiles } from '../src/git.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths } from '../src/paths.js';
 import { loadState, newTaskState } from '../src/state.js';
@@ -143,6 +143,50 @@ test('reset --revert finds commits under a custom commit message template', () =
   const log = execFileSync('git', ['-C', dir, 'log', '--oneline'], { encoding: 'utf8' });
   assert.match(log, /Revert "T01 — Do the thing \[done\]"/);
   assert.throws(() => readFileSync(join(dir, 'thing.txt')));
+});
+
+test('snapshotWorktree/restoreWorktree discard a session rewrite but keep pre-session work', () => {
+  const dir = repo();
+  writeFileSync(join(dir, 'tracked.txt'), 'orig');
+  execFileSync('git', ['-C', dir, 'add', '-A']);
+  execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+
+  // Work that was already in the tree before the session ran.
+  writeFileSync(join(dir, 'tracked.txt'), 'pre-session edit');
+  writeFileSync(join(dir, 'pre-untracked.txt'), 'pre-session new file');
+  const snapshot = snapshotWorktree(dir);
+  assert.ok(snapshot, 'a dirty tree yields a snapshot');
+  // The snapshot must not disturb the worktree.
+  assert.equal(readFileSync(join(dir, 'tracked.txt'), 'utf8'), 'pre-session edit');
+  assert.ok(existsSync(join(dir, 'pre-untracked.txt')));
+
+  // A refused rewrite: edits a tracked file and leaves new files behind.
+  writeFileSync(join(dir, 'tracked.txt'), 'refused rewrite');
+  writeFileSync(join(dir, 'refused-task.md'), 'should not survive');
+  rmSync(join(dir, 'pre-untracked.txt'));
+
+  restoreWorktree(dir, snapshot);
+  assert.equal(readFileSync(join(dir, 'tracked.txt'), 'utf8'), 'pre-session edit', 'pre-session edit is restored');
+  assert.ok(existsSync(join(dir, 'pre-untracked.txt')), 'pre-session untracked file is restored');
+  assert.ok(!existsSync(join(dir, 'refused-task.md')), 'the refused rewrite is gone');
+  assert.ok(dirtyFiles(dir).some((l) => l.endsWith('tracked.txt')));
+  assert.ok(dirtyFiles(dir).some((l) => l.endsWith('pre-untracked.txt')));
+  assert.ok(!dirtyFiles(dir).some((l) => l.includes('refused')));
+});
+
+test('restoreWorktree cleans the tree completely when there was no pre-session work', () => {
+  const dir = repo();
+  writeFileSync(join(dir, 'tracked.txt'), 'orig');
+  execFileSync('git', ['-C', dir, 'add', '-A']);
+  execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+  assert.equal(snapshotWorktree(dir), undefined, 'a clean tree has no snapshot');
+
+  writeFileSync(join(dir, 'tracked.txt'), 'session edit');
+  writeFileSync(join(dir, 'session-new.txt'), 'session file');
+  restoreWorktree(dir, undefined);
+  assert.equal(readFileSync(join(dir, 'tracked.txt'), 'utf8'), 'orig');
+  assert.ok(!existsSync(join(dir, 'session-new.txt')));
+  assert.deepEqual(dirtyFiles(dir), []);
 });
 
 test('reset --revert refuses a template that cannot identify the task commits', () => {

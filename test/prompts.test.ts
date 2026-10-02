@@ -75,6 +75,17 @@ test('buildTaskPrompt points at files by path and inlines only the task by defau
   void paths;
 });
 
+test('taskFileBody tolerates a task file that has disappeared, so the run fails cleanly', () => {
+  const { ctx } = fixture();
+  const gone: Task = { ...ctx.task, taskFile: join(ctx.paths.root, 'docs', 'tasks', 'missing.md'), taskFileRel: 'docs/tasks/missing.md' };
+  assert.equal(taskFileBody(gone), undefined);
+  assert.doesNotThrow(() => taskFileBody(gone, 100));
+  // The prompt falls back to the roadmap bullet instead of throwing an ENOENT.
+  const text = buildTaskPrompt({ ...ctx, task: gone });
+  assert.doesNotMatch(text, PLACEHOLDER);
+  assert.match(text, /\(no task file — the roadmap bullet is the whole task/);
+});
+
 test('the full profile inlines PROGRESS, the named design docs and the index', () => {
   const { ctx } = fixture();
   writeFileSync(ctx.paths.progress, '# Progress\n\n' + Array.from({ length: 5 }, (_, i) => `## T0${i + 1}\n- fact ${i + 1}`).join('\n\n'));

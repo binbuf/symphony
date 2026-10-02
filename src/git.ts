@@ -37,6 +37,41 @@ export function untrackedFiles(root: string): string[] {
   return r.code === 0 && r.stdout ? r.stdout.split('\n').filter(Boolean).map((f) => f.replace(/\\/g, '/')) : [];
 }
 
+/**
+ * Snapshot the current uncommitted worktree — tracked edits and untracked files alike — as a stash
+ * commit object, leaving the worktree itself untouched. Returns the commit sha, or undefined when the
+ * tree is clean or git refuses. Paired with {@link restoreWorktree} so a refused docs rewrite can be
+ * discarded without losing work that was already in the tree before the session ran.
+ */
+export function snapshotWorktree(root: string): string | undefined {
+  if (dirtyFiles(root).length === 0) return undefined;
+  // Stage everything (including untracked files) so the stash commit captures the full worktree, then
+  // drop the staged state again — `reset` leaves the working tree exactly as it was. `.symphony/` is
+  // the harness's own directory: it must stay out of the snapshot or applying it back would collide
+  // with the live lock/state the run is holding.
+  if (git(root, ['add', '-A', '--', '.', ':(exclude).symphony']).code !== 0) return undefined;
+  try {
+    const created = git(root, ['stash', 'create']);
+    return created.code === 0 && created.stdout ? created.stdout : undefined;
+  } finally {
+    git(root, ['reset', '-q']);
+  }
+}
+
+/**
+ * Discard every uncommitted change — including untracked files a session created — and, when a
+ * snapshot was taken, restore the pre-session worktree exactly. Used when a split/replan rewrite is
+ * refused, so the rejected rewrite can never be swept into the next session's task commit.
+ */
+export function restoreWorktree(root: string, snapshot: string | undefined): void {
+  git(root, ['reset', '-q', '--hard', 'HEAD']);
+  git(root, ['clean', '-qfd']);
+  if (snapshot) {
+    git(root, ['stash', 'apply', '--quiet', snapshot]);
+    git(root, ['reset', '-q']);
+  }
+}
+
 /** Directory names that are never worth committing. */
 const IGNORE_DIRS = new Set([
   'node_modules', 'dist', 'build', 'target', 'coverage', '.next', '.nuxt', '.cache',

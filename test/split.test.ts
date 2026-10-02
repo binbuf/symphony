@@ -11,7 +11,7 @@ import { resolvePaths, type Paths } from '../src/paths.js';
 import { loadProject, retargetFlags } from '../src/project.js';
 import { parseRoadmap } from '../src/roadmap.js';
 import type { RunContext, RunFlags } from '../src/runner.js';
-import { applySplitState, buildSplitPrompt, checkSplit, childIdSequence, childIdsFor, splitCommand } from '../src/split.js';
+import { applySplitState, buildSplitPrompt, checkSplit, childIdSequence, childIdsFor, splitCommand, splitTask } from '../src/split.js';
 import { loadState, newTaskState, type State } from '../src/state.js';
 import { discoverTasks, parseFrontMatter, type Task } from '../src/tasks.js';
 import { UsageError } from '../src/util.js';
@@ -193,6 +193,45 @@ test('splitCommand rewrites the task with the agent, reconciles state, and commi
     assert.match(log, /docs: split T02 into T02a, T02b \[split\]/);
     // The whole rewrite is one commit: nothing else is left dirty.
     assert.equal(execFileSync('git', ['-C', dir, 'status', '--porcelain'], { encoding: 'utf8' }).trim(), '');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('an automatic (keepLock) split that fails validation restores the worktree', async () => {
+  const { dir, paths } = project(
+    '# Roadmap\n\n## Phase 1\n\n- [ ] T02 — Big → [tasks/02-big.md](tasks/02-big.md)\n- [ ] T03 — Later\n',
+    { 'docs/tasks/02-big.md': '# T02 — Big\n\n## Goal\ntoo big\n' },
+  );
+  // A known, clean baseline so the restore has somewhere to land.
+  execFileSync('git', ['-C', dir, 'add', '-A']);
+  execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'init docs']);
+  const baseline = readFileSync(paths.roadmap, 'utf8');
+
+  const fixtures = join(dir, 'fixtures');
+  mkdirSync(fixtures, { recursive: true });
+  // A refused rewrite: the parent bullet is left in place and a stray subtask file is written.
+  writeFileSync(join(fixtures, 'split-T02.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'fake_write', path: 'docs/tasks/02a-extra.md', content: '# T02a — Extra\n' }),
+    JSON.stringify({ type: 'fake_write', path: 'docs/ROADMAP.md', content: baseline }),
+    claudeResult('done', 'left it as it was'),
+  ].join('\n') + '\n');
+  process.env.SYMPHONY_FAKE_FIXTURES = fixtures;
+
+  const loaded = loadProject(paths, silent);
+  const ctx: RunContext = {
+    paths, config: { ...DEFAULTS, provider: 'fake' }, cli: {}, flags, log: silent,
+    roadmap: loaded.roadmap, tasks: loaded.tasks, state: loaded.state, interrupted: false, abort: new AbortController(),
+  };
+  try {
+    const result = await splitTask(ctx, { id: 'T02', dryRun: false, keepLock: true });
+    assert.equal(result.code, 2);
+    assert.match(result.error ?? '', /still in the roadmap/);
+    // The refused rewrite must not be left for the run's next agent session to commit.
+    assert.equal(readFileSync(paths.roadmap, 'utf8').replace(/\r\n/g, '\n'), baseline.replace(/\r\n/g, '\n'));
+    assert.ok(!existsSync(join(paths.tasksDir, '02a-extra.md')), 'the stray subtask file is discarded');
+    assert.doesNotMatch(execFileSync('git', ['-C', dir, 'status', '--porcelain'], { encoding: 'utf8' }), /02a-extra/);
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

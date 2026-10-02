@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -554,6 +554,61 @@ test('run: an on-start breakdown rewrites the plan and the run continues on the 
     assert.match(log, /T03: Later \[done\]/);
     // The children's work is committed; the only possible straggler is the run-end refresh of the
     // ROADMAP status block, whose timestamp is not part of any task commit.
+    const dirty = execFileSync('git', ['-C', dir, 'status', '--porcelain'], { encoding: 'utf8' }).trim();
+    assert.ok(dirty === '' || dirty === 'M docs/ROADMAP.md', `unexpected dirty files: ${dirty}`);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('run: a refused on-start split leaves nothing for the task session to commit', async () => {
+  const { dir, paths } = project(
+    '# Roadmap\n\n## Phase 1\n\n- [ ] T01 — Big → [tasks/01-big.md](tasks/01-big.md)\n- [ ] T02 — Later\n',
+    { 'docs/tasks/01-big.md': '# T01 — Big\n\n## Goal\ntoo big\n' },
+  );
+  // Baseline commit so the run starts from a known clean tree.
+  execFileSync('git', ['-C', dir, 'add', '-A']);
+  execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'init docs']);
+  const fixtures = join(dir, 'fixtures');
+  // The split session leaves the parent bullet in place (invalid) and a stray subtask file.
+  writeFileSync(join(fixtures, 'split-T01.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-split' }),
+    JSON.stringify({ type: 'fake_write', path: 'docs/tasks/01a-stray.md', content: '# T01a — Stray\n' }),
+    JSON.stringify({ type: 'fake_write', path: 'docs/ROADMAP.md', content: readFileSync(paths.roadmap, 'utf8') }),
+    claudeResult('done', 'left it as it was'),
+  ].join('\n') + '\n');
+  // The task then runs on the ordinary path and reports done.
+  writeFileSync(join(fixtures, 'T01.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-01' }),
+    JSON.stringify({ type: 'fake_write', path: 'one.txt', content: 'done' }),
+    claudeResult('done', 'T01 finished'),
+  ].join('\n') + '\n');
+  writeFileSync(join(fixtures, 'T02.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-02' }),
+    JSON.stringify({ type: 'fake_write', path: 'two.txt', content: 'done' }),
+    claudeResult('done', 'T02 finished'),
+  ].join('\n') + '\n');
+
+  const loaded = loadProject(paths, silent);
+  const config: Config = {
+    ...DEFAULTS, provider: 'fake', nudge: false, watch: { ...DEFAULTS.watch, enabled: false },
+    breakdown: { ...DEFAULTS.breakdown, enabled: true, onStart: true, decision: 'rules', maxPerTask: 1 },
+  };
+  const ctx: RunContext = {
+    paths, config, cli: {}, flags, log: silent, roadmap: loaded.roadmap, tasks: loaded.tasks, state: loaded.state,
+    interrupted: false, abort: new AbortController(),
+  };
+  ctx.performSplit = (id) => splitTask(ctx, { id, dryRun: false, keepLock: true });
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    // Symphony's refusal survived its own downstream agent: the stray rewrite never reached a commit.
+    assert.ok(!existsSync(join(paths.tasksDir, '01a-stray.md')), 'the refused rewrite is not in the tree');
+    assert.equal(loadState(paths).tasks.T01.status, 'done');
+    assert.equal(loadState(paths).tasks.T02.status, 'done');
+    const committed = execFileSync('git', ['-C', dir, 'log', '--name-only', '--format=%s'], { encoding: 'utf8' });
+    assert.doesNotMatch(committed, /01a-stray/);
+    // The run-end refresh of the ROADMAP status block may be left dirty; the refused rewrite may not.
     const dirty = execFileSync('git', ['-C', dir, 'status', '--porcelain'], { encoding: 'utf8' }).trim();
     assert.ok(dirty === '' || dirty === 'M docs/ROADMAP.md', `unexpected dirty files: ${dirty}`);
   } finally {
