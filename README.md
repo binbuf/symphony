@@ -440,6 +440,8 @@ verify: npm test -- --runInBand
 ---
 ```
 
+When a provider declares `providers.<name>.models`, those front-matter `model:`/`variant:` values are checked against that allowlist (each model names the `variants` it supports) and an unknown one falls back to the provider's configured default; `symphony lint` reports it as an error instead. `--model`/`--model-provider`/`--variant` and their `SYMPHONY_*` env vars are not constrained.
+
 At the end of every task the harness also rewrites a **pipeline status block** at the bottom of `ROADMAP.md` (between `<!-- symphony:status -->` and `<!-- /symphony:status -->`): what is done, blocked, failed and left, the last finished task and any halt. It is the one place to see the pipeline's high-level state at a glance. Do not edit that block by hand; everything outside the markers stays yours.
 
 **Starting from an idea?** `symphony brief` prints a prompt with the idea placeholder at the top and the bootstrap instructions after a `---`: paste your idea into the top, hand the whole thing to any LLM, and it emits the docs package in this format. The brief asks the model to first decide whether this is a new package, a new phase of an existing one, or its own task set; to record the foundational decisions as ADRs; and to front-load the scaffolding, a green test command and the design docs before feature work. Then drop the files into the project next to `.symphony/` (see [Multiple task sets](#multiple-task-sets) for the task-set case).
@@ -869,7 +871,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | key | default | meaning |
 |---|---|---|
 | `provider` | `claude` | `claude` · `cursor` · `opencode` · `codex` · `gemini` · `antigravity` |
-| `providers.<name>.bin` `.model` `.modelProvider` `.variant` `.extraArgs` `.budgetUsd` `.idleTimeoutMin` | see `symphony.config.example.json` | binary (a `PATH` name, or an absolute/`~`/project-relative path that overrides `PATH`), model, upstream provider for OpenCode's `provider/model` form, reasoning-effort default (`high`), extra CLI args, per-task budget (Claude), stall timeout override |
+| `providers.<name>.bin` `.model` `.modelProvider` `.variant` `.models` `.extraArgs` `.budgetUsd` `.idleTimeoutMin` | see `symphony.config.example.json` | binary (a `PATH` name, or an absolute/`~`/project-relative path that overrides `PATH`), default model, upstream provider for OpenCode's `provider/model` form, reasoning-effort default (`high`), allowed models for task front-matter overrides (each `{ id, variants }`; absent = any), extra CLI args, per-task budget (Claude), stall timeout override |
 | `paths.docs` | `docs` (legacy `.docs` honoured) | planning package directory |
 | `paths.roadmap` `.progress` `.tasks` `.design` `.adr` `.logs` `.index` | derived from `paths.docs` | individual overrides, absolute or root-relative |
 | `paths.stop` | `.stop` | graceful-pause sentinel (absolute or root-relative) |

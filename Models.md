@@ -4,7 +4,10 @@ Recommended model ids per provider, current as of **September 2026**. Model line
 this as a starting point and confirm against the CLI's own listing, noted per provider below.
 
 Set an id with `--model`, or `providers.<name>.model` in `symphony.config.json`. These are the ids
-the harness passes straight through; it does not validate them.
+the harness passes straight through. To constrain what a task file may pick, list
+`providers.<name>.models` (each `{ id, variants }`); the task front-matter `model:`/`variant:` is then
+an allowlist, and anything outside it is ignored in favour of the configured default. `--model` and
+`SYMPHONY_MODEL` remain escape hatches.
 
 ## Reasoning effort
 

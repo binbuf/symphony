@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { DEFAULTS } from '../src/config.js';
 import { lintDocs, scanCandidates } from '../src/lint.js';
 import { resolvePaths } from '../src/paths.js';
 
@@ -104,4 +105,21 @@ test('designDocs: false drops design/adr requirements and lints clean without a 
   assert.ok(!codes(off).includes('design-missing'));
   assert.ok(!codes(off).includes('adr-missing'));
   assert.equal(off.ok, true, JSON.stringify(off.findings));
+});
+
+test('task front matter model/variant are checked against the provider allowlist', () => {
+  const dir = repo();
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.tasksDir, { recursive: true });
+  mkdirSync(paths.adrDir, { recursive: true });
+  writeFileSync(paths.roadmap, '# R\n\n- [ ] T01 — First → [tasks/01-first.md](tasks/01-first.md)\n- [ ] T02 — Second → [tasks/02-second.md](tasks/02-second.md)\n');
+  writeFileSync(join(paths.tasksDir, '01-first.md'), '---\nmodel: gpt-9\n---\n# T01\n\n## Goal\nx\n\n## Scope\n- a\n\n## Done when\n- b\n\n## Hand-off\nc\n');
+  writeFileSync(join(paths.tasksDir, '02-second.md'), '---\nmodel: gpt-6-astra\nvariant: minimal\n---\n# T02\n\n## Goal\nx\n\n## Scope\n- a\n\n## Done when\n- b\n\n## Hand-off\nc\n');
+  writeFileSync(paths.progress, '# p\n');
+  const r = lintDocs(paths, { provider: 'codex', providers: DEFAULTS.providers });
+  assert.equal(r.ok, false);
+  const fm = r.findings.filter((f) => f.code === 'task-frontmatter');
+  assert.equal(fm.length, 2, JSON.stringify(r.findings));
+  assert.ok(fm.some((f) => /model "gpt-9"/.test(f.message)));
+  assert.ok(fm.some((f) => /variant "minimal"/.test(f.message)));
 });

@@ -792,3 +792,58 @@ test('modelProvider composes the OpenCode "provider/model" reference for every b
   assert.equal(bad.config.providers.claude.modelProvider, undefined);
   assert.ok(bad.warnings.some((w) => /providers\.claude\.modelProvider/.test(w)));
 });
+
+test('providers.<name>.models is an allowlist for task front matter', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-models-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({
+    provider: 'codex',
+    providers: {
+      codex: {
+        model: 'gpt-6-sol',
+        variant: 'high',
+        models: [
+          { id: 'gpt-6-sol', variants: ['low', 'medium', 'high'] },
+          { id: 'gpt-6-astra', variants: ['low', 'medium', 'high', 'xhigh'] },
+          'gpt-6-luna',
+        ],
+      },
+    },
+  }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(warnings.length, 0);
+  assert.deepEqual(config.providers.codex.models?.map((m) => m.id), ['gpt-6-sol', 'gpt-6-astra', 'gpt-6-luna']);
+  assert.deepEqual(config.providers.codex.models?.[1].variants, ['low', 'medium', 'high', 'xhigh']);
+
+  // An allowed model and one of its variants pass through untouched.
+  const ok = resolveSession(config, task({ model: 'gpt-6-astra', variant: 'xhigh' }), {}, {}, () => true, () => true);
+  assert.equal(ok.spec.model, 'gpt-6-astra');
+  assert.equal(ok.spec.variant, 'xhigh');
+  assert.equal(ok.warnings.length, 0);
+
+  // A model outside the list is ignored in favour of the configured default, with a warning.
+  const badModel = resolveSession(config, task({ model: 'gpt-9' }), {}, {}, () => true, () => true);
+  assert.equal(badModel.spec.model, 'gpt-6-sol');
+  assert.equal(badModel.spec.sources.model, 'config');
+  assert.ok(badModel.warnings.some((w) => /not one of providers\.codex\.models/.test(w)));
+
+  // A variant its allowlisted model does not list falls back to the provider default.
+  const badVariant = resolveSession(config, task({ model: 'gpt-6-astra', variant: 'minimal' }), {}, {}, () => true, () => true);
+  assert.equal(badVariant.spec.variant, 'high');
+  assert.equal(badVariant.spec.sources.variant, 'config');
+  assert.ok(badVariant.warnings.some((w) => /not supported by model "gpt-6-astra"/.test(w)));
+
+  // CLI flags stay an escape hatch past the allowlist.
+  const byCli = resolveSession(config, task(), { model: 'gpt-9', variant: 'max' }, {}, () => true, () => true);
+  assert.equal(byCli.spec.model, 'gpt-9');
+  assert.equal(byCli.spec.variant, 'max');
+
+  // Malformed entries are dropped with warnings; a provider with no models list accepts anything.
+  writeFileSync(paths.config, JSON.stringify({ providers: { codex: { models: [null, {}, { id: '' }, { id: 'a', variants: [1] }, 'a', 'a'] } } }));
+  const malformed = loadConfig(paths, {});
+  assert.deepEqual(malformed.config.providers.codex.models?.map((m) => m.id), ['a']);
+  assert.equal(malformed.config.providers.codex.models?.[0].variants, undefined);
+  assert.ok(malformed.warnings.some((w) => /providers\.codex\.models\[0\]/.test(w)));
+  assert.equal(resolveSession(DEFAULTS, task({ provider: 'cursor', model: 'anything' }), {}, {}).spec.model, 'anything');
+});

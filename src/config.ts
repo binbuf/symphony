@@ -7,8 +7,20 @@ import { UsageError, fileExists, isRecord, parseTimeZone, type TimeZone } from '
 
 export const PROVIDER_NAMES: ProviderName[] = ['claude', 'cursor', 'opencode', 'codex', 'gemini', 'antigravity', 'fake'];
 
+/**
+ * One model a provider may run, with the reasoning effort it accepts. Listing `models` makes the
+ * provider a closed set: a task file's `model:`/`variant:` front matter may only name what is here.
+ */
+export interface ProviderModelConfig {
+  /** Model id handed to the CLI. For OpenCode this is the composed `modelProvider/id`. */
+  id: string;
+  /** Reasoning efforts this model accepts; present and non-empty gates task `variant:` overrides. */
+  variants?: string[];
+}
+
 export interface ProviderConfig {
   bin: string;
+  /** Default model id, used when no task front matter names one. */
   model?: string;
   /**
    * The upstream provider a bare `model` runs on, for CLIs that address models as `provider/model`
@@ -18,6 +30,12 @@ export interface ProviderConfig {
   modelProvider?: string;
   /** Default reasoning-effort / variant for this provider (e.g. "high"). Ignored by providers without a knob. */
   variant?: string;
+  /**
+   * The models a task file may select from, each with the variants it supports. When present, it is an
+   * allowlist: a task `model:` outside it (or a `variant:` its model does not list) is ignored in favour
+   * of the configured default. Absent means any model id is accepted, as before.
+   */
+  models?: ProviderModelConfig[];
   extraArgs: string[];
   budgetUsd?: number;
   idleTimeoutMin?: number;
@@ -535,7 +553,21 @@ export const DEFAULTS: Config = {
     claude: { bin: 'claude', model: 'claude-opus-5', variant: 'high', extraArgs: [] },
     cursor: { bin: 'agent', model: 'claude-opus-5', extraArgs: [], idleTimeoutMin: 45 },
     opencode: { bin: 'opencode', model: 'claude-sonnet-4-5', modelProvider: 'anthropic', variant: 'high', extraArgs: [], idleTimeoutMin: 45 },
-    codex: { bin: 'codex', model: 'gpt-6-sol', variant: 'high', extraArgs: [], idleTimeoutMin: 45 },
+    codex: {
+      bin: 'codex',
+      model: 'gpt-6-sol',
+      variant: 'high',
+      models: [
+        { id: 'gpt-6-sol', variants: ['low', 'medium', 'high'] },
+        { id: 'gpt-6-astra', variants: ['low', 'medium', 'high', 'xhigh'] },
+        { id: 'gpt-6-luna', variants: ['minimal', 'low', 'medium', 'high'] },
+        { id: 'gpt-5.6-sol', variants: ['low', 'medium', 'high'] },
+        { id: 'gpt-5.6-terra', variants: ['low', 'medium', 'high'] },
+        { id: 'gpt-5.6-luna', variants: ['minimal', 'low', 'medium', 'high'] },
+      ],
+      extraArgs: [],
+      idleTimeoutMin: 45,
+    },
     gemini: { bin: 'gemini', model: 'gemini-3.1-pro-preview', extraArgs: [], idleTimeoutMin: 45 },
     antigravity: { bin: 'agy', model: 'gemini-3.1-pro-high', variant: 'high', extraArgs: [], idleTimeoutMin: 45 },
     fake: { bin: process.execPath, extraArgs: [] },
@@ -745,6 +777,35 @@ function stringArray(x: unknown, fallback: string[], where: string, warnings: st
   return fallback;
 }
 
+/**
+ * Parse a provider's `models` allowlist. Each entry is a bare id string or `{ id, variants }`.
+ * A malformed entry is dropped with a warning; an empty or absent list yields `undefined` (no gate).
+ */
+function providerModels(x: unknown, where: string, warnings: string[]): ProviderModelConfig[] | undefined {
+  if (!Array.isArray(x)) { warnings.push(`${where}: expected an array; ignoring`); return undefined; }
+  const out: ProviderModelConfig[] = [];
+  const seen = new Set<string>();
+  x.forEach((raw, i) => {
+    const w = `${where}[${i}]`;
+    let id: string | undefined;
+    let variants: string[] | undefined;
+    if (typeof raw === 'string') id = raw.trim();
+    else if (isRecord(raw)) {
+      id = typeof raw.id === 'string' ? raw.id.trim() : undefined;
+      if (raw.variants !== undefined && raw.variants !== null) {
+        if (Array.isArray(raw.variants) && raw.variants.every((v) => typeof v === 'string' && v.trim())) {
+          variants = (raw.variants as string[]).map((v) => v.trim());
+        } else warnings.push(`${w}.variants: expected an array of strings; ignoring`);
+      }
+    } else { warnings.push(`${w}: expected a model id or an object with "id"; ignored`); return; }
+    if (!id) { warnings.push(`${w}: missing a non-empty "id"; ignored`); return; }
+    if (seen.has(id)) { warnings.push(`${w}: duplicate model "${id}"; ignored`); return; }
+    seen.add(id);
+    out.push(variants && variants.length ? { id, variants } : { id });
+  });
+  return out.length ? out : undefined;
+}
+
 /** Like boolOr, but the value must be one of `allowed`; anything else falls back with a warning. */
 function enumOr<T extends string>(x: unknown, allowed: readonly T[], fallback: T, where: string, warnings: string[]): T {
   if (x === undefined || x === null) return fallback;
@@ -914,11 +975,19 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         warnings.push(`providers.${name}.modelProvider is only used by opencode; ignored`);
         modelProvider = undefined;
       }
+      const models = val.models === undefined || val.models === null
+        ? base.models
+        : providerModels(val.models, `providers.${name}.models`, warnings);
+      const model = typeof val.model === 'string' && val.model ? val.model : base.model;
+      if (models?.length && model && !models.some((m) => m.id === model)) {
+        warnings.push(`providers.${name}: default model "${model}" is not in providers.${name}.models; task overrides are still checked against that list`);
+      }
       providers[pn] = {
         bin: typeof val.bin === 'string' && val.bin ? val.bin : base.bin,
-        model: typeof val.model === 'string' && val.model ? val.model : base.model,
+        model,
         modelProvider,
         variant: typeof val.variant === 'string' && val.variant ? val.variant : base.variant,
+        models,
         extraArgs: stringArray(val.extraArgs, base.extraArgs, `providers.${name}.extraArgs`, warnings),
         budgetUsd: val.budgetUsd === undefined || val.budgetUsd === null ? base.budgetUsd : numberOr(val.budgetUsd, 0, `providers.${name}.budgetUsd`, warnings),
         idleTimeoutMin: val.idleTimeoutMin === undefined || val.idleTimeoutMin === null ? base.idleTimeoutMin : atLeastOr(val.idleTimeoutMin, DEFAULTS.idleTimeoutMin, 0, `providers.${name}.idleTimeoutMin`, warnings),
@@ -1384,6 +1453,14 @@ export function resolveSession(
   }
   model = composeModel(providerName, modelProvider, model);
 
+  // Config allowlist. When the provider declares `models`, a task may only override to one of them;
+  // anything else is ignored in favour of the configured default. CLI/env stay escape hatches.
+  if (pc.models?.length && modelSource === 'task front matter' && !pc.models.some((m) => m.id === model)) {
+    if (model) warnings.push(`${task?.taskFileRel ?? 'task'}: model "${model}" is not one of providers.${providerName}.models (${pc.models.map((m) => m.id).join(', ')}); using the configured default`);
+    model = composeModel(providerName, modelProvider, pc.model || undefined);
+    modelSource = pc.model ? 'config' : 'provider default';
+  }
+
   // Reasoning effort. Default comes from the provider config (shipped as "high" where supported);
   // it is dropped when the provider has no knob or the model does not advertise it.
   let variant: string | undefined;
@@ -1394,6 +1471,16 @@ export function resolveSession(
   else if (pc.variant) { variant = pc.variant; variantSource = 'config'; }
   else { variant = undefined; variantSource = 'provider default'; }
   if (!variant) variantSource = 'provider default';
+
+  // A task's variant must be one its (allowlisted) model advertises; otherwise the default is used.
+  if (pc.models?.length && variant && variantSource === 'task front matter') {
+    const entry = pc.models.find((m) => m.id === model);
+    if (entry?.variants?.length && !entry.variants.includes(variant)) {
+      warnings.push(`${task?.taskFileRel ?? 'task'}: variant "${variant}" is not supported by model "${model}" (${entry.variants.join(', ')}); using the configured default`);
+      variant = pc.variant;
+      variantSource = pc.variant ? 'config' : 'provider default';
+    }
+  }
   if (variant && !variantSupport(providerName, pc.bin, model, variant)) {
     const explicit = variantSource === '--variant' || variantSource === 'env SYMPHONY_VARIANT' || variantSource === 'task front matter';
     if (explicit) warnings.push(`${providerName}${model ? ` model ${model}` : ''} does not support variant "${variant}" [${variantSource}]; ignoring`);

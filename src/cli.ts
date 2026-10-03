@@ -270,7 +270,7 @@ export async function main(argv: string[]): Promise<number> {
     return runAttach({ paths, provider: config.provider, timeZone: config.timeZone, log });
   }
   if (cmd === 'lint') {
-    const report = lintDocs(paths, { design: config.designDocs, skipDirs: allDocsDirs(paths.root, config) });
+    const report = lintDocs(paths, { design: config.designDocs, skipDirs: allDocsDirs(paths.root, config), provider: config.provider, providers: config.providers });
     formatLint(report).forEach((l) => log.plain(l));
     return report.ok ? 0 : 2;
   }

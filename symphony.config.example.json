@@ -24,8 +24,18 @@
       "idleTimeoutMin": 45
     },
     "codex": {
+      "_codex": "model is the default used when a task names none. models is an allowlist: a task file's model:/variant: front matter may only pick from it; an unknown model or a variant its model does not list is ignored in favour of the default.",
       "bin": "codex",
       "model": "gpt-6-sol",
+      "variant": "high",
+      "models": [
+        { "id": "gpt-6-sol", "variants": ["low", "medium", "high"] },
+        { "id": "gpt-6-astra", "variants": ["low", "medium", "high", "xhigh"] },
+        { "id": "gpt-6-luna", "variants": ["minimal", "low", "medium", "high"] },
+        { "id": "gpt-5.6-sol", "variants": ["low", "medium", "high"] },
+        { "id": "gpt-5.6-terra", "variants": ["low", "medium", "high"] },
+        { "id": "gpt-5.6-luna", "variants": ["minimal", "low", "medium", "high"] }
+      ],
       "extraArgs": [],
       "idleTimeoutMin": 45
     },

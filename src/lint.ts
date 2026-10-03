@@ -1,7 +1,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { PROVIDER_NAMES } from './config.js';
+import { PROVIDER_NAMES, type ProviderConfig } from './config.js';
 import { gitToplevel } from './git.js';
+import type { ProviderName } from './providers/types.js';
 import { rel, type Paths } from './paths.js';
 import { parseRoadmap, taskIdOrder, type Roadmap } from './roadmap.js';
 import { TASK_FILE_RE, discoverTasks, parseFrontMatter } from './tasks.js';
@@ -72,7 +73,7 @@ export function docsTree(paths: Paths): string[] {
   return out;
 }
 
-export function lintDocs(paths: Paths, opts: { design?: boolean; skipDirs?: string[] } = {}): LintReport {
+export function lintDocs(paths: Paths, opts: { design?: boolean; skipDirs?: string[]; provider?: ProviderName; providers?: Record<ProviderName, ProviderConfig> } = {}): LintReport {
   const design = opts.design !== false;
   const f: Finding[] = [];
   const add = (level: LintLevel, code: string, message: string, path?: string) => f.push({ level, code, message, path });
@@ -150,6 +151,22 @@ export function lintDocs(paths: Paths, opts: { design?: boolean; skipDirs?: stri
           if (!/\S/.test(body)) add('warn', 'task-empty', `${t.taskFileRel} is empty`, t.taskFileRel);
           else if (missing.length) add('warn', 'task-sections', `${t.taskFileRel}: missing section${missing.length === 1 ? '' : 's'} ${missing.join(', ')}`, t.taskFileRel);
           if (meta.provider && !(PROVIDER_NAMES as string[]).includes(meta.provider)) add('error', 'task-frontmatter', `${t.taskFileRel}: front matter provider "${meta.provider}" is not one of ${PROVIDER_NAMES.join(', ')}`, t.taskFileRel);
+          if (opts.providers && (meta.model || meta.variant)) {
+            const pn = meta.provider && (PROVIDER_NAMES as string[]).includes(meta.provider)
+              ? (meta.provider as ProviderName)
+              : opts.provider;
+            const pc = pn ? opts.providers[pn] : undefined;
+            if (pc?.models?.length) {
+              const chosen = meta.model || pc.model;
+              if (meta.model && !pc.models.some((m) => m.id === meta.model)) {
+                add('error', 'task-frontmatter', `${t.taskFileRel}: front matter model "${meta.model}" is not one of providers.${pn}.models (${pc.models.map((m) => m.id).join(', ')}); the harness will use the configured default`, t.taskFileRel);
+              }
+              const entry = pc.models.find((m) => m.id === chosen);
+              if (meta.variant && entry?.variants?.length && !entry.variants.includes(meta.variant)) {
+                add('error', 'task-frontmatter', `${t.taskFileRel}: front matter variant "${meta.variant}" is not supported by model "${chosen}" (${entry.variants.join(', ')}); the harness will use the configured default`, t.taskFileRel);
+              }
+            }
+          }
         }
       } catch (e) {
         add('error', 'tasks-dir', (e as Error).message, d.tasks);
