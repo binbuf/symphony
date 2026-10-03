@@ -356,6 +356,50 @@ export interface TaskSetConfig {
   paths: PathOverrides;
 }
 
+/**
+ * Observable-progress detection (anti-thrash). After each attempt the harness fingerprints the
+ * externally measurable state (HEAD, non-harness worktree changes, acceptance checkboxes, gate board,
+ * verify result). A task that reports `continue` while reproducing a prior attempt's fingerprint made
+ * no net progress: it is classified `stalled` and re-scoped/parked rather than retried. On by default;
+ * it only ever fires on an exact repeat, so it cannot flag genuine work as a stall.
+ */
+export interface ProgressConfig {
+  enabled: boolean;
+  /** Consecutive identical fingerprints that mark a stall. 1 = the first repeat (two in a row). */
+  stallAfterRepeats: number;
+  /** How many attempt fingerprints are kept per task. */
+  historySize: number;
+}
+
+/**
+ * The objective product signal policy is keyed off, independent of the agent's narrative. When a
+ * command is set (e.g. one that prints "organic routes certified, zero fixtures"), the harness samples
+ * it per attempt, folds it into the progress fingerprint, and parks a task whose metric has plateaued
+ * across attempts — so retry/split/accept decisions follow an externally observable signal.
+ */
+export interface MetricConfig {
+  /** Shell command that prints the metric. Unset = no objective metric (fingerprint-only detection). */
+  command?: string;
+  /** Which direction is progress. */
+  direction: 'increase' | 'decrease' | 'nonzero';
+  /** Wall clock for one metric sample. */
+  timeoutMin: number;
+}
+
+/**
+ * Hard autonomy invariants. A task that reaches its cost or wall-clock ceiling is parked (blocked)
+ * rather than retried forever; auto-created tickets must dedupe and stay within the split-depth bound.
+ * `0` disables a bound.
+ */
+export interface CeilingConfig {
+  /** Stop retrying a task once its reported cost reaches this. 0 = unlimited. */
+  maxCostUsdPerTask: number;
+  /** Stop retrying a task once its wall clock reaches this. 0 = unlimited. */
+  maxMinutesPerTask: number;
+  /** Maximum split depth (id suffix length): T10 → T10a → T10a1 is depth 2. Exceeding it stops a split. */
+  maxSplitDepth: number;
+}
+
 export interface Config {
   provider: ProviderName;
   providers: Record<ProviderName, ProviderConfig>;
@@ -366,6 +410,12 @@ export interface Config {
   autoApprove: boolean;
   /** Full-screen run view (status table + live output) when stdout/stdin is a terminal. `--no-tui` overrides. */
   tui: boolean;
+  /**
+   * Detach a headless `run` so the harness never lives inside the invoking process group (an agent's
+   * session ending would otherwise kill it mid-task). A run on an interactive terminal stays in the
+   * foreground; `--foreground` forces it, `--daemon` forces detaching. Default on.
+   */
+  daemon: boolean;
   /**
    * Zone used for the start/end stamps in the TUI status area and the per-task log: `"local"` (the
    * machine's zone, the default), `"utc"`, or a fixed offset like `"+05:30"` / `"-8"`.
@@ -452,6 +502,12 @@ export interface Config {
   mcp: McpConfig;
   /** Automatic task breakdown at task start, at a `continue` boundary, or instead of escalating. See BreakdownConfig. */
   breakdown: BreakdownConfig;
+  /** Observable-progress detection; a non-converging task is parked as a scope question. See ProgressConfig. */
+  progress: ProgressConfig;
+  /** Objective product metric that drives retry/split/accept policy. See MetricConfig. */
+  metric: MetricConfig;
+  /** Hard per-task and task-graph autonomy bounds. See CeilingConfig. */
+  ceiling: CeilingConfig;
 }
 
 export interface CliOverrides {
@@ -488,6 +544,7 @@ export const DEFAULTS: Config = {
   taskSets: [],
   autoApprove: true,
   tui: true,
+  daemon: true,
   timeZone: 'local',
   nudge: true,
   timeoutMin: 240,
@@ -616,6 +673,21 @@ export const DEFAULTS: Config = {
     timeoutMin: 5,
     preferOverEscalation: true,
     maxPerTask: 1,
+  },
+  progress: {
+    enabled: true,
+    stallAfterRepeats: 1,
+    historySize: 8,
+  },
+  metric: {
+    command: undefined,
+    direction: 'increase',
+    timeoutMin: 5,
+  },
+  ceiling: {
+    maxCostUsdPerTask: 0,
+    maxMinutesPerTask: 0,
+    maxSplitDepth: 3,
   },
 };
 
@@ -868,6 +940,9 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const mcpRaw = isRecord(raw.mcp) ? raw.mcp : {};
   const breakRaw = isRecord(raw.breakdown) ? raw.breakdown : {};
   const breakRulesRaw = isRecord(breakRaw.rules) ? breakRaw.rules : {};
+  const progressRaw = isRecord(raw.progress) ? raw.progress : {};
+  const metricRaw = isRecord(raw.metric) ? raw.metric : {};
+  const ceilingRaw = isRecord(raw.ceiling) ? raw.ceiling : {};
 
   const config: Config = {
     provider: raw.provider === undefined ? DEFAULTS.provider : asProviderName(raw.provider, 'symphony.config.json provider'),
@@ -876,6 +951,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     taskSets: taskSetList(raw.taskSets, warnings),
     autoApprove: boolOr(raw.autoApprove, DEFAULTS.autoApprove, 'autoApprove', warnings),
     tui: boolOr(raw.tui, DEFAULTS.tui, 'tui', warnings),
+    daemon: boolOr(raw.daemon, DEFAULTS.daemon, 'daemon', warnings),
     timeZone: (() => {
       if (raw.timeZone === undefined || raw.timeZone === null) return DEFAULTS.timeZone;
       const tz = parseTimeZone(raw.timeZone);
@@ -1202,6 +1278,21 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         maxPerTask: Math.max(0, numberOr(breakRaw.maxPerTask, DEFAULTS.breakdown.maxPerTask, 'breakdown.maxPerTask', warnings)),
       };
     })(),
+    progress: {
+      enabled: boolOr(progressRaw.enabled, DEFAULTS.progress.enabled, 'progress.enabled', warnings),
+      stallAfterRepeats: Math.max(0, numberOr(progressRaw.stallAfterRepeats, DEFAULTS.progress.stallAfterRepeats, 'progress.stallAfterRepeats', warnings)),
+      historySize: Math.max(1, numberOr(progressRaw.historySize, DEFAULTS.progress.historySize, 'progress.historySize', warnings)),
+    },
+    metric: {
+      command: hookString(metricRaw.command, 'metric.command', warnings),
+      direction: enumOr(metricRaw.direction, ['increase', 'decrease', 'nonzero'] as const, DEFAULTS.metric.direction, 'metric.direction', warnings),
+      timeoutMin: positiveOr(metricRaw.timeoutMin, DEFAULTS.metric.timeoutMin, 'metric.timeoutMin', warnings),
+    },
+    ceiling: {
+      maxCostUsdPerTask: Math.max(0, numberOr(ceilingRaw.maxCostUsdPerTask, DEFAULTS.ceiling.maxCostUsdPerTask, 'ceiling.maxCostUsdPerTask', warnings)),
+      maxMinutesPerTask: Math.max(0, numberOr(ceilingRaw.maxMinutesPerTask, DEFAULTS.ceiling.maxMinutesPerTask, 'ceiling.maxMinutesPerTask', warnings)),
+      maxSplitDepth: Math.max(0, numberOr(ceilingRaw.maxSplitDepth, DEFAULTS.ceiling.maxSplitDepth, 'ceiling.maxSplitDepth', warnings)),
+    },
   };
 
   if (cli.timeoutMin !== undefined) config.timeoutMin = cli.timeoutMin;

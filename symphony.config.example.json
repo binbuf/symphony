@@ -46,6 +46,7 @@
   "taskSets": [],
   "autoApprove": true,
   "tui": true,
+  "daemon": true,
   "timeZone": "local",
   "nudge": true,
   "timeoutMin": 240,
@@ -185,6 +186,23 @@
     "timeoutMin": 5,
     "preferOverEscalation": true,
     "maxPerTask": 1
+  },
+  "progress": {
+    "_progress": "On by default. After each attempt the harness fingerprints HEAD, non-harness worktree changes, acceptance checkboxes, the gate board and the verify result. A task that reports continue while reproducing a prior attempt's fingerprint has made no net progress: it is classified stalled, re-scoped or parked as a scope question instead of retried. Only an exact repeat can fire, so genuine work is never flagged.",
+    "enabled": true,
+    "stallAfterRepeats": 1,
+    "historySize": 8
+  },
+  "metric": {
+    "_metric": "Optional objective product signal. Set command to a shell command that prints a number (the metric is its last number). The harness samples it per attempt and parks a task whose metric has plateaued, so retry/split/accept follow an externally observable signal rather than the agent's narrative. direction: increase|decrease|nonzero.",
+    "direction": "increase",
+    "timeoutMin": 5
+  },
+  "ceiling": {
+    "_ceiling": "Hard autonomy bounds. maxCostUsdPerTask / maxMinutesPerTask park a task (blocked) instead of retrying once reached; maxSplitDepth bounds a split chain. 0 disables a bound.",
+    "maxCostUsdPerTask": 0,
+    "maxMinutesPerTask": 0,
+    "maxSplitDepth": 3
   },
   "retry": {
     "maxAttempts": 8,

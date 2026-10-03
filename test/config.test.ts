@@ -202,6 +202,16 @@ test('paths section is parsed and drives every location; unknown keys warn', () 
   assert.ok(bad.warnings.some((w) => w.includes('onBlocked')));
 });
 
+test('daemon (detach headless runs) is on by default and parses overrides', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-daemoncfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  assert.equal(DEFAULTS.daemon, true);
+  assert.equal(loadConfig(paths, {}).config.daemon, true);
+  writeFileSync(paths.config, JSON.stringify({ daemon: false }));
+  assert.equal(loadConfig(paths, {}).config.daemon, false);
+});
+
 test('default docs dir is docs/, but a legacy .docs/ is honoured when docs/ is absent', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-docs-'));
   assert.equal(resolvePaths(dir).docs, join(dir, 'docs'));
@@ -548,6 +558,50 @@ test('watch config is on by default every 5 min on OpenCode, parses overrides, a
   const dropped = resolveWatch({ ...DEFAULTS, watch: { ...DEFAULTS.watch, provider: 'fake', model: '', variant: 'high' } }, () => false);
   assert.equal(dropped.spec.variant, undefined);
   assert.ok(dropped.warnings.some((w) => /does not support variant/.test(w)));
+});
+
+test('progress config is on by default and parses overrides', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-progresscfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+
+  assert.deepEqual(DEFAULTS.progress, { enabled: true, stallAfterRepeats: 1, historySize: 8 });
+  assert.equal(loadConfig(paths, {}).config.progress.enabled, true);
+
+  writeFileSync(paths.config, JSON.stringify({ progress: { enabled: false, stallAfterRepeats: 3, historySize: 20 } }));
+  const config = loadConfig(paths, {}).config;
+  assert.equal(config.progress.enabled, false);
+  assert.equal(config.progress.stallAfterRepeats, 3);
+  assert.equal(config.progress.historySize, 20);
+
+  writeFileSync(paths.config, JSON.stringify({ progress: { stallAfterRepeats: -1, historySize: 0 } }));
+  const bad = loadConfig(paths, {}).config;
+  assert.equal(bad.progress.stallAfterRepeats, 0);
+  assert.equal(bad.progress.historySize, 1);
+});
+
+test('metric and ceiling configs are off/disabled by default and parse overrides', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-metriccfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  assert.equal(DEFAULTS.metric.command, undefined);
+  assert.equal(DEFAULTS.metric.direction, 'increase');
+  assert.deepEqual(DEFAULTS.ceiling, { maxCostUsdPerTask: 0, maxMinutesPerTask: 0, maxSplitDepth: 3 });
+
+  writeFileSync(paths.config, JSON.stringify({
+    metric: { command: 'npm run certify', direction: 'nonzero', timeoutMin: 3 },
+    ceiling: { maxCostUsdPerTask: 5, maxMinutesPerTask: 45, maxSplitDepth: 2 },
+  }));
+  const config = loadConfig(paths, {}).config;
+  assert.equal(config.metric.command, 'npm run certify');
+  assert.equal(config.metric.direction, 'nonzero');
+  assert.equal(config.metric.timeoutMin, 3);
+  assert.deepEqual(config.ceiling, { maxCostUsdPerTask: 5, maxMinutesPerTask: 45, maxSplitDepth: 2 });
+
+  writeFileSync(paths.config, JSON.stringify({ metric: { direction: 'sideways' }, ceiling: { maxCostUsdPerTask: -1 } }));
+  const bad = loadConfig(paths, {}).config;
+  assert.equal(bad.metric.direction, 'increase');
+  assert.equal(bad.ceiling.maxCostUsdPerTask, 0);
 });
 
 test('breakdown config is off by default, parses overrides, and validates keys', () => {

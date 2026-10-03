@@ -98,9 +98,14 @@ export function acceptCommand(paths: Paths, state: State, tasks: Task[], rawIds:
     const task = id ? tasks.find((t) => t.id === id) : undefined;
     if (!task) throw new UsageError(`accept ${raw}: no such task in ROADMAP.md`);
     const st = state.tasks[task.id];
-    if (!st) throw new UsageError(`accept ${task.id}: it has never run; only blocked/failed tasks can be accepted`);
+    if (!st) throw new UsageError(`accept ${task.id}: it has never run; a task with no state has no landed subset to sign off`);
     if (DONE_STATES.includes(st.status)) { log.info(`${task.id} already ${st.status}; nothing to accept`); continue; }
-    if (st.status !== 'blocked' && st.status !== 'failed') throw new UsageError(`accept ${task.id}: status is ${st.status}; only blocked/failed tasks can be accepted`);
+    // Any non-terminal state is acceptable: a blocked task (human items in its Hand-off), a failed
+    // task whose remainder is dependency-gated, or a task left `running` by a crash the human decides
+    // to close out. Only a task that never produced state has nothing to accept.
+    if (st.status !== 'blocked' && st.status !== 'failed' && st.status !== 'running') {
+      throw new UsageError(`accept ${task.id}: status is ${st.status}; accept a blocked, failed or running task`);
+    }
     const from = st.status;
     st.status = 'accepted';
     st.accepted = { at: nowIso(), from, note };

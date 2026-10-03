@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -8,7 +8,7 @@ import { DEFAULTS } from '../src/config.js';
 import { currentBranch } from '../src/git.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths, stopPresent } from '../src/paths.js';
-import { haltBanner, retryDelaySec, runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
+import { buildOperatingFrame, haltBanner, retryDelaySec, runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
 import { loadState, newTaskState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
 
@@ -219,7 +219,9 @@ test('continuation is bounded by maxContinuations and ends failed', async () => 
     claudeResult('continue', 'still not finished'),
   ].join('\n') + '\n');
   const state: State = loadState(paths);
-  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 1, nudge: false };
+  // Anti-thrash would pre-empt the bound (both attempts are no-op continues); disable it so this
+  // test exercises maxContinuations itself.
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 1, nudge: false, progress: { ...DEFAULTS.progress, enabled: false } };
   const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
   try {
     const out = await runTask(ctx, task);
@@ -238,13 +240,36 @@ test('maxIterationsPerTask stops a task that keeps continuing, with a clear summ
     claudeResult('continue', 'still not finished'),
   ].join('\n') + '\n');
   const state: State = loadState(paths);
-  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 9, maxIterationsPerTask: 2, nudge: false };
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 9, maxIterationsPerTask: 2, nudge: false, progress: { ...DEFAULTS.progress, enabled: false } };
   const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
   try {
     const out = await runTask(ctx, task);
     assert.equal(out.status, 'failed');
     assert.equal(state.tasks.T01.attempts, 2);
     assert.match(state.tasks.T01.summary ?? '', /maxIterationsPerTask/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a continue that reproduces the previous attempt\'s observable state is parked as stalled, not retried', async () => {
+  const { dir, paths, task } = project();
+  // Slice one lands a real change (the default T01.task.jsonl); the continuation reports continue but
+  // changes nothing observable, so it is a stall rather than another whole session.
+  writeFileSync(join(dir, 'fixtures', 'T01.continue.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('continue', 'still working'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 5, nudge: false };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'blocked');
+    assert.equal(state.tasks.T01.status, 'blocked');
+    assert.match(state.tasks.T01.summary ?? '', /stalled/);
+    assert.equal(state.tasks.T01.attempts, 2, 'the no-op continuation did not start a third session');
+    assert.ok((state.tasks.T01.deltas?.length ?? 0) >= 1, 'the attempt fingerprint was persisted');
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
@@ -355,6 +380,128 @@ test('run retries a task left "running" by a crash (stale pid) without counting 
     // The unattended rule gates count failures, not manual stops: the unfinished session is given
     // back, so only the successful retry remains.
     assert.equal(state.tasks.T01.attempts, 1);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('run recovers a task left "running" by a crash even when it is not selected, and repairs ROADMAP', async () => {
+  const { dir, paths, task } = project();
+  // A second task so T01 can be recovered without being the one selected to run.
+  writeFileSync(join(paths.tasksDir, '02-other.md'), '# T02 — other\n\n## Done when\n- [ ] x\n');
+  appendFileSync(paths.roadmap, '- [ ] T02 — other → [tasks/02-other.md](tasks/02-other.md)\n');
+  writeFileSync(join(dir, 'fixtures', 'T02.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('done', 'other done'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  state.tasks.T01 = { ...newTaskState('Do the thing'), status: 'running', attempts: 3, started: new Date().toISOString(), pid: 2147483647, logs: [] };
+  const tasks: Task[] = [task, { id: 'T02', num: 2, title: 'other', phase: 'Phase 1', order: 1, meta: { provider: 'fake' } }];
+  const config = { ...DEFAULTS, provider: 'fake' as const, halt: { ...DEFAULTS.halt, maxAttemptsPerTask: 5 } };
+  const ctx: RunContext = { paths, config, cli: {}, flags: { ...flags, only: ['T02'] }, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks, state, interrupted: false, abort: new AbortController() };
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    // T01 was repaired before selection: attempt given back, pid cleared, ROADMAP marker fixed.
+    assert.equal(state.tasks.T01.status, 'failed');
+    assert.equal(state.tasks.T01.attempts, 2);
+    assert.equal(state.tasks.T01.pid, undefined);
+    assert.match(state.tasks.T01.summary ?? '', /unclean stop/);
+    assert.match(readFileSync(paths.roadmap, 'utf8'), /\[~\] T01 .*⟵ failed/);
+    assert.equal(state.tasks.T02.status, 'done');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a blocked task whose only remaining acceptance is deferrable is auto-accepted (subset)', async () => {
+  const { dir, paths, task } = project();
+  task.taskFile = join(paths.tasksDir, '01-thing.md');
+  writeFileSync(task.taskFile, [
+    '# T01 — Do the thing',
+    '',
+    '## Done when',
+    '- [x] core lands',
+    '- [ ] in-game sfx [deferrable: unity-audio]',
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    claudeResult('blocked', 'sfx needs a caller that does not exist yet'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, breakdown: { ...DEFAULTS.breakdown, enabled: false } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'accepted');
+    assert.equal(state.tasks.T01.status, 'accepted');
+    assert.equal(state.tasks.T01.deferred?.length, 1);
+    assert.match(state.tasks.T01.summary ?? '', /deferred/);
+    assert.match(readFileSync(paths.roadmap, 'utf8'), /\[x\] T01.*⟵ accepted/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('the operating frame is generated from live state and excludes superseded design claims', () => {
+  const { paths, task } = project();
+  task.taskFile = join(paths.tasksDir, '01-thing.md');
+  writeFileSync(task.taskFile, '---\ndependsOn: T02\n---\n# T01 — Do the thing\n\n## Done when\n- [x] core\n- [ ] sfx [deferrable: unity-audio]\n');
+  writeFileSync(join(paths.adrDir, '0001-active.md'), '# 0001 — Active decision\n\n## Status\naccepted\n');
+  writeFileSync(join(paths.adrDir, '0002-old.md'), '# 0002 — Old decision\n\n## Status\nsuperseded by 0001\n');
+  const state: State = loadState(paths);
+  const tasks: Task[] = [task, { id: 'T02', num: 2, title: 'dep', phase: 'Phase 1', order: 1, meta: {} }];
+  const config = { ...DEFAULTS, provider: 'fake' as const };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks, state, interrupted: false, abort: new AbortController() };
+  const frame = buildOperatingFrame(ctx, task);
+  assert.match(frame, /## Operating frame/);
+  assert.match(frame, /Blocking now: waiting on prerequisite T02/);
+  assert.match(frame, /Acceptance: 1\/2 landed/);
+  assert.match(frame, /deferrable: sfx \(needs unity-audio\)/);
+  assert.match(frame, /Active decision \[accepted\]/);
+  assert.ok(!/Old decision/.test(frame), 'a superseded decision is not presented as active');
+});
+
+test('run parks a dependent as blocked-by-dependency when its prerequisite is blocked', async () => {
+  const { dir, paths, task } = project();
+  writeFileSync(join(paths.tasksDir, '02-other.md'), '---\ndependsOn: T01\n---\n# T02 — Other\n\n## Done when\n- [ ] x\n');
+  appendFileSync(paths.roadmap, '- [ ] T02 — Other → [tasks/02-other.md](tasks/02-other.md)\n');
+  const state: State = loadState(paths);
+  state.tasks.T01 = { ...newTaskState('Do the thing'), status: 'blocked', attempts: 1, summary: 'human item' };
+  const tasks: Task[] = [task, { id: 'T02', num: 2, title: 'Other', phase: 'Phase 1', order: 1, taskFile: join(paths.tasksDir, '02-other.md'), meta: {} }];
+  const config = { ...DEFAULTS, provider: 'fake' as const };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks, state, interrupted: false, abort: new AbortController() };
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 2, 'the dependent stops the run at the default onBlocked=stop');
+    assert.equal(state.tasks.T02.status, 'blocked');
+    assert.deepEqual(state.tasks.T02.blockedBy, ['T01']);
+    assert.match(state.tasks.T02.summary ?? '', /blocked by unmet prerequisite/);
+    assert.equal(state.tasks.T02.sessionId, undefined, 'no session was spent on the dependent');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('dependency closure pulls a prerequisite in for --only and orders it first', async () => {
+  const { dir, paths, task } = project();
+  writeFileSync(join(paths.tasksDir, '02-other.md'), '---\ndependsOn: T01\n---\n# T02 — Other\n\n## Done when\n- [ ] x\n');
+  appendFileSync(paths.roadmap, '- [ ] T02 — Other → [tasks/02-other.md](tasks/02-other.md)\n');
+  writeFileSync(join(dir, 'fixtures', 'T02.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('done', 'other done'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const tasks: Task[] = [task, { id: 'T02', num: 2, title: 'Other', phase: 'Phase 1', order: 1, taskFile: join(paths.tasksDir, '02-other.md'), meta: {} }];
+  const config = { ...DEFAULTS, provider: 'fake' as const };
+  const ctx: RunContext = { paths, config, cli: {}, flags: { ...flags, only: ['T02'] }, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks, state, interrupted: false, abort: new AbortController() };
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    assert.equal(state.tasks.T01.status, 'done', 'the prerequisite ran despite --only T02');
+    assert.equal(state.tasks.T02.status, 'done');
+    const log = execFileSync('git', ['-C', dir, 'log', '--format=%s'], { encoding: 'utf8' }).trim().split('\n');
+    assert.ok(log.findIndex((l) => l.startsWith('T02:')) < log.findIndex((l) => l.startsWith('T01:')), 'T01 committed before T02');
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

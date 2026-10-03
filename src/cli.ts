@@ -39,7 +39,7 @@ Usage
   symphony split   T05 [--into N]        break one oversized task into subtasks (T05 → T05a, T05b, …): the agent
                    [--note "..."] [--dry-run]   rewrites the task into subtask files, the harness validates and commits
   symphony init                          scaffold the docs/ package (ROADMAP, PROGRESS, tasks/, design/, adr/) + config + .gitignore
-  symphony accept  T05 [--note "..."]    human sign-off on a blocked/failed task (counts as done)
+  symphony accept  T05 [--note "..."]    human sign-off on a blocked/failed/running task (counts as done)
   symphony reset   T05 [--revert]        clear a task's state (and revert its commits with --revert) so it runs again
   symphony reset   --all                 clear every task's state and the halt, so a replaced roadmap starts clean
   symphony nudge   T05 [--note "..."]    resume a task's last session and ask it to close out
@@ -83,9 +83,11 @@ Controls
                            with scrolling, follow, pause, accept and clear-halt keys. Default
                            on when stdout and stdin are a terminal; off when piped, in CI, or with
                            --no-tui. Set "tui": false in the config to disable it by default.
-  detached runs            symphony start launches the harness headless in the background; symphony
-                           attach opens the run view as a client (q detaches, leaving it running);
-                           symphony stop stops it. pause / the pause menu / accept / split /
+  detached runs            a headless 'symphony run' (piped, CI, or an agent's subprocess) detaches
+                           itself by default so it never dies with the caller; --foreground runs it
+                           in-process, --daemon forces detaching. symphony start launches headless;
+                           symphony attach opens the run view as a client (q detaches, leaving it
+                           running); symphony stop stops it. pause / the pause menu / accept / split /
                            clear-halt all work from an attached view. The daemon publishes
                            .symphony/runtime.json and services .symphony/control/.
   touch .stop              pause at the next boundary: a task start or a continuation session end
@@ -186,6 +188,7 @@ export async function main(argv: string[]): Promise<number> {
       tui: { type: 'boolean' },
       'no-tui': { type: 'boolean' },
       daemon: { type: 'boolean' },
+      foreground: { type: 'boolean' },
       direction: { type: 'string' },
       'allow-id-reuse': { type: 'boolean' },
       'reset-state': { type: 'boolean' },
@@ -270,6 +273,15 @@ export async function main(argv: string[]): Promise<number> {
     const report = lintDocs(paths, { design: config.designDocs, skipDirs: allDocsDirs(paths.root, config) });
     formatLint(report).forEach((l) => log.plain(l));
     return report.ok ? 0 : 2;
+  }
+
+  // Detached by default: a headless `run` (no interactive terminal — an agent's subprocess, CI, a
+  // pipe) becomes its own daemon so it never dies with the invoking process group. `--foreground`
+  // forces an in-process run; `--daemon` forces detaching; an interactive terminal keeps the TUI.
+  const interactive = process.stdout.isTTY === true && process.stdin.isTTY === true;
+  if (cmd === 'run' && v.daemon !== true && v.foreground !== true && v['dry-run'] !== true && config.daemon && !interactive) {
+    const forwarded = argv.filter((a) => a !== 'run' && a !== '--foreground');
+    return startCommand(paths, ['run', '--daemon', '--no-tui', ...forwarded], log);
   }
 
   let loaded = loadProject(paths, log);

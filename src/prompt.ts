@@ -40,6 +40,8 @@ export interface PromptCtx {
   visionNote?: string;
   /** MCP capability note for a session with servers selected; omitted otherwise. */
   mcpNote?: string;
+  /** Generated operating frame (blocker, gate status, acceptance, objective trigger); never stale prose. */
+  operatingFrame?: string;
 }
 
 export const PROGRESS_HEADER = `# Progress notes
@@ -159,6 +161,7 @@ function buildExecutionPrompt(ctx: PromptCtx, continuing: boolean): string {
     index: d.index,
     noTaskFileNote,
     designPaths: ctx.designDocs ? `- ${d.design}/ and ${d.adr}/ — architecture and decisions.\n` : '',
+    operatingFrame: ctx.operatingFrame ? `${ctx.operatingFrame}\n` : '',
     doneCount: countTasks(ctx, (s) => (DONE_STATES as string[]).includes(s)),
     blockedCount: countTasks(ctx, (s) => s === 'blocked' || s === 'failed'),
     howTo,

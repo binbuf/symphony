@@ -1,5 +1,7 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import type { AcceptanceItem } from './graph.js';
 import type { Paths } from './paths.js';
+import type { AttemptDelta } from './progress.js';
 import type { TokenUsage } from './providers/types.js';
 import { statusFromMarkers, type Roadmap } from './roadmap.js';
 import { UsageError, atomicWriteSync, ensureDir, isRecord, nowIso } from './util.js';
@@ -61,6 +63,11 @@ export interface TaskState {
   pid?: number;
   summary?: string;
   lastError?: LastError;
+  /**
+   * Observable-progress fingerprints of recent attempts, oldest first. A `continue` whose fingerprint
+   * repeats the previous attempt's is classified `stalled` instead of retried (see `progress.ts`).
+   */
+  deltas?: AttemptDelta[];
   commit?: string;
   /** Full commit hash of the task's final commit, if any (for `reset --revert`). */
   commitSha?: string;
@@ -68,6 +75,10 @@ export interface TaskState {
   verify?: { command: string; ok: boolean; code?: number; output?: string; at: string };
   logs: LogRef[];
   accepted?: { at: string; from: TaskStatus; note?: string };
+  /** Acceptance items deferred by an automatic subset-accept (all remaining were deferrable). */
+  deferred?: AcceptanceItem[];
+  /** Task ids this task is waiting on when it was suspended on unmet prerequisites. */
+  blockedBy?: string[];
   reconciled?: boolean;
   /** A roadmap bullet that now titles a held task differently (possible id reuse); `title` keeps what it ran as. */
   titleMismatch?: string;

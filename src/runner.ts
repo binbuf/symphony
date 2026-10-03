@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { decideBreakdown, type BreakdownEvidence, type BreakdownStage, type BreakdownVerdict } from './breakdown.js';
 import { classifyFailure, evidenceText, makeClassified, type Classified, type FailureEvidence } from './classify.js';
@@ -6,6 +6,7 @@ import { resolveEscalation, resolveFallback, resolveSession, resolveVerify, type
 import { writeProgressDigest } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { commitAll, currentBranch, describeCommit } from './git.js';
+import { contractsFor, dependencyClosure, isLandedSubset, summarizeAcceptance, topoOrder, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
 import { fireHook } from './hooks.js';
 import { classifyError, classifyEscalation, classifySessionResult, jevProblem } from './jev.js';
 import { createLogger, openRunSinks, type Logger, type RunSinks } from './logger.js';
@@ -14,6 +15,7 @@ import { mcpPromptNote, planMcp, resolveMcpProfile } from './mcp.js';
 import { placeStop, stopPresent, type Paths } from './paths.js';
 import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, buildWrapUpPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
 import { applyPlan, loadProject, retargetFlags, sanitizeFlags } from './project.js';
+import { computeAttemptDelta, isStalled, metricPlateau, parseMetric } from './progress.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { addUsage } from './providers/common.js';
 import type { Provider, ResultEvent, SpawnSpec, TokenUsage } from './providers/types.js';
@@ -23,9 +25,9 @@ import { parseResultBlock, type ResultBlock } from './result.js';
 import { canonicalId, patchRoadmapFile, type Roadmap } from './roadmap.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
 import type { SplitResult } from './split.js';
-import { updatePipelineStatus } from './status.js';
-import { DONE_STATES, SKIP_STATES, acquireLock, haltResumeHint, newTaskState, releaseLock, saveState, startLockHeartbeat, type Halted, type LastError, type LogRef, type State, type TaskState, type TaskStatus } from './state.js';
-import type { Task } from './tasks.js';
+import { pidAlive, updatePipelineStatus } from './status.js';
+import { DONE_STATES, SKIP_STATES, acquireLock, haltResumeHint, liveLock, newTaskState, readLock, releaseLock, saveState, startLockHeartbeat, type Halted, type LastError, type LogRef, type State, type TaskState, type TaskStatus } from './state.js';
+import { parseFrontMatter, type Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, squash, stamp } from './util.js';
 import { runVerify, type VerifyResult } from './verify.js';
 import { visionPromptNote } from './vision.js';
@@ -112,6 +114,8 @@ export interface RunContext {
   performSplit?: PerformSplit;
   /** Run an automatic plan rewrite for a task; the CLI wires this to `replan` with the run's lock shared. */
   performReplan?: PerformReplan;
+  /** Parsed task contracts and dependency edges, keyed by task id; computed once per run. */
+  contracts?: Map<string, TaskContract>;
   /** Automatic breakdowns attempted per task id in this run; bounds a task that keeps failing. */
   autoSplits?: Map<string, number>;
   /** Slack thread roots per task id (task id → root message `ts`), so later events reply in-thread. */
@@ -644,9 +648,54 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
   ctx.watchRefresh?.();
 }
 
+/** Active ADR titles, with historical (superseded/rejected/withdrawn) records machine-excluded. */
+function activeDesignClaims(paths: Paths): string[] {
+  if (!existsSync(paths.adrDir)) return [];
+  const out: string[] = [];
+  for (const f of readdirSync(paths.adrDir).sort()) {
+    if (!/\.md$/i.test(f) || /template/i.test(f)) continue;
+    try {
+      const text = readFileSync(join(paths.adrDir, f), 'utf8');
+      const m = /^##\s+Status\s*\r?\n+\s*(.+)$/im.exec(text);
+      const status = (m?.[1] ?? '').trim().split(/\s+/)[0]?.toLowerCase() ?? '';
+      if (/superseded|deprecated|rejected|withdrawn/.test(status)) continue;
+      const title = /^#\s+(.+)$/m.exec(text)?.[1]?.trim() || f;
+      out.push(`${title} [${status || 'unstated'}]`);
+    } catch { /* an unreadable ADR must not break the prompt */ }
+  }
+  return out;
+}
+
+/**
+ * The generated operating frame every session receives: the live gate board, this task's unmet
+ * prerequisites, its landed acceptance subset and the objective trigger. Assembled from state + the
+ * DAG (not from PROGRESS/design prose), so stale framing cannot contradict the queue, and historical
+ * decisions are machine-excluded rather than left for the session to misread as active blockers.
+ */
+export function buildOperatingFrame(ctx: RunContext, task: Task): string {
+  const { paths, config, state } = ctx;
+  const contract = contractsOf(ctx).get(task.id);
+  const done = ctx.tasks.filter((t) => DONE_STATES.includes(state.tasks[t.id]?.status ?? 'pending')).length;
+  const unmet = (contract?.dependsOn ?? []).filter((d) => !DONE_STATES.includes(state.tasks[d]?.status ?? 'pending'));
+  const lines = ['## Operating frame (generated by symphony — do not edit)', ''];
+  lines.push(`- Gate board: ${done}/${ctx.tasks.length} done · phase "${task.phase}" · this task ${task.order + 1} of ${ctx.tasks.length}.`);
+  lines.push(`- Blocking now: ${unmet.length ? `waiting on prerequisite ${unmet.join(', ')}` : 'no unmet prerequisites'}.`);
+  if (contract && contract.acceptance.length) {
+    const s = summarizeAcceptance(contract.acceptance);
+    const defer = s.unmetDeferrable.map((a) => (a.capability ? `${a.text} (needs ${a.capability})` : a.text)).join('; ');
+    lines.push(`- Acceptance: ${s.checked}/${s.total} landed${s.unmetBlocking.length ? ` · still blocking: ${s.unmetBlocking.map((a) => a.text).join('; ')}` : ''}${defer ? ` · deferrable: ${defer}` : ''}.`);
+  }
+  const verify = resolveVerify(config, task, paths.root);
+  const lastVerify = state.tasks[task.id]?.verify;
+  lines.push(`- Objective trigger: ${verify ? `\`${verify.command}\` must pass` : 'no verify command configured'}${lastVerify ? ` (last verify ${lastVerify.ok ? 'passed' : 'failed'})` : ''}.`);
+  const claims = config.designDocs ? activeDesignClaims(paths) : [];
+  if (claims.length) lines.push(`- Active design claims (superseded/rejected excluded): ${claims.join('; ')}.`);
+  return lines.join('\n');
+}
+
 function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError: string | undefined, continuation: number, indexBody?: string): PromptCtx {
   const mcpProfile = resolveMcpProfile(ctx.config, 'task', task, ctx.cli);
-  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, variant: spec.variant, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody, visionNote: ctx.config.vision.enabled ? visionPromptNote() : undefined, mcpNote: mcpProfile ? mcpPromptNote(mcpProfile) : undefined };
+  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, variant: spec.variant, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody, visionNote: ctx.config.vision.enabled ? visionPromptNote() : undefined, mcpNote: mcpProfile ? mcpPromptNote(mcpProfile) : undefined, operatingFrame: buildOperatingFrame(ctx, task) };
 }
 
 /** Abortable, STOP- and split-aware backoff. Returns true when the run should stop waiting. */
@@ -693,6 +742,43 @@ export function classifyVerifyOutput(res: VerifyResult, fatalCategories: string[
   }, fatalCategories);
 }
 
+/**
+ * Sample the objective product metric (`metric.command`), if configured. Returns undefined when the
+ * metric is off, the command fails, or it prints no number — the deterministic fingerprint then
+ * carries the decision, and the run is never broken by a metric command.
+ */
+function readMetric(ctx: RunContext): number | undefined {
+  const command = ctx.config.metric.command;
+  if (!command) return undefined;
+  try {
+    const res = runVerify(ctx.paths.root, command, ctx.config.metric.timeoutMin * 60_000);
+    const n = parseMetric(res.output);
+    if (n === undefined) ctx.log.warn(`metric command printed no number: ${command}`);
+    return n;
+  } catch (e) {
+    ctx.log.warn(`metric command failed (${(e as Error).message}); judging the attempt without it`);
+    return undefined;
+  }
+}
+
+/**
+ * Append the observable fingerprint of the state just left behind by an attempt to the task's
+ * history, capped by `progress.historySize`. Recording happens *after* the slice is committed, so the
+ * next attempt's pre-commit fingerprint is directly comparable: an exact match means no net progress.
+ */
+function recordAttemptDelta(ctx: RunContext, task: Task, st: TaskState): void {
+  if (!ctx.config.progress.enabled) return;
+  try {
+    const delta = computeAttemptDelta({ paths: ctx.paths, attempt: st.attempts, taskFile: task.taskFile, verify: st.verify, metric: readMetric(ctx) });
+    const history = st.deltas ?? (st.deltas = []);
+    history.push(delta);
+    const cap = Math.max(1, ctx.config.progress.historySize);
+    if (history.length > cap) st.deltas = history.slice(history.length - cap);
+  } catch (e) {
+    ctx.log.warn(`${task.id}: could not record the progress fingerprint: ${(e as Error).message}`);
+  }
+}
+
 /** Commit a `continue` session's work so a crash never loses it. */
 function commitIntermediate(ctx: RunContext, task: Task, st: TaskState): void {
   const { paths, config, log } = ctx;
@@ -708,6 +794,20 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   const { paths, config, log, state } = ctx;
   const st = (state.tasks[task.id] ??= newTaskState(task.title));
   st.title = task.title;
+  const contract = contractsOf(ctx).get(task.id);
+  // When every unchecked acceptance item is deferrable, the landed blocking subset is green: the task
+  // can be accepted programmatically and the remainder recorded, instead of stopping for a human.
+  const deferrableRemainder = (): AcceptanceItem[] | undefined => {
+    if (!contract || !isLandedSubset(contract.acceptance)) return undefined;
+    return contract.acceptance.filter((a) => !a.checked);
+  };
+  const describeDefer = (a: AcceptanceItem): string => (a.capability ? `${a.text} (needs ${a.capability})` : a.text);
+  const autoAcceptSubset = (deferred: AcceptanceItem[]): Final => {
+    st.deferred = deferred;
+    st.accepted = { at: nowIso(), from: st.status, note: 'auto-accepted landed subset; remaining items deferrable' };
+    log.info(`${task.id}: all blocking acceptance items landed; auto-accepting the subset and deferring ${deferred.length} item(s)`);
+    return { status: 'accepted', summary: `accepted landed subset automatically; deferred: ${deferred.map(describeDefer).join('; ')}` };
+  };
   const resolved = resolveSession(config, task, ctx.cli, process.env, (p) => getProvider(p).supportsBudget, variantSupported);
   const warnings = resolved.warnings;
   // `spec`/`provider` are mutable: escalation swaps them mid-task for the rest of the attempts.
@@ -878,6 +978,24 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       final = { status: 'failed', summary: `stopped after maxIterationsPerTask (${maxIterations}) sessions without finishing`, lastError: { category: 'task', message: 'maxIterationsPerTask reached', transient: false, fatal: false, at: nowIso() } };
       break;
     }
+    // Hard autonomy ceiling: a task that has burned its cost or wall-clock budget is parked as a scope
+    // question rather than retried indefinitely. At least one session always runs (iterations > 0).
+    if (iterations > 0 && (config.ceiling.maxCostUsdPerTask > 0 || config.ceiling.maxMinutesPerTask > 0)) {
+      const cost = st.costUsd ?? 0;
+      const firstLog = st.logs?.[0]?.started;
+      const startMs = firstLog ? Date.parse(firstLog) : Date.parse(st.started ?? '');
+      const minutes = Number.isFinite(startMs) ? (Date.now() - startMs) / 60_000 : 0;
+      const overCost = config.ceiling.maxCostUsdPerTask > 0 && cost >= config.ceiling.maxCostUsdPerTask;
+      const overTime = config.ceiling.maxMinutesPerTask > 0 && minutes >= config.ceiling.maxMinutesPerTask;
+      if (overCost || overTime) {
+        const reason = overCost
+          ? `cost $${cost.toFixed(2)} >= ceiling.maxCostUsdPerTask ($${config.ceiling.maxCostUsdPerTask})`
+          : `wall clock ${minutes.toFixed(1)}min >= ceiling.maxMinutesPerTask (${config.ceiling.maxMinutesPerTask})`;
+        log.warn(`${task.id}: per-task ceiling reached (${reason}); parking as a scope question`);
+        final = { status: 'blocked', summary: `parked: ${reason}`, lastError: { category: 'budget', message: reason, transient: false, fatal: false, at: nowIso() } };
+        break;
+      }
+    }
     if (lastTransient) {
       const wait = retryDelaySec(config.retry, retryCount, lastTransient.retryAfterSec);
       log.warn(`${task.id}: ${lastTransient.category}: ${lastTransient.message}. Retry ${retryCount}/${maxAttempts} in ${wait}s ${resumeId ? `resuming session ${resumeId}` : 'with a fresh session'}.`);
@@ -979,12 +1097,34 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       if (block.status === 'continue') {
         st.summary = block.summary || 'continuing in a fresh session';
         saveState(paths, state);
+        // Anti-thrash: compare the state this attempt left behind with the state the previous
+        // attempt left behind. An exact repeat means the session reported progress it did not
+        // produce; park the scope question instead of spending another whole session on it.
+        const delta = computeAttemptDelta({ paths, attempt: st.attempts, taskFile: task.taskFile, verify: st.verify, metric: readMetric(ctx) });
+        const stalledByMetric = metricPlateau((st.deltas ?? []).map((d) => d.metric), config.metric.direction, config.progress.stallAfterRepeats);
+        if (config.progress.enabled && (isStalled((st.deltas ?? []).map((d) => d.fingerprint), delta.fingerprint, config.progress.stallAfterRepeats) || stalledByMetric)) {
+          if (stalledByMetric) log.warn(`${task.id}: objective metric has not improved across attempts (direction ${config.metric.direction})`);
+          const scope = `no measurable progress across attempts (${delta.signals.join('; ')})`;
+          log.warn(`${task.id}: stalled — attempt ${st.attempts} reproduced the previous attempt's observable state; not retrying (${delta.signals.join('; ')})`);
+          const deferred = deferrableRemainder();
+          if (deferred) { final = autoAcceptSubset(deferred); break; }
+          const bd = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'failure', { category: 'stalled', reason: scope, continuations: continuation }));
+          if (bd.split) return { status: st.status, split: true };
+          if (bd.replan) return { status: st.status, replan: true };
+          final = {
+            status: 'blocked',
+            summary: `stalled — no measurable progress: ${block.summary || 'more work remains'}. Its acceptance is likely dependency-gated or unreachable as scoped; re-scope it or run \`symphony accept ${task.id} --note ...\` on the landed subset.`,
+            lastError: { category: 'stalled', message: scope, transient: false, fatal: false, at: nowIso() },
+          };
+          break;
+        }
         if (continuation < maxContinuations) {
           const slicesUsed = continuation;
           continuation += 1;
           st.continuation = continuation;
           refreshDerivedDocs(ctx);
           if (config.commitPerSession) commitIntermediate(ctx, task, st);
+          recordAttemptDelta(ctx, task, st);
           saveState(paths, state);
           await slackNotify(ctx, 'taskContinue', {
             title: `${task.id} continuing — ${task.title}`,
@@ -1091,10 +1231,13 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       }
       if (block.status === 'blocked') {
         // A blocked report often means the task bundled automatable work with an item that needs a
-        // human. Before the run stops for that human, the `onBlocked` stage may split the task or
-        // rewrite the upcoming plan so the automatable parts land now and the human gets a smaller,
+        // human. Before the run stops for that human, accept the landed green subset when every
+        // remaining acceptance item is deferrable; otherwise the `onBlocked` stage may split the task
+        // or rewrite the upcoming plan so the automatable parts land now and the human gets a smaller,
         // clear block. A `proceed` verdict (or a rewrite that cannot complete) falls through to the
         // ordinary blocked path.
+        const deferred = deferrableRemainder();
+        if (deferred) { final = autoAcceptSubset(deferred); break; }
         const bd = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'blocked', { reason: block.summary, status: 'blocked' }));
         if (bd.split) return { status: st.status, split: true };
         if (bd.replan) return { status: st.status, replan: true };
@@ -1181,8 +1324,82 @@ export function preflight(ctx: RunContext, spec: SessionSpec | undefined, provid
   return !checks.some((c) => c.level === 'fail');
 }
 
+/**
+ * Crash-only recovery, run before the queue is even selected. A kill (SIGTERM, SIGKILL, OOM, host
+ * restart) can leave a task row "running" and a lock behind. This turns every such row into a
+ * resumable one without a human editing state.json: the unfinished session's attempt is given back
+ * (exactly like a manual stop, so repeated crashes cannot exhaust `halt.maxAttemptsPerTask`) and the
+ * stale `⟵ running` ROADMAP marker is repaired. A *live* pid is left alone; so is a live lock (that
+ * would be a concurrent run, which `acquireLock` will reject). No-op under `--dry-run`.
+ */
+function recoverStaleRuns(ctx: RunContext): void {
+  const { paths, state, flags, log } = ctx;
+  if (flags.dryRun) return;
+  const live = liveLock(paths);
+  if (live) return; // a concurrent run owns these rows; acquireLock will report it later
+  const lock = readLock(paths);
+  if (lock && lock.pid !== process.pid && !pidAlive(lock.pid)) {
+    try {
+      unlinkSync(paths.lock);
+      log.warn(`removed a stale lock left by pid ${lock.pid} (no longer running)`);
+    } catch { /* already gone */ }
+  }
+  for (const task of ctx.tasks) {
+    const st = state.tasks[task.id];
+    if (!st || st.status !== 'running') continue;
+    if (st.pid !== undefined && st.pid !== process.pid && pidAlive(st.pid)) {
+      log.warn(`${task.id}: state says "running" and pid ${st.pid} is still alive; leaving it alone`);
+      continue;
+    }
+    if ((st.attempts ?? 0) > 0) st.attempts -= 1;
+    st.status = 'failed';
+    st.summary = 'recovered after an unclean stop (crashed, killed or host restart); the unfinished session does not count as an attempt and the task will be retried';
+    st.lastError = { category: 'interrupted', message: 'harness stopped mid-session', transient: true, fatal: false, at: nowIso() };
+    delete st.pid;
+    delete st.started;
+    saveState(paths, state);
+    patchRoadmap(ctx, task.id, 'failed');
+    log.warn(`${task.id}: was left "running" by an unclean stop; recovered automatically and will be retried`);
+  }
+}
+
+/** Read every task's raw body and build its contract + the dependency graph. */
+function loadContracts(ctx: RunContext): Map<string, TaskContract> {
+  const bodies = new Map<string, string | undefined>();
+  const metas = new Map<string, Record<string, string>>();
+  for (const t of ctx.tasks) {
+    if (t.taskFile && existsSync(t.taskFile)) {
+      try {
+        const parsed = parseFrontMatter(readFileSync(t.taskFile, 'utf8'));
+        // The file on disk wins over the cached meta, so an edge added since discovery is honoured.
+        metas.set(t.id, { ...t.meta, ...parsed.meta });
+        bodies.set(t.id, parsed.body);
+      } catch {
+        metas.set(t.id, t.meta);
+        bodies.set(t.id, undefined);
+      }
+    } else {
+      metas.set(t.id, t.meta);
+      bodies.set(t.id, undefined);
+    }
+  }
+  const merged = ctx.tasks.map((t) => ({ ...t, meta: metas.get(t.id) ?? t.meta }));
+  return contractsFor(merged, bodies);
+}
+
+/** The run's contracts, parsed once and cached on the context. */
+function contractsOf(ctx: RunContext): Map<string, TaskContract> {
+  return ctx.contracts ?? (ctx.contracts = loadContracts(ctx));
+}
+
 export async function runCommand(ctx: RunContext): Promise<number> {
   const { paths, config, flags, log, state } = ctx;
+
+  recoverStaleRuns(ctx);
+  // Validate the dependency graph once, before selection: a cycle or an unknown edge is a planning
+  // problem the operator should see, but it must not crash the run.
+  const contracts = contractsOf(ctx);
+  for (const issue of validateContracts(ctx.tasks, contracts)) log.warn(`${issue.taskId}: ${issue.message} (dependency)`);
 
   if (state.halted) {
     if (flags.clearHalt) {
@@ -1202,7 +1419,21 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     return 0;
   }
 
-  const selected = selectTasks(ctx);
+  let selected = selectTasks(ctx);
+  // Dependency closure: a selected task pulls in its still-pending prerequisites, so `--only T05`
+  // cannot run consumer work before the `dependsOn` tickets it names. Then a topological order puts
+  // every prerequisite before its consumers (otherwise the incoming order is preserved).
+  const wanted = new Set(selected.map((t) => t.id));
+  const closure = dependencyClosure([...wanted], contracts);
+  const prereqs = ctx.tasks.filter((t) => {
+    const s = state.tasks[t.id]?.status ?? 'pending';
+    return closure.has(t.id) && !wanted.has(t.id) && !DONE_STATES.includes(s) && !SKIP_STATES.includes(s);
+  });
+  if (prereqs.length) {
+    log.warn(`dependency closure: running prerequisite${prereqs.length === 1 ? '' : 's'} ${prereqs.map((t) => t.id).join(', ')} before their consumers`);
+    selected = [...selected, ...prereqs];
+  }
+  selected = topoOrder(selected, contracts);
   let todo = selected.filter((t) => flags.retry || !SKIP_STATES.includes(state.tasks[t.id]?.status ?? 'pending'));
   const carried = selected.filter((t) => !flags.retry && state.tasks[t.id]?.status === 'blocked');
   const leftRunning = todo.filter((t) => state.tasks[t.id]?.status === 'running');
@@ -1346,13 +1577,17 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   const runLoop = async (): Promise<number> => {
     let consecutiveFailures = 0;
     const attempted = new Set<string>();
+    // Tasks postponed because a prerequisite is still queued later; a cycle guard bounds the re-queue.
+    const postponed = new Map<string, number>();
     // The queue is re-selected from the live task list whenever a breakdown rewrites the plan.
     let queue: Task[] = todo.slice();
     const rebuild = (): void => {
       const selected = selectTasks(ctx).filter((t) => !attempted.has(t.id) && (flags.retry || !SKIP_STATES.includes(state.tasks[t.id]?.status ?? 'pending')));
+      // Prerequisites before consumers, even after a breakdown rewrote the plan.
+      const ordered = topoOrder(selected, contracts);
       // `maxTasksPerRun` counts tasks this invocation has *started*, so a breakdown cannot buy more.
-      const room = config.maxTasksPerRun > 0 ? Math.max(0, config.maxTasksPerRun - attempted.size) : selected.length;
-      queue = selected.slice(0, room);
+      const room = config.maxTasksPerRun > 0 ? Math.max(0, config.maxTasksPerRun - attempted.size) : ordered.length;
+      queue = ordered.slice(0, room);
     };
     const afterRewrite = (): void => {
       reloadAfterRewrite(ctx);
@@ -1421,23 +1656,47 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       }
 
       attempted.add(task.id);
+      // Dependency suspension: never run consumer work before its prerequisites. If one is still
+      // queued later, postpone this task; if it has failed or is blocked, park this task as
+      // blocked-by-dependency without spending a session on it.
+      const unmet = (contracts.get(task.id)?.dependsOn ?? []).filter((dep) => !DONE_STATES.includes(state.tasks[dep]?.status ?? 'pending'));
       let out: TaskOutcome;
-      try {
-        out = await runTask(ctx, task);
-      } catch (e) {
-        // A fault outside a session (state I/O, a doc write, a git helper) must not kill the whole
-        // run: record the task failed and let the ordinary failure policy decide whether to stop.
-        const message = `internal error: ${e instanceof Error ? e.message : String(e)}`;
-        ctx.log.error(`${task.id}: ${message}`);
+      if (unmet.length) {
+        const laterQueued = queue.some((q) => unmet.includes(q.id));
+        const count = (postponed.get(task.id) ?? 0) + 1;
+        postponed.set(task.id, count);
+        if (laterQueued && count <= ctx.tasks.length) {
+          log.warn(`${task.id}: waiting on prerequisite${unmet.length === 1 ? '' : 's'} ${unmet.join(', ')}; postponing it`);
+          queue.push(task);
+          continue;
+        }
         const st = (state.tasks[task.id] ??= newTaskState(task.title));
-        st.status = 'failed';
-        st.summary = message;
+        st.status = 'blocked';
+        st.blockedBy = unmet;
+        st.summary = `blocked by unmet prerequisite${unmet.length === 1 ? '' : 's'}: ${unmet.join(', ')}`;
         st.finished = nowIso();
-        st.lastError = { category: 'crash', message, transient: false, fatal: false, at: nowIso() };
-        delete st.pid;
         saveState(paths, state);
-        patchRoadmap(ctx, task.id, 'failed');
-        out = { status: 'failed' };
+        patchRoadmap(ctx, task.id, 'blocked');
+        log.warn(`${task.id}: blocked by ${unmet.join(', ')}; not running it`);
+        out = { status: 'blocked' };
+      } else {
+        try {
+          out = await runTask(ctx, task);
+        } catch (e) {
+          // A fault outside a session (state I/O, a doc write, a git helper) must not kill the whole
+          // run: record the task failed and let the ordinary failure policy decide whether to stop.
+          const message = `internal error: ${e instanceof Error ? e.message : String(e)}`;
+          ctx.log.error(`${task.id}: ${message}`);
+          const st = (state.tasks[task.id] ??= newTaskState(task.title));
+          st.status = 'failed';
+          st.summary = message;
+          st.finished = nowIso();
+          st.lastError = { category: 'crash', message, transient: false, fatal: false, at: nowIso() };
+          delete st.pid;
+          saveState(paths, state);
+          patchRoadmap(ctx, task.id, 'failed');
+          out = { status: 'failed' };
+        }
       }
       if (out.split || out.replan) { afterRewrite(); continue; }
       if (out.stopped) return 0;
