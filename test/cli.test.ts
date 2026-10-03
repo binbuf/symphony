@@ -24,6 +24,21 @@ async function capture(fn: () => Promise<number>): Promise<{ code: number; out: 
   }
 }
 
+test('brief puts the idea first, then the bootstrap prompt after a --- separator', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cli-'));
+  const { code, out } = await capture(() => main(['brief', '--root', dir]));
+  assert.equal(code, 0);
+  const ideaAt = out.indexOf('<paste your idea here');
+  const ruleAt = out.search(/\r?\n---\r?\n/);
+  assert.ok(ideaAt >= 0 && ruleAt > ideaAt, 'the idea placeholder precedes the --- separator');
+  assert.match(out, /symphony planning package/);
+  assert.match(out, /docs\/ROADMAP\.md/);
+  assert.match(out, /taskSets/);
+  assert.match(out, /## Record the foundational decisions as ADRs/);
+  assert.match(out, /## Front-load the precursor work/);
+  assert.doesNotMatch(out, /\{[a-zA-Z_]\w*\}/, 'no unresolved placeholders');
+});
+
 test('--version prints the package version without touching a project', async () => {
   const { code, out } = await capture(() => main(['--version']));
   assert.equal(code, 0);

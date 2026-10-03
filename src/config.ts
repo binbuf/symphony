@@ -760,7 +760,7 @@ function hookString(x: unknown, where: string, warnings: string[]): string | und
   return undefined;
 }
 
-const PATH_KEYS = ['docs', 'roadmap', 'progress', 'tasks', 'design', 'adr', 'logs', 'index', 'stop', 'state', 'runs', 'log'] as const;
+const PATH_KEYS = ['docs', 'roadmap', 'progress', 'progressDir', 'tasks', 'design', 'adr', 'logs', 'index', 'stop', 'state', 'runs', 'log'] as const;
 
 function pathOverrides(x: unknown, warnings: string[], where = 'paths', ignore: readonly string[] = []): PathOverrides {
   if (x === undefined || x === null) return {};

@@ -1,22 +1,29 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { rel, type Paths } from './paths.js';
 import { atomicWriteSync, capUtf8, squash } from './util.js';
 
 /*
- * Context assembly. Inlining is opt-in: the prompt normally names PROGRESS.md, docs/design/ and
- * docs/INDEX.md and the session reads what it needs, so the prompt stays small as the run grows.
- * - When PROGRESS.md is inlined (maxProgressBytes > 0), the harness maintains a short "Key facts"
- *   digest at the top and inlines that digest plus only the most recent sections.
+ * Context assembly. Inlining is opt-in: the prompt normally names the progress notes, docs/design/
+ * and docs/INDEX.md and the session reads what it needs, so the prompt stays small as the run grows.
+ *
+ * Per-task notes live as one small file per task under `docs/progress/TNN.md`; the harness keeps
+ * `docs/PROGRESS.md` as a bounded index — a "Key facts" digest plus a link to each task note — so the
+ * shared notebook cannot grow without bound over a long task chain. Legacy sections still in
+ * PROGRESS.md are read too, so upgrades keep working.
+ * - When progress is inlined (maxProgressBytes > 0), the harness inlines the digest plus only the
+ *   most recent sections.
  * - When design docs are inlined (inlineDesignDocs), only the docs a task names are inlined.
  */
 
 const DIGEST_START = '<!-- symphony:digest:start -->';
 const DIGEST_END = '<!-- symphony:digest:end -->';
 const DIGEST_HEADING = '## Key facts (maintained by symphony — do not edit)';
+const NOTES_HEADING = '## Task notes (maintained by symphony — do not edit)';
 const DIGEST_MAX_BYTES = 8192;
 const DIGEST_LINES_PER_SECTION = 2;
 const RECENT_SECTIONS = 3;
+const SHARD_RE = /^T\d{1,3}(?:[a-z]\d*)?\.md$/i;
 
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const DIGEST_RE = new RegExp(`${escapeRegExp(DIGEST_START)}[\\s\\S]*?${escapeRegExp(DIGEST_END)}`);
@@ -64,9 +71,13 @@ export interface DigestOptions {
 
 /** A compact "Key facts" block derived from the leading facts of every progress section. */
 export function buildProgressDigest(text: string, opts: DigestOptions = {}): string {
+  return buildProgressDigestFromSections(parseProgressSections(text), opts);
+}
+
+/** Like {@link buildProgressDigest} but over already-parsed sections (shards plus PROGRESS.md). */
+export function buildProgressDigestFromSections(sections: readonly ProgressSection[], opts: DigestOptions = {}): string {
   const linesPerSection = opts.linesPerSection ?? DIGEST_LINES_PER_SECTION;
   const maxBytes = opts.maxBytes ?? DIGEST_MAX_BYTES;
-  const sections = parseProgressSections(text);
   if (!sections.length) return capUtf8(`${DIGEST_HEADING}\n\n_(no progress recorded yet)_`, maxBytes);
 
   const items = sections.map((s) => {
@@ -102,6 +113,69 @@ export function writeProgressDigest(path: string, opts: DigestOptions = {}): boo
   return true;
 }
 
+/** Path to a task's progress note (`docs/progress/TNN.md`). */
+export function progressShardPath(paths: Paths, id: string): string {
+  return join(paths.progressDir, `${id}.md`);
+}
+
+/** The progress notes present, ordered by task id (numeric, then any letter suffix). */
+export function listProgressShards(paths: Paths): Array<{ id: string; file: string }> {
+  if (!existsSync(paths.progressDir)) return [];
+  const out: Array<{ id: string; file: string }> = [];
+  for (const name of readdirSync(paths.progressDir)) {
+    if (!SHARD_RE.test(name)) continue;
+    out.push({ id: name.replace(/\.md$/i, ''), file: join(paths.progressDir, name) });
+  }
+  return out.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+}
+
+/** A shard file as one section: its own leading heading, or its id when it has none. */
+function shardSection(id: string, text: string): ProgressSection {
+  const trimmed = text.trim();
+  const m = /^#{1,6}\s+(.*)$/m.exec(trimmed);
+  if (m && m.index === 0) {
+    const heading = m[1].trim();
+    return { heading: heading.startsWith(id) ? heading : `${id} — ${heading}`, body: trimmed.slice(m[0].length).trim() };
+  }
+  return { heading: id, body: trimmed };
+}
+
+/**
+ * Merged progress sections: plan-level notes still in PROGRESS.md first, then every per-task shard in
+ * id order. A shard takes precedence over a legacy PROGRESS.md section with the same task id.
+ */
+export function collectProgressSections(paths: Paths): ProgressSection[] {
+  const legacy = existsSync(paths.progress) ? parseProgressSections(readFileSync(paths.progress, 'utf8')) : [];
+  const shards = listProgressShards(paths).map(({ id, file }) => shardSection(id, readFileSync(file, 'utf8')));
+  const shardIds = new Set(shards.map((s) => s.heading.split(/[\s—]/)[0]));
+  return [...legacy.filter((s) => !shardIds.has(s.heading.split(/[\s—]/)[0])), ...shards];
+}
+
+/** The generated block: the cross-task digest plus a link to each task note. */
+function progressIndexBlock(paths: Paths, sections: readonly ProgressSection[]): string {
+  const digest = buildProgressDigestFromSections(sections);
+  const shards = listProgressShards(paths);
+  if (!shards.length) return digest;
+  const dir = dirname(paths.progress);
+  const lines = shards.map(({ id, file }) => {
+    const link = relative(dir, file).replace(/\\/g, '/');
+    const sec = sections.find((s) => s.heading === id || s.heading.startsWith(`${id} —`) || s.heading.startsWith(`${id} `));
+    const gist = sec ? factsFor(sec.body, 1)[0] ?? '' : '';
+    return `- [${id}](${link})${gist ? ` — ${gist}` : ''}`;
+  });
+  return `${digest}\n\n${NOTES_HEADING}\n\n${lines.join('\n')}`;
+}
+
+/** Rewrite PROGRESS.md's generated block from the per-task shards. Returns true when it changed. */
+export function writeProgressIndex(paths: Paths): boolean {
+  if (!existsSync(paths.progress)) return false;
+  const text = readFileSync(paths.progress, 'utf8');
+  const next = upsertProgressDigest(text, progressIndexBlock(paths, collectProgressSections(paths)));
+  if (next === text) return false;
+  atomicWriteSync(paths.progress, next);
+  return true;
+}
+
 function capTail(text: string, maxBytes: number, displayName: string): string {
   const t = text.trim();
   return capUtf8(t || '(empty)', maxBytes, `[… truncated; read ${displayName} for the full history …]\n\n`, true);
@@ -120,18 +194,14 @@ export interface ProgressContextOptions extends DigestOptions {
  * Inline recent sections and a digest of older sections, with no duplicate facts and one total cap.
  * Reserve at most half the budget (up to 8 KB) for the digest so recent hand-offs stay visible.
  */
-export function readProgressContext(path: string, displayName = 'PROGRESS.md', opts: ProgressContextOptions = {}): string {
+function renderProgressContext(sections: readonly ProgressSection[], displayName: string, opts: ProgressContextOptions): string {
   const maxBytes = opts.maxBytes ?? 32768;
-  if (!existsSync(path)) return capUtf8('(PROGRESS.md does not exist yet)', maxBytes);
-  const text = readFileSync(path, 'utf8');
   const recentSections = opts.recentSections ?? RECENT_SECTIONS;
   const parts: string[] = [];
-  const sections = parseProgressSections(text);
   const recent = recentSections > 0 ? sections.slice(-recentSections) : [];
   const older = sections.slice(0, sections.length - recent.length);
   if (opts.digest !== false && older.length) {
-    const history = older.map((s) => `## ${s.heading}\n\n${s.body}`).join('\n\n');
-    parts.push(buildProgressDigest(history, {
+    parts.push(buildProgressDigestFromSections(older, {
       linesPerSection: opts.linesPerSection,
       maxBytes: Math.min(Math.floor(maxBytes / 2), DIGEST_MAX_BYTES),
     }));
@@ -144,6 +214,17 @@ export function readProgressContext(path: string, displayName = 'PROGRESS.md', o
     parts.push(`${heading}${capTail(body, Math.max(0, maxBytes - used), displayName)}`);
   }
   return capUtf8(parts.join('\n\n') || '(no progress recorded yet)', maxBytes);
+}
+
+/** Read a single file as progress sections (legacy path; see {@link readProgressNotes}). */
+export function readProgressContext(path: string, displayName = 'PROGRESS.md', opts: ProgressContextOptions = {}): string {
+  if (!existsSync(path)) return capUtf8('(PROGRESS.md does not exist yet)', opts.maxBytes ?? 32768);
+  return renderProgressContext(parseProgressSections(readFileSync(path, 'utf8')), displayName, opts);
+}
+
+/** The shard-aware reader: plan-level notes in PROGRESS.md plus every per-task progress note. */
+export function readProgressNotes(paths: Paths, opts: ProgressContextOptions = {}): string {
+  return renderProgressContext(collectProgressSections(paths), rel(paths.root, paths.progress), opts);
 }
 
 export interface InlinedDoc { rel: string; content: string }

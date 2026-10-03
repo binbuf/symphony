@@ -8,7 +8,7 @@ Progress: {doneCount} completed · {blockedCount} blocked/failed; see {roadmap} 
 {retryNote}{continuationNote}{operatingFrame}
 {mcpNote}{visionNote}## Where things are
 - {roadmap} — neighbouring tasks. The harness owns bullet markers, trailing "⟵" tags, and generated status; do not edit them.
-- {progress} — earlier findings. Read relevant sections as needed.
+- {progressDir}/ — per-task findings written by earlier sessions; {progress} indexes them. Read the notes relevant to this task.
 {designPaths}- {index} — generated file/symbol index; read as needed, do not edit.
 - {logs}/ — harness run logs; read-only.
 {noTaskFileNote}

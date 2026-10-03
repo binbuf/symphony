@@ -98,6 +98,7 @@ function gateSignature(roadmapPath: string): string {
 function ignoredPrefixes(paths: Paths, taskFileRel: string | undefined): string[] {
   const out = [
     rel(paths.root, paths.progress),
+    rel(paths.root, paths.progressDir),
     rel(paths.root, paths.index),
     rel(paths.root, paths.roadmap),
     rel(paths.root, paths.stop),

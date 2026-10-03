@@ -15,7 +15,7 @@ Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Goo
 ## Why symphony
 
 - **Unattended by default.** No session ever waits on a human. The harness handles the things that normally make you babysit an agent: transient API failures, oversized tasks, missing result blocks, runaway loops, and dirty worktrees.
-- **Fresh context per task.** Every task starts in a brand-new session with its task file and pointers to `ROADMAP.md`, the `PROGRESS.md` notebook, the design docs and the generated `docs/INDEX.md`; it reads only what the task needs. No context rot, no hidden state carried from the previous task.
+- **Fresh context per task.** Every task starts in a brand-new session with its task file and pointers to `ROADMAP.md`, the per-task progress notes under `docs/progress/`, the design docs and the generated `docs/INDEX.md`; it reads only what the task needs. No context rot, no hidden state carried from the previous task.
 - **Everything lands in git.** Each task ends in a commit that carries the code, the roadmap marker, the task's hand-off, the design updates and the run log. `git log` is the pipeline's history; `git revert` is the undo.
 - **Resumable and inspectable.** Kill it, crash it, or pause it with a file — state and roadmap markers let the next run pick up exactly where it left off. Every session's exact prompt, rendered log and raw NDJSON are saved.
 - **Provider-agnostic.** The same plan and lifecycle work with any of the six agent CLIs, or the built-in `fake` provider for testing the harness itself without spending anything.
@@ -108,7 +108,8 @@ Creates the docs skeleton and config, never overwriting existing files:
 ```
 docs/
   ROADMAP.md              the ordered task list (bullets the harness owns the checkbox of)
-  PROGRESS.md             the shared notebook every session reads and appends to
+  PROGRESS.md             a small generated index: the "Key facts" digest plus a link to each task note
+  progress/TNN.md         one note per task (what later tasks need to know), written by that session
   logs/README.md          explains the per-task run logs the harness regenerates
   tasks/TEMPLATE.md       the task-file template
   design/README.md        architecture docs the sessions read and update
@@ -122,7 +123,7 @@ docs/
 `run` walks the selected tasks in roadmap order. For each one:
 
 1. **Marks the bullet** `[~] ⟵ running` and records the attempt in `.symphony/state.json`.
-2. **Builds the prompt** and writes it to `.symphony/runs/<task>-<stamp>.prompt.md`. It contains the task file, the paths of the roadmap, the `PROGRESS.md` notebook, `docs/design/`, `docs/INDEX.md` and the run logs, the rules for the session, and the required result block. The session reads the files it needs with its own tools, so the prompt stays small however large those files grow. Set `maxProgressBytes`, `inlineDesignDocs` or `maxIndexBytes` to paste bodies back in when you want them.
+2. **Builds the prompt** and writes it to `.symphony/runs/<task>-<stamp>.prompt.md`. It contains the task file, the paths of the roadmap, the per-task progress notes, `docs/design/`, `docs/INDEX.md` and the run logs, the rules for the session, and the required result block. The session reads the files it needs with its own tools, so the prompt stays small however large those files grow. Set `maxProgressBytes`, `inlineDesignDocs` or `maxIndexBytes` to paste bodies back in when you want them.
 3. **Spawns the provider CLI** in the project root with permissions bypassed, and streams what it does:
 
    ```
@@ -153,7 +154,7 @@ docs/
 5. **Verifies independently.** A per-task `verify:` (front matter) wins, then `verifyCommand`; when neither is set the harness uses the project's `package.json` test script (`npm test`) if one exists (`inferVerify: false` disables that). It runs the command itself after a `done`. A non-zero exit demotes the task to `failed` and records the command, exit code and output tail in the logs. Provider-agnostic: any command, any stack.
 6. **Writes the record.** `docs/logs/TNN.md` (status, provider/model, timing, cost, commit, each session's reported status and summary), then regenerates the pipeline status block at the bottom of `ROADMAP.md`.
 7. **Commits everything** with `git add -A && git commit -m "T01: <title> [<status>]"` (template configurable). Before staging, an ephemeral-file guard keeps secrets and build junk out of the commit by adding them to `.gitignore` — agent-created source files still land. A failed commit is retried once; if it still fails the task is demoted to `failed` rather than recorded `done`, because its work is not in git. Commits also refuse to run if a session switched branches (`HEAD` is checked against the branch the run started on).
-8. **Starts the next task in a new session.** Each session is also instructed to append a `## Txx` section to `PROGRESS.md`, fill the task file's `## Hand-off`, run the named tests in the foreground, and update the design docs/ADRs its work touched.
+8. **Starts the next task in a new session.** Each session is also instructed to write its own `docs/progress/TNN.md` note, fill the task file's `## Hand-off`, run the named tests in the foreground, and update the design docs/ADRs its work touched.
 
 ### Keeping task prompts small
 
@@ -169,9 +170,9 @@ For existing deployments, check `.symphony/symphony.config.json`: upgrades prese
 }
 ```
 
-These settings leave the notebook, design docs and generated index available for the agent to read as needed. `progressDigest` and `repoMap` can stay enabled. Inspect the exact prompt with `run --dry-run` or in the saved `.symphony/runs/*.prompt.md` files.
+These settings leave the progress notes, design docs and generated index available for the agent to read as needed. `progressDigest` and `repoMap` can stay enabled. Inspect the exact prompt with `run --dry-run` or in the saved `.symphony/runs/*.prompt.md` files.
 
-When you opt into inlining, `maxProgressBytes` covers the entire progress body, including the digest, recent-section headings and omission notices. Recent facts are included once; the digest summarizes older sections and uses at most half the budget, up to 8 KB. `maxIndexBytes` applies equally to saved and dry-run indexes, and `maxTaskBytes` includes its truncation notice. Block delimiters and execution rules sit outside those individual content budgets. A truncated task explicitly requires reading the full file before implementation; truncated design docs name their full paths.
+When you opt into inlining, `maxProgressBytes` covers the entire progress body, including the digest, recent-section headings and omission notices. Recent facts are included once; the digest summarizes older sections and uses at most half the budget, up to 8 KB. `maxIndexBytes` applies equally to saved and dry-run indexes, and `maxTaskBytes` includes its truncation notice. Block delimiters and execution rules sit outside those individual content budgets. A truncated task explicitly requires reading the full file before implementation; truncated design docs name their full paths. Because each task's notes live in its own small `progress/TNN.md`, a long task chain no longer grows any single file that a session must read.
 
 ### The run view (TUI)
 
@@ -399,9 +400,10 @@ symphony owns a small, stack-agnostic planning format. `init` scaffolds it, `lin
 ```
 docs/
   ROADMAP.md            phases as "##" headings; one top-level bullet per task, in execution order
-  PROGRESS.md           the agent's shared notebook (learnings for later tasks); created if missing.
-                        The harness keeps a generated "Key facts" digest at the top and inlines the
-                        digest plus the most recent sections into each prompt
+  PROGRESS.md           a small generated index: a "Key facts" digest plus a link to every task note,
+                        between the "symphony:digest" HTML comments (created if missing)
+  progress/TNN.md       one note per task, written by that task's session with what later tasks need
+                        to know (real paths, commands, gotchas); the harness reads them and indexes them
   INDEX.md              generated repo map: one-line design-doc summaries and a source-file map with
                         top-level symbols; rewritten before each task and committed with it
   logs/TNN.md           the harness's per-task run log: status, provider/model, timing, cost, token
@@ -440,7 +442,7 @@ verify: npm test -- --runInBand
 
 At the end of every task the harness also rewrites a **pipeline status block** at the bottom of `ROADMAP.md` (between `<!-- symphony:status -->` and `<!-- /symphony:status -->`): what is done, blocked, failed and left, the last finished task and any halt. It is the one place to see the pipeline's high-level state at a glance. Do not edit that block by hand; everything outside the markers stays yours.
 
-**Starting from an idea?** `symphony brief` prints a prompt. Give any LLM your idea plus that text; it emits the docs package in this format, and you drop the files into the project next to `.symphony/`.
+**Starting from an idea?** `symphony brief` prints a prompt with the idea placeholder at the top and the bootstrap instructions after a `---`: paste your idea into the top, hand the whole thing to any LLM, and it emits the docs package in this format. The brief asks the model to first decide whether this is a new package, a new phase of an existing one, or its own task set; to record the foundational decisions as ADRs; and to front-load the scaffolding, a green test command and the design docs before feature work. Then drop the files into the project next to `.symphony/` (see [Multiple task sets](#multiple-task-sets) for the task-set case).
 
 **Already have planning docs in another shape?** `symphony lint` scans the project root and docs and reports what differs: `ROADMAP.md`/`PLAN.md`/`TASKS.md` at the root or under `docs/`, `tasks/`, `specs/`; task lines that won't parse (numbered lists, headings, nested bullets, bold ids); wrong-case filenames; ADRs outside `design/adr/`; task files missing sections; broken links. `symphony prepare` hands that report, the outside documents and the format contract to the configured agent for one session, which converts everything in place (`git mv` for moves, meaning preserved, no invented scope), then the harness re-lints and commits. `prepare --dry-run` prints the exact prompt and touches nothing.
 

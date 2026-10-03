@@ -3,7 +3,7 @@ import { join, relative } from 'node:path';
 import { decideBreakdown, type BreakdownEvidence, type BreakdownStage, type BreakdownVerdict } from './breakdown.js';
 import { classifyFailure, evidenceText, makeClassified, type Classified, type FailureEvidence } from './classify.js';
 import { resolveEscalation, resolveFallback, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
-import { writeProgressDigest } from './context.js';
+import { writeProgressIndex } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { commitAll, currentBranch, describeCommit } from './git.js';
 import { contractsFor, dependencyClosure, isLandedSubset, summarizeAcceptance, topoOrder, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
@@ -162,7 +162,7 @@ function patchRoadmap(ctx: RunContext, id: string, status: TaskStatus): void {
 function refreshDerivedDocs(ctx: RunContext): void {
   const { paths, config, log } = ctx;
   if (config.progressDigest) {
-    try { writeProgressDigest(paths.progress); } catch (e) { log.warn(`could not update the ${relative(paths.root, paths.progress)} digest: ${(e as Error).message}`); }
+    try { writeProgressIndex(paths); } catch (e) { log.warn(`could not update the ${relative(paths.root, paths.progress)} index: ${(e as Error).message}`); }
   }
   if (config.repoMap) {
     try { writeIndex(paths); } catch (e) { log.warn(`could not write ${relative(paths.root, paths.index)}: ${(e as Error).message}`); }

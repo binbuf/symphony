@@ -3,7 +3,7 @@ You are an autonomous coding agent working on {taskId} — {taskTitle} in the "{
 Do only this, in this single turn:
 1. Stop starting new work. If an edit is already half-applied, finish or revert it so the tree is coherent; otherwise leave the remaining work for the next session.
 2. Bring the project to a clean build. Run {buildStep} in the foreground and fix anything your in-progress work broke — the point of the pause is to leave a tree the next session can build on.
-3. Record the hand-off. Replace any placeholder text in the "## Hand-off" section of {taskFile} with what landed, what is left, and the next concrete step. Append or refresh the "## {taskId} — {taskTitle}" section in {progress} with the same, facts only.{designNote}
+3. Record the hand-off. Replace any placeholder text in the "## Hand-off" section of {taskFile} with what landed, what is left, and the next concrete step. Write the same reusable facts (paths, commands, gotchas) to {progressShard}; the harness indexes it into {progress}, which it maintains — do not edit {progress}.{designNote}
 4. Do not push, do not switch branches, do not start unrelated work, and do not commit — the harness commits the tree for you when this turn ends.
 5. End your final message with exactly this block, as plain text, no code fence, and nothing after it:
 

@@ -36,6 +36,14 @@ reflects the latest state. Do not edit these files by hand; the raw provider str
 \`.symphony/runs/\` (gitignored).
 `;
 
+export const PROGRESS_README = `# Progress
+
+One markdown file per task (\`T01.md\`, \`T02.md\`, …), written by that task's session with what later
+tasks need to know: real paths, commands that work, contract deviations, gotchas. Facts, not narrative.
+The harness indexes these notes — and maintains the generated "Key facts" digest — in \`PROGRESS.md\`;
+it never writes here. The file for a task that has not run does not exist.
+`;
+
 export const TASK_TEMPLATE = `---
 # Optional per-task overrides read by the harness (delete if unused):
 # provider: claude | cursor | opencode | codex | gemini | antigravity
@@ -105,6 +113,7 @@ export function docsContract(paths: Paths, opts: { design?: boolean } = {}): str
     roadmap: rel(paths.root, paths.roadmap),
     tasks: rel(paths.root, paths.tasksDir),
     progress: rel(paths.root, paths.progress),
+    progressDir: rel(paths.root, paths.progressDir),
     index: rel(paths.root, paths.index),
     logs: rel(paths.root, paths.logsDir),
     designDir: rel(paths.root, paths.designDir),

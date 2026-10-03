@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { buildProgressDigest, parseProgressSections, readProgressContext, selectTaskDesignDocs, stripProgressDigest, upsertProgressDigest, writeProgressDigest } from '../src/context.js';
+import { buildProgressDigest, collectProgressSections, parseProgressSections, readProgressContext, readProgressNotes, selectTaskDesignDocs, stripProgressDigest, upsertProgressDigest, writeProgressDigest, writeProgressIndex } from '../src/context.js';
 import { resolvePaths } from '../src/paths.js';
 import { generateIndex, readIndexCapped, writeIndex } from '../src/repomap.js';
 
@@ -114,6 +114,29 @@ test('selectTaskDesignDocs inlines only the design docs the task names', () => {
   assert.deepEqual(docs.map((d) => d.rel), ['docs/design/overview.md', 'docs/design/adr/0001-choice.md']);
   assert.match(docs[0].content, /System shape/);
   assert.deepEqual(selectTaskDesignDocs(paths, undefined), []);
+});
+
+test('per-task progress notes are read and indexed into PROGRESS.md', () => {
+  const paths = project();
+  mkdirSync(paths.progressDir, { recursive: true });
+  writeFileSync(join(paths.progressDir, 'T01.md'), '# T01 — First\n\n- run `npm test`\n- uses sqlite\n');
+  writeFileSync(join(paths.progressDir, 'T02.md'), 'Just prose without a heading.');
+  writeFileSync(paths.progress, '# Progress notes\n\n## Split T03\nsome plan note\n');
+
+  const sections = collectProgressSections(paths);
+  assert.deepEqual(sections.map((s) => s.heading), ['Split T03', 'T01 — First', 'T02']);
+
+  const out = readProgressNotes(paths, { recentSections: 1, maxBytes: 4096 });
+  assert.match(out, /- \*\*T01 — First\*\*: run `npm test`/, 'older shards are digested');
+  assert.match(out, /## T02/, 'the newest shard is inlined whole');
+
+  assert.equal(writeProgressIndex(paths), true);
+  const text = readFileSync(paths.progress, 'utf8');
+  assert.match(text, /## Task notes/);
+  assert.match(text, /\[T01\]\(progress\/T01\.md\)/);
+  assert.match(text, /\[T02\]\(progress\/T02\.md\)/);
+  assert.match(text, /some plan note/, 'plan-level notes are preserved');
+  assert.equal(writeProgressIndex(paths), false, 'a second write is a no-op');
 });
 
 test('generateIndex lists design docs with summaries and source files with symbols', () => {

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { DEFAULTS, type Config } from './config.js';
-import { ADR_TEMPLATE, DESIGN_README, LOGS_README, ROADMAP_TEMPLATE, TASK_TEMPLATE, docsContract } from './contract.js';
+import { ADR_TEMPLATE, DESIGN_README, LOGS_README, PROGRESS_README, ROADMAP_TEMPLATE, TASK_TEMPLATE, docsContract } from './contract.js';
 import { commitsForTask, commitPrefix, ensureGitignore, git } from './git.js';
 import type { Logger } from './logger.js';
 import { taskLogPath } from './logs.js';
@@ -11,6 +11,7 @@ import { canonicalId, patchRoadmapFile } from './roadmap.js';
 import { DONE_STATES, haltResumeHint, saveState, type State } from './state.js';
 import { buildStatusTable, formatStatusRow, statusColumnWidths, updatePipelineStatus } from './status.js';
 import type { Task } from './tasks.js';
+import { renderPrompt } from './templates.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, fmtUsage, nowIso } from './util.js';
 
 function writeIfMissing(path: string, content: string, created: string[]): void {
@@ -27,6 +28,8 @@ export function scaffoldDocs(paths: Paths, opts: { roadmap: boolean; config: boo
   ensureDir(paths.symphony);
   if (opts.roadmap) writeIfMissing(paths.roadmap, ROADMAP_TEMPLATE, created);
   writeIfMissing(paths.progress, PROGRESS_HEADER, created);
+  ensureDir(paths.progressDir);
+  writeIfMissing(join(paths.progressDir, 'README.md'), PROGRESS_README, created);
   writeIfMissing(join(paths.tasksDir, 'TEMPLATE.md'), TASK_TEMPLATE, created);
   ensureDir(paths.logsDir);
   writeIfMissing(join(paths.logsDir, 'README.md'), LOGS_README, created);
@@ -185,18 +188,34 @@ export function resetCommand(paths: Paths, state: State, tasks: Task[], rawId: s
 }
 
 /**
- * Paste-ready brief for an LLM client: given an idea, produce the .docs/ package symphony consumes.
- * Printed to stdout so it can be piped: `symphony brief > brief.md` or `symphony brief | pbcopy`.
+ * Paste-ready brief for an LLM client: paste an idea at the top and the bootstrap prompt after the
+ * `---`, and the model emits the docs package symphony consumes. Printed to stdout so it can be
+ * piped: `symphony brief > brief.md` or `symphony brief | pbcopy`.
  */
 export function briefCommand(paths: Paths, log: Logger, opts: { design?: boolean } = {}): number {
-  log.plain(`Turn the idea at the bottom into a planning package for an autonomous coding harness called symphony. Output ONLY the files listed below, each as a separate Markdown file at the exact path given (write the path as a heading or fenced-file marker so I can save them). Write for an autonomous agent that cannot ask questions: be concrete, name real paths, commands, and acceptance checks.
+  const design = opts.design !== false;
+  const d = {
+    docs: rel(paths.root, paths.docs),
+    roadmap: rel(paths.root, paths.roadmap),
+    designDir: rel(paths.root, paths.designDir),
+    adr: rel(paths.root, paths.adrDir),
+    index: rel(paths.root, paths.index),
+    progressDir: rel(paths.root, paths.progressDir),
+  };
+  const adrSection = design
+    ? `## Record the foundational decisions as ADRs now
 
-${docsContract(paths, opts)}
-
-Do not produce code or other files: the harness will drive an agent through the tasks later. If the idea is ambiguous, choose the simplest reasonable option and record it as an ADR instead of asking.
-
-Here is the idea:
-<paste your idea here>
-`);
+Before execution, the plan should already answer the decisions that are expensive to change. Write one numbered ADR under \`${d.adr}/\` (copy \`0000-template.md\`, start at \`0001\`) for each of: language/framework and runtime; datastore and data ownership; auth/identity; key external services and their failure modes; module/service boundaries; deployment and hosting; and the testing strategy. One page each: Status, Context, Decision, Consequences, and the alternatives rejected. During execution, a session adds a new ADR whenever reality diverges — the ADR records the change instead of silently rewriting history.`
+    : '';
+  log.plain(renderPrompt('brief.md', {
+    projectName: basename(paths.root),
+    docs: d.docs,
+    roadmap: d.roadmap,
+    designDir: d.designDir,
+    index: d.index,
+    progressDir: d.progressDir,
+    contract: docsContract(paths, opts),
+    adrSection,
+  }));
   return 0;
 }

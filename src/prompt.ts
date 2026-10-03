@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { readProgressContext, renderInlinedDocs, selectTaskDesignDocs } from './context.js';
+import { readProgressNotes, progressShardPath, renderInlinedDocs, selectTaskDesignDocs } from './context.js';
 import { rel, type Paths } from './paths.js';
 import { capIndexBody, readIndexCapped } from './repomap.js';
 import { DONE_STATES, type State } from './state.js';
@@ -46,10 +46,10 @@ export interface PromptCtx {
 
 export const PROGRESS_HEADER = `# Progress notes
 
-Shared notebook for the symphony run. Each task session appends a "## Txx — title" section with what
-later tasks need to know: real paths, commands that work, contract deviations, gotchas. Facts, not
-narrative. The harness keeps a generated "Key facts" digest at the top (between the symphony:digest
-markers); sessions are pointed at this file and read it themselves.
+Shared index for the symphony run. Each task session writes its own note file under the progress/
+directory ("TNN.md") with what later tasks need to know: real paths, commands that work, contract
+deviations, gotchas. Facts, not narrative. The harness keeps a generated "Key facts" digest and a link
+to each task note in this file (between the symphony:digest markers); do not edit that block by hand.
 `;
 
 export function ensureProgressFile(paths: Paths): boolean {
@@ -92,6 +92,7 @@ function docPaths(paths: Paths) {
   return {
     roadmap: rel(paths.root, paths.roadmap),
     progress: rel(paths.root, paths.progress),
+    progressDir: rel(paths.root, paths.progressDir),
     tasks: rel(paths.root, paths.tasksDir),
     design: rel(paths.root, paths.designDir),
     adr: rel(paths.root, paths.adrDir),
@@ -114,6 +115,7 @@ function buildExecutionPrompt(ctx: PromptCtx, continuing: boolean): string {
   const d = docPaths(paths);
   const body = continuing ? undefined : taskFileBody(task, ctx.maxTaskBytes);
   const taskFileRel = task.taskFileRel ?? defaultTaskFileRel(paths, task);
+  const progressShard = rel(paths.root, progressShardPath(paths, task.id));
   const noTaskFileNote = !task.taskFile && !continuing
     ? `- No task file exists for this task. The roadmap bullet is the entire specification. Before implementing, create ${taskFileRel} with Goal, Scope, Done when, and Hand-off sections, and put your understanding of the task there.\n`
     : '';
@@ -121,7 +123,7 @@ function buildExecutionPrompt(ctx: PromptCtx, continuing: boolean): string {
     ? `\nPrevious attempt failed: ${ctx.lastError}. Inspect \`git status\` and \`git log -3\`; build on partial work.\n`
     : '';
   const continuationNote = continuing || ctx.continuation > 0
-    ? `\nContinuation ${ctx.continuation} of ${task.id}: read ${taskFileRel} (especially Hand-off) and the "## ${task.id}" notes in ${d.progress}. Inspect \`git status\` and \`git log -5\`. Finish only the remaining scope; do not redo completed work.\n`
+    ? `\nContinuation ${ctx.continuation} of ${task.id}: read ${taskFileRel} (especially Hand-off) and your note ${progressShard}. Inspect \`git status\` and \`git log -5\`. Finish only the remaining scope; do not redo completed work.\n`
     : '';
 
   const steps: string[] = [
@@ -132,7 +134,7 @@ function buildExecutionPrompt(ctx: PromptCtx, continuing: boolean): string {
     steps.push(`Update affected docs in ${d.design}/. Record decisions that constrain later tasks in ${d.adr}/NNNN-title.md (next free number; Status, Context, Decision, Consequences; one page max). List changed docs in Hand-off.`);
   }
   steps.push(
-    `Before finishing, fill "## Hand-off" in ${taskFileRel}: changes, deviations, check results, and exact remaining work or blockers. Append "## ${task.id} — ${task.title}" to ${d.progress} with reusable facts (paths, commands, gotchas). Preserve other sections; replace hand-off placeholders. Put follow-up tasks under "## Follow-ups" in ${d.progress}.`,
+    `Before finishing, fill "## Hand-off" in ${taskFileRel}: changes, deviations, check results, and exact remaining work or blockers. Write your reusable facts (paths, commands, gotchas) for later tasks to ${progressShard}; the harness indexes it into ${d.progress}, which it maintains — do not edit ${d.progress}. Put follow-up tasks under a "## Follow-ups" heading in ${progressShard}.`,
     `Git: the harness stages and commits task changes. You may commit with a "${task.id}:" prefix. Never push, switch branches, or amend/rebase commits you did not create.`,
     'Finish in this non-interactive session; nobody can answer questions. Ending your final turn exits the process; background work cannot notify you afterward. Run commands in the foreground, raise tool timeouts or split long commands into chunks, and write notes and the result before ending.',
   );
@@ -157,6 +159,8 @@ function buildExecutionPrompt(ctx: PromptCtx, continuing: boolean): string {
     attempt: ctx.attempt,
     continuation: ctx.continuation,
     progress: d.progress,
+    progressDir: d.progressDir,
+    progressShard,
     logs: d.logs,
     index: d.index,
     noTaskFileNote,
@@ -179,7 +183,7 @@ function buildExecutionPrompt(ctx: PromptCtx, continuing: boolean): string {
 function inlineContextBlocks(ctx: PromptCtx, paths: Paths, body: string | undefined, d: ReturnType<typeof docPaths>): string {
   const blocks: string[] = [];
   if (ctx.maxProgressBytes > 0) {
-    const progress = readProgressContext(paths.progress, d.progress, {
+    const progress = readProgressNotes(paths, {
       digest: ctx.progressDigest !== false,
       maxBytes: ctx.maxProgressBytes,
     });
@@ -199,11 +203,10 @@ function inlineContextBlocks(ctx: PromptCtx, paths: Paths, body: string | undefi
 }
 
 function readProgress(ctx: PromptCtx, paths: Paths): string {
-  const display = rel(paths.root, paths.progress);
   if (ctx.maxProgressBytes <= 0) {
-    return `(read ${display} for what earlier tasks recorded, and append your "## ${ctx.task.id}" section there before finishing)`;
+    return `(read ${rel(paths.root, paths.progressDir)}/ for what earlier tasks recorded, and write your own ${ctx.task.id}.md note there before finishing)`;
   }
-  return readProgressContext(paths.progress, display, {
+  return readProgressNotes(paths, {
     digest: ctx.progressDigest !== false,
     maxBytes: ctx.maxProgressBytes,
   });
@@ -234,7 +237,7 @@ export function buildNudgePrompt(ctx: PromptCtx, extraNote?: string): string {
 
 ${extraNote ? `Also note:\n${extraNote}\n\n` : ''}You have been resumed with your full context. Close ${task.id} out now, in this single turn:
 1. Finish only what can be finished cheaply, running every command in the foreground. Anything else: drop it and list it under "## Hand-off" in ${rel0} as remaining work.
-2. Make sure ${rel0} has a complete "## Hand-off" with no placeholder text, and that ${d.progress} has your "## ${task.id}" section.
+2. Make sure ${rel0} has a complete "## Hand-off" with no placeholder text, and that ${rel(paths.root, progressShardPath(paths, task.id))} holds your reusable facts (the harness indexes it into ${d.progress}).
 3. Do not start new work. Do not push. If the harness already committed your files, leave that commit alone.
 4. End this message with the block below, as plain text, no code fence, nothing after it:
 
@@ -250,7 +253,7 @@ END_SYMPHONY_RESULT
  * now, so the session stops new work, makes the tree build cleanly, records the hand-off and reports
  * — the harness then commits the slice and pauses, resuming the task on the next run. When the
  * running session can be resumed this is a short note; when it cannot (a provider without resume) it
- * is self-contained: it inlines the task file and points at (or inlines) the progress notebook like a
+ * is self-contained: it inlines the task file and points at (or inlines) the progress notes like a
  * task prompt.
  */
 export function buildWrapUpPrompt(ctx: PromptCtx, opts: { resumed: boolean; verify?: { command: string } }): string {
@@ -282,6 +285,7 @@ ${readProgress(ctx, paths)}
     taskTitle: task.title,
     taskFile: rel0,
     progress: d.progress,
+    progressShard: rel(paths.root, progressShardPath(paths, task.id)),
     resumedPreamble,
     buildStep,
     designNote,

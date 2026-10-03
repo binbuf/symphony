@@ -7,6 +7,8 @@ export interface PathOverrides {
   docs?: string;
   roadmap?: string;
   progress?: string;
+  /** Per-task progress notes (`TNN.md`). Default `docs/progress/`. */
+  progressDir?: string;
   tasks?: string;
   design?: string;
   adr?: string;
@@ -26,6 +28,8 @@ export interface Paths {
   docs: string;
   roadmap: string;
   progress: string;
+  /** Per-task progress notes (`TNN.md`), one file per task. */
+  progressDir: string;
   tasksDir: string;
   designDir: string;
   adrDir: string;
@@ -88,6 +92,7 @@ export function resolvePaths(rootOverride?: string, overrides: PathOverrides = {
     docs,
     roadmap: abs(root, overrides.roadmap ?? join(docs, 'ROADMAP.md')),
     progress: abs(root, overrides.progress ?? join(docs, 'PROGRESS.md')),
+    progressDir: abs(root, overrides.progressDir ?? join(docs, 'progress')),
     tasksDir,
     designDir,
     adrDir: abs(root, overrides.adr ?? join(designDir, 'adr')),
