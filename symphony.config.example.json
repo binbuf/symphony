@@ -182,7 +182,10 @@
       ]
     },
     "decision": "auto",
+    "provider": "opencode",
     "model": "",
+    "modelProvider": "openrouter",
+    "variant": "high",
     "timeoutMin": 5,
     "preferOverEscalation": true,
     "maxPerTask": 1
