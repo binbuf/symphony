@@ -16,6 +16,7 @@ import { placeStop, stopPresent, type Paths } from './paths.js';
 import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, buildWrapUpPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
 import { applyPlan, loadProject, retargetFlags, sanitizeFlags } from './project.js';
 import { computeAttemptDelta, isStalled, metricPlateau, parseMetric } from './progress.js';
+import { createRemainderTask } from './remainder.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { addUsage } from './providers/common.js';
 import type { Provider, ResultEvent, SpawnSpec, TokenUsage } from './providers/types.js';
@@ -805,6 +806,16 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   const autoAcceptSubset = (deferred: AcceptanceItem[]): Final => {
     st.deferred = deferred;
     st.accepted = { at: nowIso(), from: st.status, note: 'auto-accepted landed subset; remaining items deferrable' };
+    // The deferred remainder becomes a real ticket placed after its parent, rather than being lost or
+    // left for a human. Bounded by free child ids and ceiling.maxSplitDepth; when neither allows it,
+    // the remainder stays recorded on this task's state.
+    const dependents = ctx.tasks.filter((t) => t.id !== task.id && (contractsOf(ctx).get(t.id)?.dependsOn ?? []).includes(task.id));
+    const remainder = createRemainderTask(paths, task, deferred, ctx.tasks, config, dependents);
+    if (remainder) {
+      log.info(`${task.id}: all blocking acceptance items landed; accepted the subset and created remainder ${remainder.id} for ${deferred.length} deferred item(s)`);
+      ctx.onPlanChanged?.(task.id, [remainder.id]);
+      return { status: 'accepted', summary: `accepted landed subset automatically; deferred to ${remainder.id}: ${deferred.map(describeDefer).join('; ')}` };
+    }
     log.info(`${task.id}: all blocking acceptance items landed; auto-accepting the subset and deferring ${deferred.length} item(s)`);
     return { status: 'accepted', summary: `accepted landed subset automatically; deferred: ${deferred.map(describeDefer).join('; ')}` };
   };
@@ -1103,17 +1114,29 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         const delta = computeAttemptDelta({ paths, attempt: st.attempts, taskFile: task.taskFile, verify: st.verify, metric: readMetric(ctx) });
         const stalledByMetric = metricPlateau((st.deltas ?? []).map((d) => d.metric), config.metric.direction, config.progress.stallAfterRepeats);
         if (config.progress.enabled && (isStalled((st.deltas ?? []).map((d) => d.fingerprint), delta.fingerprint, config.progress.stallAfterRepeats) || stalledByMetric)) {
-          if (stalledByMetric) log.warn(`${task.id}: objective metric has not improved across attempts (direction ${config.metric.direction})`);
-          const scope = `no measurable progress across attempts (${delta.signals.join('; ')})`;
-          log.warn(`${task.id}: stalled — attempt ${st.attempts} reproduced the previous attempt's observable state; not retrying (${delta.signals.join('; ')})`);
+          const scope = stalledByMetric
+            ? `objective metric has not improved across attempts (direction ${config.metric.direction})`
+            : `no measurable progress across attempts (${delta.signals.join('; ')})`;
+          log.warn(`${task.id}: stalled — ${scope}; not retrying`);
           const deferred = deferrableRemainder();
           if (deferred) { final = autoAcceptSubset(deferred); break; }
+          // The objective product metric is the primary signal: when it has plateaued, the decision is
+          // deterministic — park/escalate the scope question — and breakdown is not consulted. LLM
+          // breakdown stays the ambiguity fallback for the fingerprint-only case (no metric configured).
+          if (stalledByMetric) {
+            final = {
+              status: 'blocked',
+              summary: `stalled — ${scope}. Re-scope the task or supply the missing capability; it will not be retried as is.`,
+              lastError: { category: 'stalled', message: scope, transient: false, fatal: false, at: nowIso() },
+            };
+            break;
+          }
           const bd = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'failure', { category: 'stalled', reason: scope, continuations: continuation }));
           if (bd.split) return { status: st.status, split: true };
           if (bd.replan) return { status: st.status, replan: true };
           final = {
             status: 'blocked',
-            summary: `stalled — no measurable progress: ${block.summary || 'more work remains'}. Its acceptance is likely dependency-gated or unreachable as scoped; re-scope it or run \`symphony accept ${task.id} --note ...\` on the landed subset.`,
+            summary: `stalled — ${scope}: ${block.summary || 'more work remains'}. Its acceptance is likely dependency-gated or unreachable as scoped; re-scope it or run \`symphony accept ${task.id} --note ...\` on the landed subset.`,
             lastError: { category: 'stalled', message: scope, transient: false, fatal: false, at: nowIso() },
           };
           break;

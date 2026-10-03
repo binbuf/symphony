@@ -5,6 +5,7 @@ import { scaffoldDocs } from './commands.js';
 import { resolveSession } from './config.js';
 import { docsContract } from './contract.js';
 import { commitAll, currentBranch, describeCommit, ensureGitignore, restoreWorktree, snapshotWorktree } from './git.js';
+import { checkAutoCreatedTasks } from './graph.js';
 import { docsTree, formatLint, lintDocs, type LintReport } from './lint.js';
 import type { Logger } from './logger.js';
 import { rel, stopIgnoreEntry, type Paths } from './paths.js';
@@ -15,9 +16,26 @@ import { idFromNum, parseRoadmap, patchRoadmapFile } from './roadmap.js';
 import { haltBanner, preflight, type RunContext } from './runner.js';
 import { acquireLock, DONE_STATES, HELD_STATES, releaseLock, saveState, startLockHeartbeat, type State, type TaskStatus } from './state.js';
 import { updatePipelineStatus } from './status.js';
-import { discoverTasks, type Task } from './tasks.js';
+import { discoverTasks, parseFrontMatter, type Task } from './tasks.js';
 import { renderPrompt } from './templates.js';
 import { UsageError, clip, squash } from './util.js';
+
+/** The task-file bodies of a discovered plan, for parsing acceptance items and dependency edges. */
+function taskBodies(tasks: Task[]): Map<string, string | undefined> {
+  const bodies = new Map<string, string | undefined>();
+  for (const t of tasks) {
+    bodies.set(t.id, t.taskFile && existsSync(t.taskFile) ? parseFrontMatter(readFileSync(t.taskFile, 'utf8')).body : undefined);
+  }
+  return bodies;
+}
+
+/** Reject a rewrite that would create a duplicate, depth-overflowing or DAG-breaking task. */
+function assertPlanInvariants(ctx: RunContext, before: Task[], after: Task[]): string | undefined {
+  const issues = checkAutoCreatedTasks(before, after, taskBodies(after), { maxSplitDepth: ctx.config.ceiling.maxSplitDepth });
+  if (!issues.length) return undefined;
+  for (const issue of issues) ctx.log.error(`replan: ${issue.taskId}: ${issue.message}`);
+  return issues[0].message;
+}
 
 const ROADMAP_CAP = 16 * 1024;
 const DIRECTION_CAP = 32 * 1024;
@@ -267,6 +285,11 @@ export async function replanCommand(ctx: RunContext, opts: ReplanOptions): Promi
       log.error(`replan: the rewritten plan does not parse (${(e as Error).message}); refusing to commit.`);
       return 2;
     }
+    const invariantError = assertPlanInvariants(ctx, ctx.tasks, newTasks);
+    if (invariantError) {
+      log.error('replan: refusing to commit. Rename the duplicate or depth-overflowing ticket, fix the dependency edges, or adjust ceiling.maxSplitDepth.');
+      return 2;
+    }
     const plan = planReplanState(state, newTasks);
     if (plan.conflicts.length && !opts.allowIdReuse && !opts.resetState) {
       for (const c of plan.conflicts) log.error(`replan: ${c.id} was reused for different work: it already ran as "${c.oldTitle}" [${c.status}] but the new plan titles it "${c.newTitle}"`);
@@ -488,6 +511,11 @@ export async function replanForBreakdown(ctx: RunContext, ev: BreakdownEvidence,
     check.errors.forEach((e) => log.error(`replan: ${e}`));
     log.error('replan: refusing to commit. Nothing was recorded.');
     return reject(2, check.errors[0]);
+  }
+  const invariantError = assertPlanInvariants(ctx, ctx.tasks, newTasks);
+  if (invariantError) {
+    log.error('replan: refusing to commit. Nothing was recorded.');
+    return reject(2, invariantError);
   }
 
   const plan = planReplanState(state, newTasks);

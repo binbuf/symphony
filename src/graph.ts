@@ -215,6 +215,62 @@ export function emptyContract(): TaskContract {
   return { ...EMPTY };
 }
 
+export interface PlanInvariantOptions {
+  /** Maximum split depth an auto-created task may have. `0` disables the bound. */
+  maxSplitDepth: number;
+}
+
+/**
+ * Hard invariants for any rewrite that can add tasks (an automatic replan, or a generated remainder).
+ * An auto-created ticket must not:
+ *  - duplicate a task that survives the rewrite (by id or normalised title), so the harness cannot
+ *    keep recreating the same missing prerequisite under a new spelling;
+ *  - sit deeper than `ceiling.maxSplitDepth` in a split chain; and
+ *  - introduce an unknown dependency or a cycle into the task DAG.
+ * `before` is the plan prior to the rewrite, `after` the plan it produced; `bodies` maps each after
+ * task id to its body so acceptance items and dependency edges can be parsed. Pure and testable.
+ */
+export function checkAutoCreatedTasks(
+  before: Task[],
+  after: Task[],
+  bodies: Map<string, string | undefined>,
+  opts: PlanInvariantOptions,
+): ContractIssue[] {
+  const issues: ContractIssue[] = [];
+  const afterIds = new Set(after.map((t) => t.id));
+  // A duplicate only counts against work that still exists after the rewrite, plus work this very
+  // rewrite already added (so two new tickets cannot share a title either).
+  const persistent = before.filter((t) => afterIds.has(t.id));
+  const created: Task[] = [];
+  for (const t of after) {
+    if (afterIds.has(t.id) && before.some((b) => b.id === t.id)) continue; // pre-existing
+    if (opts.maxSplitDepth > 0 && splitDepth(t.id) > opts.maxSplitDepth) {
+      issues.push({ taskId: t.id, message: `auto-created at split depth ${splitDepth(t.id)}, above ceiling.maxSplitDepth (${opts.maxSplitDepth})` });
+    }
+    const dup = findDuplicateTask({ title: t.title }, [...persistent, ...created]);
+    if (dup && dup.id !== t.id) {
+      issues.push({ taskId: t.id, message: `duplicates existing ${dup.id} ("${dup.title}"); reuse or retitle it instead of creating a parallel ticket` });
+    }
+    created.push(t);
+  }
+  // Only DAG problems introduced by the newly created tickets block the rewrite: a pre-existing
+  // dangling edge or cycle is reported at run time, but must not wedge every future replan.
+  const contracts = contractsFor(after, bodies);
+  const knownAfter = new Set(after.map((t) => t.id));
+  const createdIds = new Set(created.map((t) => t.id));
+  for (const t of created) {
+    for (const dep of contracts.get(t.id)?.dependsOn ?? []) {
+      if (!knownAfter.has(dep)) issues.push({ taskId: t.id, message: `depends on ${dep}, which is not in ROADMAP.md` });
+      if (dep === t.id) issues.push({ taskId: t.id, message: 'depends on itself' });
+    }
+  }
+  const cycle = findCycle(after.map((t) => t.id), contracts);
+  if (cycle && cycle.some((id) => createdIds.has(id))) {
+    issues.push({ taskId: cycle[0], message: `dependency cycle: ${cycle.join(' → ')}` });
+  }
+  return issues;
+}
+
 /** Split depth of a task id: T10 = 0, T10a = 1, T10a1 = 2. Bounds a runaway split chain. */
 export function splitDepth(id: string): number {
   const m = /^T?\d{1,3}([a-z]\d*)$/i.exec(id);

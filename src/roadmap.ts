@@ -76,6 +76,46 @@ export function idFromNum(n: number): string {
   return formatTaskId(n);
 }
 
+const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
+
+/**
+ * Every id a split of `parent` could produce, in order: letters for a base task (T10 → T10a, T10b, …),
+ * letter+digits for an already-split task (T10a → T10a1, T10a2, …). Empty for a twice-split id.
+ */
+export function childIdSequence(parent: string): string[] {
+  const parsed = parseTaskId(parent);
+  if (!parsed) return [];
+  const out: string[] = [];
+  if (!parsed.suffix) {
+    for (const letter of LETTERS) out.push(formatTaskId(parsed.num, letter));
+  } else if (/^[a-z]$/.test(parsed.suffix)) {
+    for (let i = 1; i <= 99; i++) out.push(formatTaskId(parsed.num, `${parsed.suffix}${i}`));
+  }
+  return out;
+}
+
+/** The child ids a split of `parent` may use, in execution order, skipping ids already in the roadmap. */
+export function childIdsFor(parent: string, taken: Iterable<string> = []): string[] {
+  const used = new Set(taken);
+  return childIdSequence(parent).filter((id) => !used.has(id));
+}
+
+/**
+ * Insert a fresh `- [ ]` task bullet directly after `afterId`, preserving every other byte and the
+ * file's line endings. Returns false when `afterId` is not in the roadmap. Used to place an
+ * auto-created remainder exactly where its parent was, so it runs before the parent's dependents.
+ */
+export function insertRoadmapBulletAfter(path: string, afterId: string, id: string, title: string, link?: string): boolean {
+  const text = readFileSync(path, 'utf8');
+  const rm = parseRoadmap(text);
+  const bullet = rm.bullets.find((b) => b.id === afterId);
+  if (!bullet) return false;
+  const tail = link ? ` → [${link}](${link})` : '';
+  rm.lines.splice(bullet.lineIndex + 1, 0, `- [ ] ${id} — ${title}${tail}`);
+  atomicWriteSync(path, rm.lines.join(rm.eol));
+  return true;
+}
+
 /** Roadmap order: by numeric base, then by suffix ('' before 'a' before 'a1' before 'b'). */
 export function taskIdOrder(a: { num: number; suffix?: string }, b: { num: number; suffix?: string }): number {
   if (a.num !== b.num) return a.num - b.num;

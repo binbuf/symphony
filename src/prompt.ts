@@ -209,9 +209,13 @@ function readProgress(ctx: PromptCtx, paths: Paths): string {
   });
 }
 
-/** Place the capability notes after the opening paragraph, before the final result instructions. */
+/**
+ * Place the capability notes and the generated operating frame after the opening paragraph, before
+ * the final result instructions. Every session — not just a fresh task — gets the frame, so a nudge,
+ * resume or wrap-up can never read stale framing that contradicts the live queue.
+ */
 function withNotes(text: string, ctx: PromptCtx): string {
-  const note = [ctx.mcpNote, ctx.visionNote].filter(Boolean).join('\n\n');
+  const note = [ctx.mcpNote, ctx.visionNote, ctx.operatingFrame].filter(Boolean).join('\n\n');
   if (!note) return text;
   const firstBreak = text.indexOf('\n\n');
   if (firstBreak < 0) return `${text}\n\n${note}\n`;

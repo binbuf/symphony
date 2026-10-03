@@ -275,6 +275,41 @@ test('a continue that reproduces the previous attempt\'s observable state is par
   }
 });
 
+test('an objective metric plateau parks the task deterministically without consulting breakdown', async () => {
+  const { dir, paths, task } = project();
+  // Slice one lands part1 and reports continue; the next attempt would continue again, but the
+  // objective product metric has plateaued across the attempts, so the harness parks rather than
+  // retrying or offering the decision to the LLM breakdown.
+  writeFileSync(join(dir, 'fixtures', 'T01.continue.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    JSON.stringify({ type: 'fake_write', path: 'part2.txt', content: 'more motion' }),
+    claudeResult('continue', 'still working'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  state.tasks.T01 = {
+    ...newTaskState('Do the thing'),
+    deltas: [
+      { at: new Date().toISOString(), attempt: 1, fingerprint: 'a', metric: 3, signals: [] },
+      { at: new Date().toISOString(), attempt: 2, fingerprint: 'b', metric: 3, signals: [] },
+    ],
+  };
+  let splitCalled = false;
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 5, nudge: false };
+  const ctx: RunContext = {
+    paths, config, cli: {}, flags, log: silent,
+    roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(),
+    performSplit: async () => { splitCalled = true; return { code: 1, parentId: 'T01', children: [], error: 'not consulted' }; },
+  };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'blocked');
+    assert.match(state.tasks.T01.summary ?? '', /objective metric/);
+    assert.equal(splitCalled, false, 'breakdown is not consulted when the objective metric decided');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
 test('STOP pauses at a continuation boundary and the next run resumes the next slice', async () => {
   const { dir, paths, task } = project();
   // The first (task) session lands slice one and drops the .stop sentinel before reporting continue.
@@ -436,8 +471,11 @@ test('a blocked task whose only remaining acceptance is deferrable is auto-accep
     assert.equal(out.status, 'accepted');
     assert.equal(state.tasks.T01.status, 'accepted');
     assert.equal(state.tasks.T01.deferred?.length, 1);
-    assert.match(state.tasks.T01.summary ?? '', /deferred/);
-    assert.match(readFileSync(paths.roadmap, 'utf8'), /\[x\] T01.*⟵ accepted/);
+    assert.match(state.tasks.T01.summary ?? '', /deferred to T01a/);
+    const roadmap = readFileSync(paths.roadmap, 'utf8');
+    assert.match(roadmap, /\[x\] T01.*⟵ accepted/);
+    assert.match(roadmap, /- \[ \] T01a — Do the thing — remainder/, 'the deferred remainder becomes a real ticket after its parent');
+    assert.ok(existsSync(join(paths.tasksDir, '01a-do-the-thing-remainder.md')), 'the remainder task file exists');
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

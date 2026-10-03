@@ -9,7 +9,8 @@ import { rel, stopIgnoreEntry, type Paths } from './paths.js';
 import { lintCommand, runDocsSession } from './prepare.js';
 import { taskFileBody } from './prompt.js';
 import { getProvider, variantSupported } from './providers/index.js';
-import { canonicalId, formatTaskId, parseTaskId, parseRoadmap, patchRoadmapFile, statusFromMarkers, type Roadmap } from './roadmap.js';
+import { childIdsFor, childIdSequence, canonicalId, formatTaskId, parseTaskId, parseRoadmap, patchRoadmapFile, statusFromMarkers, type Roadmap } from './roadmap.js';
+import { splitDepth } from './graph.js';
 import { haltBanner, preflight, type RunContext } from './runner.js';
 import { acquireLock, DONE_STATES, releaseLock, saveState, startLockHeartbeat, type State } from './state.js';
 import { updatePipelineStatus } from './status.js';
@@ -18,7 +19,9 @@ import { renderPrompt } from './templates.js';
 import { UsageError, clip, squash } from './util.js';
 
 const ROADMAP_CAP = 16 * 1024;
-const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
+
+// Re-exported from roadmap so existing importers (and tests) keep resolving them here.
+export { childIdsFor, childIdSequence } from './roadmap.js';
 
 export interface SplitOptions {
   /** The task to break down, in any accepted spelling (T10, 10, t10a). */
@@ -43,28 +46,6 @@ export interface SplitResult {
   children: string[];
   /** One-line detail when `code` is non-zero. */
   error?: string;
-}
-
-/** The child ids a split of `parent` may use, in execution order, skipping ids already in the roadmap. */
-export function childIdsFor(parent: string, taken: Iterable<string> = []): string[] {
-  const used = new Set(taken);
-  return childIdSequence(parent).filter((id) => !used.has(id));
-}
-
-/**
- * Every id a split of `parent` could produce, in order: letters for a base task (T10 → T10a, T10b, …),
- * letter+digits for an already-split task (T10a → T10a1, T10a2, …). Empty for a twice-split id.
- */
-export function childIdSequence(parent: string): string[] {
-  const parsed = parseTaskId(parent);
-  if (!parsed) return [];
-  const out: string[] = [];
-  if (!parsed.suffix) {
-    for (const letter of LETTERS) out.push(formatTaskId(parsed.num, letter));
-  } else if (/^[a-z]$/.test(parsed.suffix)) {
-    for (let i = 1; i <= 99; i++) out.push(formatTaskId(parsed.num, `${parsed.suffix}${i}`));
-  }
-  return out;
 }
 
 export interface SplitCheck {
@@ -235,6 +216,11 @@ export async function splitTask(ctx: RunContext, opts: SplitOptions): Promise<Sp
   const status = state.tasks[parent.id]?.status ?? 'pending';
   if (DONE_STATES.includes(status)) {
     throw new UsageError(`split ${parent.id}: it is ${status}; only pending, failed, blocked or interrupted tasks can be split (use \`symphony reset ${parent.id}\` first to redo it)`);
+  }
+  // Hard autonomy bound: a configurable ceiling on how deep a split chain may go. `0` disables it;
+  // the base id scheme already stops at depth 2 (T10 → T10a → T10a1, which has no further children).
+  if (config.ceiling.maxSplitDepth > 0 && splitDepth(parent.id) >= config.ceiling.maxSplitDepth) {
+    throw new UsageError(`split ${parent.id}: it is at split depth ${splitDepth(parent.id)}, at the ceiling (ceiling.maxSplitDepth ${config.ceiling.maxSplitDepth}); create new base tasks for the remaining work instead`);
   }
 
   const sequence = childIdsFor(parent.id, ctx.tasks.map((t) => t.id));

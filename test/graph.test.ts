@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  contractsFor, dependencyClosure, findDuplicateTask, isLandedSubset, parseAcceptance, parseContract,
-  splitDepth, summarizeAcceptance, topoOrder, validateContracts,
+  checkAutoCreatedTasks, contractsFor, dependencyClosure, findDuplicateTask, isLandedSubset, parseAcceptance,
+  parseContract, splitDepth, summarizeAcceptance, topoOrder, validateContracts,
 } from '../src/graph.js';
 import type { Task } from '../src/tasks.js';
 
 const task = (id: string, meta: Record<string, string> = {}): Task => ({
   id, num: Number(id.slice(1)), title: id, phase: 'P', order: 0, meta,
+});
+
+const named = (id: string, title: string, meta: Record<string, string> = {}): Task => ({
+  ...task(id, meta), title,
 });
 
 test('parseAcceptance defaults to blocking and understands deferrable tags', () => {
@@ -87,4 +91,36 @@ test('acceptance summary and landed-subset detection', () => {
   const landed = parseAcceptance('- [x] a\n- [ ] c [deferrable]\n- [ ] d [deferrable: cap]');
   assert.equal(isLandedSubset(landed), true);
   assert.equal(isLandedSubset(parseAcceptance('- [x] a\n- [x] b')), false, 'fully checked is done, not a subset');
+});
+
+test('checkAutoCreatedTasks rejects a duplicate, an over-deep split and a broken DAG', () => {
+  const before = [named('T01', 'Wire the organ router')];
+  const opts = { maxSplitDepth: 1 };
+
+  const dup = checkAutoCreatedTasks(before, [...before, named('T02', 'wire  the ORGAN router')], new Map(), opts);
+  assert.ok(dup.some((i) => /duplicates existing T01/.test(i.message)), dup.map((i) => i.message).join('|'));
+  assert.equal(dup.length, 1);
+
+  const deep = checkAutoCreatedTasks(before, [...before, { ...named('T05a1', 'deeper still') }], new Map(), opts);
+  assert.ok(deep.some((i) => /split depth 2.*maxSplitDepth \(1\)/.test(i.message)), deep.map((i) => i.message).join('|'));
+
+  const bodies = new Map<string, string | undefined>();
+  const unknown = checkAutoCreatedTasks(before, [...before, named('T02', 'fresh', { dependsOn: 'T99' })], bodies, opts);
+  assert.ok(unknown.some((i) => /depends on T99/.test(i.message)), unknown.map((i) => i.message).join('|'));
+
+  const cyclic = checkAutoCreatedTasks(
+    before,
+    [...before, named('T02', 'a', { dependsOn: 'T03' }), named('T03', 'b', { dependsOn: 'T02' })],
+    bodies,
+    opts,
+  );
+  assert.ok(cyclic.some((i) => /cycle/.test(i.message)), cyclic.map((i) => i.message).join('|'));
+
+  const clean = checkAutoCreatedTasks(before, [...before, named('T02', 'a genuinely new thing')], bodies, { maxSplitDepth: 3 });
+  assert.deepEqual(clean, []);
+});
+
+test('checkAutoCreatedTasks ignores pre-existing duplicate titles and dangling edges', () => {
+  const before = [named('T01', 'Same title'), named('T02', 'Same title', { dependsOn: 'T99' })];
+  assert.deepEqual(checkAutoCreatedTasks(before, before, new Map(), { maxSplitDepth: 3 }), []);
 });
