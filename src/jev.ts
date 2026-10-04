@@ -1,11 +1,6 @@
-import type { JevConfig, JevProviderName } from './config.js';
+import { JEV_BASE_URLS, type JevConfig } from './config.js';
 import type { ReportedStatus } from './result.js';
 import { headAndTail, isRecord, squash } from './util.js';
-
-/** Base URL per built-in provider; `jev.baseUrl` overrides it. */
-const BASE_URLS: Record<JevProviderName, string> = {
-  openrouter: 'https://openrouter.ai/api',
-};
 
 const STATUSES: ReportedStatus[] = ['done', 'continue', 'blocked', 'failed'];
 
@@ -38,7 +33,7 @@ interface Choice {
 }
 
 export function jevBaseUrl(config: JevConfig): string {
-  return (config.baseUrl ?? BASE_URLS[config.provider]).replace(/\/+$/, '');
+  return (config.baseUrl ?? JEV_BASE_URLS[config.provider]).replace(/\/+$/, '');
 }
 
 /** Why Jev cannot run right now, or undefined when it can. Cheap: no network. */
@@ -62,7 +57,7 @@ function tail(s: string, max: number): string {
 async function callSystemOne(config: JevConfig, state: unknown, questions: unknown, deps: JevDeps): Promise<unknown | undefined> {
   const env = deps.env ?? process.env;
   const key = env[config.apiKeyEnv];
-  if (!config.enabled || !key) return undefined;
+  if (!key) return undefined;
 
   const doFetch = deps.fetchImpl ?? fetch;
   const controller = new AbortController();
@@ -128,6 +123,20 @@ function readChoice(json: unknown, key: string): Choice | undefined {
     model: typeof json.model === 'string' ? json.model : undefined,
     costUsd: usage && typeof usage.cost === 'number' ? usage.cost : undefined,
   };
+}
+
+/**
+ * The next-most-likely option in a choice's probability map, formatted for a log line, or undefined
+ * when the model reported none. Sits beside a below-`minConfidence` answer so the deterministic
+ * fallback's decision can be read against what the classifier nearly said.
+ */
+export function runnerUp(probabilities: Record<string, number> | undefined, chosen: string): string | undefined {
+  if (!probabilities) return undefined;
+  const others = Object.entries(probabilities)
+    .filter(([name, p]) => name !== chosen && typeof p === 'number' && Number.isFinite(p))
+    .sort((a, b) => b[1] - a[1]);
+  if (!others.length) return undefined;
+  return `${others[0][0]} ${Math.round(others[0][1] * 100)}%`;
 }
 
 /**

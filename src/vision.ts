@@ -1,12 +1,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
-import type { JevProviderName, VisionConfig } from './config.js';
+import { JEV_BASE_URLS, type VisionConfig } from './config.js';
 import { UsageError, isRecord } from './util.js';
-
-/** Base URL per built-in router; `vision.baseUrl` overrides it. */
-const BASE_URLS: Record<JevProviderName, string> = {
-  openrouter: 'https://openrouter.ai/api',
-};
 
 /** Extension → MIME type for the image formats the chat-completions API accepts. */
 const MIME_TYPES: Record<string, string> = {
@@ -48,7 +43,7 @@ export interface VisionResult {
 }
 
 export function visionBaseUrl(config: VisionConfig): string {
-  return (config.baseUrl ?? BASE_URLS[config.provider]).replace(/\/+$/, '');
+  return (config.baseUrl ?? JEV_BASE_URLS[config.provider]).replace(/\/+$/, '');
 }
 
 /** Why the vision tool cannot run right now, or undefined when it can. Cheap: no network. */
