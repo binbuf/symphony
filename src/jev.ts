@@ -226,8 +226,8 @@ export function parseEscalationDecision(json: unknown): JevEscalationDecision | 
 export const BREAKDOWN_ACTIONS = ['split', 'replan', 'proceed', 'escalate', 'stop'] as const;
 export type JevBreakdownAction = (typeof BREAKDOWN_ACTIONS)[number];
 
-/** The stage a breakdown decision is made at: before a task starts, at a `continue` boundary, on failure, or when a task reports blocked. */
-export type BreakdownStage = 'start' | 'continue' | 'failure' | 'blocked';
+/** The stage a breakdown decision is made at: before a task starts, at a `continue` boundary, on failure, when a task reports blocked, or when the judge passes below the confidence bar. */
+export type BreakdownStage = 'start' | 'continue' | 'failure' | 'blocked' | 'gap';
 
 export interface JevBreakdownDecision {
   action: JevBreakdownAction;
@@ -254,6 +254,7 @@ const BREAKDOWN_ALLOWED: Record<BreakdownStage, readonly JevBreakdownAction[]> =
   start: ['split', 'replan', 'proceed'],
   continue: ['split', 'replan', 'proceed'],
   blocked: ['split', 'replan', 'proceed'],
+  gap: ['split', 'replan', 'proceed'],
   failure: ['split', 'replan', 'escalate', 'stop', 'proceed'],
 };
 
@@ -312,6 +313,14 @@ const BREAKDOWN_QUESTIONS: Record<BreakdownStage, { instructions: string; criter
       split: 'The task bundles work a model could do with a decision or input that needs a human; splitting it lets the automatable parts run now and leaves a smaller, clear item for the human. Splitting cannot create a missing prerequisite, so do not choose it for that case.',
       replan: 'The block shows the plan around this task is wrong. Either upcoming work depends on the blocked decision, or the blocked task itself depends on a prerequisite or missing piece of work that is not in the plan (for example a prerequisite ticket that does not exist yet), or the upcoming work is mis-sized or mis-ordered around the block. Rewrite the upcoming plan to add or reorder that work so the human item is isolated and the rest can proceed.',
       proceed: 'The block is the real unit of work — it needs a human decision before anything more can proceed; leave the ordinary blocked path alone.',
+    },
+  },
+  gap: {
+    instructions: 'A coding agent reported this task done and its tests pass, but the independent completion judge passed it only below the required confidence bar, meaning required work is missing or merely unverified. Should the task be continued to close those gaps, should it be broken into smaller subtasks that carry the missing work, or is the plan around it wrong?',
+    criteria: {
+      continue: 'The task is the right unit and the gaps are small enough to close in a follow-up continuation; keep the task and continue it with the gaps named.',
+      split: 'The missing work is substantial or mixes several independent pieces, so smaller subtasks carrying those items are a better fit than one more continuation.',
+      replan: 'The gaps reveal the plan around this task is wrong — upcoming work is mis-sized, mis-ordered, duplicative, or missing a piece the gap names; rewrite the upcoming plan to add or reorder that work.',
     },
   },
 };

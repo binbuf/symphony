@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
-import { breakdownGate, buildBreakdownPrompt, decideBreakdown, parseBreakdownAnswer, rulesVerdict, type BreakdownEvidence } from '../src/breakdown.js';
+import { allowedActions, breakdownGate, buildBreakdownPrompt, decideBreakdown, parseBreakdownAnswer, rulesVerdict, type BreakdownEvidence } from '../src/breakdown.js';
 import { DEFAULTS, type BreakdownConfig, type Config } from '../src/config.js';
 import { parseBreakdownDecision } from '../src/jev.js';
 import type { Logger } from '../src/logger.js';
@@ -89,6 +89,23 @@ test('rulesVerdict splits at start/continue and prefers the split over escalatio
   const splitFloor = { ...b, rules: rules({ blockedAction: 'split' }) };
   assert.equal(rulesVerdict(splitFloor, evidence({ stage: 'blocked' }), 'the task reported blocked').action, 'split');
   assert.match(rulesVerdict(splitFloor, evidence({ stage: 'blocked' }), 'the task reported blocked').reason, /instead of stopping for the human/);
+});
+
+test('the gap stage opens on onGap and its deterministic floor is proceed, not split', () => {
+  const on = cfg({ enabled: true }).breakdown;
+  assert.equal(breakdownGate(on, evidence({ stage: 'gap' })).open, true, 'onGap defaults to on');
+  assert.match(breakdownGate(on, evidence({ stage: 'gap' })).why, /below judge\.minConfidence/);
+  assert.equal(breakdownGate(cfg({ enabled: true, onGap: false }).breakdown, evidence({ stage: 'gap' })).open, false);
+  assert.match(breakdownGate(cfg({ enabled: true, onGap: false }).breakdown, evidence({ stage: 'gap' })).why, /onGap is off/);
+
+  // The rules keep the task and continue it to close the gaps; splitting is the model sources' call.
+  const v = rulesVerdict(on, evidence({ stage: 'gap' }), 'the judge passed below the bar');
+  assert.equal(v.action, 'proceed');
+  assert.match(v.reason, /continuing the task to close the gaps/);
+  assert.deepEqual(allowedActions('gap'), ['split', 'replan', 'proceed']);
+  // Jev may answer the gap question with "continue" (normalized to proceed).
+  assert.equal(parseBreakdownDecision({ answers: { decision: { type: 'choice', choice: 'continue', confidence: 0.9 } } }, 'gap')?.action, 'proceed');
+  assert.equal(parseBreakdownDecision({ answers: { decision: { type: 'choice', choice: 'split', confidence: 0.9 } } }, 'gap')?.action, 'split');
 });
 
 test('decideBreakdown is silent while the gate is closed and answers with the rules when nothing else can', async () => {

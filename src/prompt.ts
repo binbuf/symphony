@@ -26,6 +26,11 @@ export interface PromptCtx {
   designDocs: boolean;
   /** Message of the failure that ended the previous attempt, if any. */
   lastError?: string;
+  /**
+   * The completion judge's gap analysis when it passed the work below `judge.minConfidence`. Injected
+   * as authoritative guidance so the continuation closes exactly the named gaps.
+   */
+  gapAnalysis?: string;
   /** Maintain and inline the generated progress digest (only inlined when maxProgressBytes > 0). */
   progressDigest?: boolean;
   /** Inline the design docs the task names, not just point to docs/design (default false). */
@@ -122,6 +127,9 @@ function buildExecutionPrompt(ctx: PromptCtx, continuing: boolean): string {
   const retryNote = ctx.lastError
     ? `\nPrevious attempt failed: ${ctx.lastError}. Inspect \`git status\` and \`git log -3\`; build on partial work.\n`
     : '';
+  const gapNote = ctx.gapAnalysis
+    ? `\n## Gap analysis from the completion judge (authoritative)\nThe independent judge reviewed the work this task already landed and passed it below the required confidence, meaning required work is missing or only unverified. Close exactly what it names and nothing else; do not redo work that already landed.\n${ctx.gapAnalysis}\n`
+    : '';
   const continuationNote = continuing || ctx.continuation > 0
     ? `\nContinuation ${ctx.continuation} of ${task.id}: read ${taskFileRel} (especially Hand-off) and your note ${progressShard}. Inspect \`git status\` and \`git log -5\`. Finish only the remaining scope; do not redo completed work.\n`
     : '';
@@ -147,6 +155,7 @@ function buildExecutionPrompt(ctx: PromptCtx, continuing: boolean): string {
     mcpNote: ctx.mcpNote ? `${ctx.mcpNote}\n\n` : '',
     visionNote: ctx.visionNote ? `${ctx.visionNote}\n\n` : '',
     retryNote,
+    gapNote,
     continuationNote,
     root: paths.root,
     taskId: task.id,

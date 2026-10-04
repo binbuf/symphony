@@ -136,7 +136,7 @@ test('doctor reports the breakdown block: stages, decision chain and rules', () 
     /decision jev \(jev → rules\)/);
 
   // Enabled but no stage on is a warning, not a failure.
-  const noStage = runDoctor({ paths, config: { ...config, breakdown: { ...config.breakdown, onStart: false, onContinue: false, onFailure: false, onBlocked: false } }, state });
+  const noStage = runDoctor({ paths, config: { ...config, breakdown: { ...config.breakdown, onStart: false, onContinue: false, onFailure: false, onBlocked: false, onGap: false } }, state });
   assert.equal(noStage.find((c) => c.name === 'breakdown')?.level, 'warn');
   assert.match(noStage.find((c) => c.name === 'breakdown')?.detail ?? '', /nothing will trigger/);
 });

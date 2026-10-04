@@ -369,7 +369,7 @@ export async function main(argv: string[]): Promise<number> {
       }
       // Automatic breakdowns (config `breakdown`) run the `split`/`replan` machinery from inside the
       // run, sharing this run's lock and branch instead of acquiring their own.
-      ctx.performSplit = (taskId) => splitTask(ctx, { id: taskId, dryRun: false, keepLock: true });
+      ctx.performSplit = (taskId, note) => splitTask(ctx, { id: taskId, note, dryRun: false, keepLock: true });
       ctx.performReplan = (_taskId, ev, decisionReason) => replanForBreakdown(ctx, ev, { decisionReason });
       // `symphony start` re-invokes this process with --daemon: run headless, serviced by the control
       // channel, with no local view. `symphony attach` in another terminal drives it.

@@ -139,7 +139,7 @@ export function runDoctor(i: DoctorInput): Check[] {
 
   const bd = i.config.breakdown;
   if (bd.enabled) {
-    const stages = [bd.onStart && 'start', bd.onContinue && 'continue', bd.onFailure && 'failure', bd.onBlocked && 'blocked'].filter(Boolean).join('/');
+    const stages = [bd.onStart && 'start', bd.onContinue && 'continue', bd.onFailure && 'failure', bd.onBlocked && 'blocked', bd.onGap && 'gap'].filter(Boolean).join('/');
     const bdProvider = bd.provider ?? i.config.watch.provider;
     const bdModelProvider = bd.modelProvider ?? i.config.watch.modelProvider ?? i.config.providers[bdProvider].modelProvider;
     const model = composeModel(bdProvider, bdModelProvider, bd.model || i.config.watch.model);
@@ -158,7 +158,7 @@ export function runDoctor(i: DoctorInput): Check[] {
     const rules = `afterContinuations=${bd.rules.afterContinuations}, afterFailedAttempts=${bd.rules.afterFailedAttempts}, onCategories=${bd.rules.onCategories.join('/') || 'none'}`;
     add('breakdown', stages ? 'ok' : 'warn', stages
       ? `on ${stages} · decision ${decision} · rules ${rules} · max ${bd.maxPerTask || '∞'} per task`
-      : `breakdown.enabled is true but onStart/onContinue/onFailure/onBlocked are all false; nothing will trigger`);
+      : `breakdown.enabled is true but onStart/onContinue/onFailure/onBlocked/onGap are all false; nothing will trigger`);
   }
 
   const jd = i.config.judge;
@@ -167,7 +167,8 @@ export function runDoctor(i: DoctorInput): Check[] {
     const jdModelProvider = jd.modelProvider ?? i.config.watch.modelProvider ?? i.config.providers[jdProvider].modelProvider;
     const model = composeModel(jdProvider, jdModelProvider, jd.model || i.config.watch.model);
     const action = jd.onFail === 'fail' ? 'a confident fail demotes the done' : 'a failing verdict is advisory only';
-    add('judge', 'ok', `independent completion judge before each done · ${jdProvider}${model ? ` · ${model}` : ''} · ${action} (min confidence ${jd.minConfidence}, max ${jd.maxPerTask || '∞'} per done)`);
+    const gapAction = i.config.breakdown.enabled && i.config.breakdown.onGap ? 'a below-bar pass continues the task or is broken down' : 'a below-bar pass continues the task to close the gaps';
+    add('judge', 'ok', `independent completion judge before each done · ${jdProvider}${model ? ` · ${model}` : ''} · ${action}; ${gapAction} (min confidence ${jd.minConfidence}, max ${jd.maxPerTask || '∞'} per done)`);
   }
 
   if (i.config.vision.enabled) {

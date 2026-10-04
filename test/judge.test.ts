@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -286,6 +286,31 @@ test('a passing judge leaves the done standing and records the pass', async () =
     assert.equal(out.status, 'done');
     assert.equal(ctx.state.tasks.T01.judge?.verdict, 'pass');
     assert.equal(ctx.state.tasks.T01.judge?.enforced, undefined);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a passing verdict below minConfidence continues the task with the gap analysis, then accepts when continuations are spent', async () => {
+  const { dir, paths } = project('# R\n\n- [ ] T01 — Do it → [tasks/01-thing.md](tasks/01-thing.md)\n', { 'docs/tasks/01-thing.md': '# T01 — Do it\n\n## Goal\nShip the export.\n' });
+  writeFileSync(join(dir, 'fixtures', 'T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }), JSON.stringify({ type: 'fake_write', path: 'work.txt', content: 'done' }), claudeResult('done', 'shipped it')].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.continue.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }), JSON.stringify({ type: 'fake_write', path: 'work2.txt', content: 'closed the gap' }), claudeResult('done', 'finished the gaps')].join('\n') + '\n');
+  // The fake judge answers the same below-bar pass every run, so the second attempt exhausts the
+  // single continuation and the done is accepted.
+  writeFileSync(join(dir, 'fixtures', 'judge-T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 'j' }), judgeBlock('pass', 0.5, 'only the button wired', 'no CSV writer')].join('\n') + '\n');
+  const config: Config = { ...DEFAULTS, provider: 'fake', nudge: false, maxContinuations: 1, watch: { ...DEFAULTS.watch, enabled: false }, judge: { ...DEFAULTS.judge, enabled: true, provider: 'fake', model: 'm', minConfidence: 0.8 } };
+  const warnings: string[] = [];
+  const log: Logger = { info() {}, warn: (m) => warnings.push(m), error() {}, plain() {}, banner() {} };
+  const ctx = { ...runnerCtx(dir, paths, config), log };
+  try {
+    const out = await runTask(ctx, ctx.tasks[0]);
+    assert.equal(out.status, 'done');
+    assert.equal(ctx.state.tasks.T01.attempts, 2, 'the below-bar pass bought one gap-analysis continuation');
+    assert.ok(warnings.some((w) => /judge passed at 50%.*below judge\.minConfidence/.test(w)), warnings.join('\n'));
+    // The continuation prompt carries the judge's gap analysis as authoritative guidance.
+    const prompts = readdirSync(paths.runs).map((f) => join(paths.runs, f)).filter((f) => f.endsWith('.prompt.md')).map((f) => readFileSync(f, 'utf8')).join('\n');
+    assert.match(prompts, /## Gap analysis from the completion judge \(authoritative\)/);
+    assert.match(prompts, /no CSV writer/);
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

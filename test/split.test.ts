@@ -120,10 +120,10 @@ test('buildSplitPrompt names the child ids and carries the parent body, with and
   assert.match(prompt, /exactly 2 subtask bullets/);
   assert.match(prompt, /T05a, T05b/);
   assert.match(prompt, /- \[ \] T05a — <short imperative title>/);
-  assert.doesNotMatch(prompt, /Guidance from the human/);
+  assert.doesNotMatch(prompt, /## Guidance \(authoritative\)/);
 
   const guided = buildSplitPrompt(ctx, before.tasks[0], { sequence: childIdSequence('T05'), note: 'split by layer', findings: report });
-  assert.match(guided, /## Guidance from the human \(authoritative\)\nsplit by layer/);
+  assert.match(guided, /## Guidance \(authoritative\)\nsplit by layer/);
   assert.match(guided, /between 2 and 6 subtask bullets/);
 });
 

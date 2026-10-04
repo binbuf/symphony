@@ -196,6 +196,7 @@
     "onContinue": true,
     "onFailure": true,
     "onBlocked": true,
+    "onGap": true,
     "rules": {
       "afterContinuations": 1,
       "afterFailedAttempts": 1,

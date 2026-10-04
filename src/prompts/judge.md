@@ -43,7 +43,23 @@ You may read any file under the project to check the work (you have read-only ac
 
 Be conservative about failing: only fail when you can point to a concrete, task-relevant gap. If the evidence is genuinely insufficient to tell, lean **pass** and say so in the summary, with a lower confidence.
 
-Confidence is a number from 0 to 1 for your verdict. A confident `fail` (at or above the configured threshold) can send the task back for another attempt, so reserve high confidence for a clear miss.
+## Confidence rubric
+
+Confidence is a number from 0 to 1 for how sure you are that this task is fully complete **as its own contract defines it**. Do not default to a round number; pick the band whose conditions your evidence actually meets, then a value inside it. Base it on what you personally verified, not on how polished the session's summary sounded.
+
+Score the **lowest** band whose conditions hold for any part of the required work:
+
+- **0.95–1.00 — verified complete.** Every blocking acceptance item landed, and you confirmed it: verify covered them, or you read the changed code and tests and they prove the behavior. No requirement rests on the session's claims alone. Confidence falls toward 0.95 if any acceptance item is checked but not independently evidenced.
+- **0.80–0.94 — complete on reading, slightly thin evidence.** The requested work is present and correct by your reading of the diff/files, but at least one acceptance item or behavior is only inferred (unchecked box, no test, or a file you could not fully inspect).
+- **0.60–0.79 — likely complete, material items unverified.** The main change appears present, but one or more blocking requirements are not evidenced by the diff, verify output, or files you read; completion rests partly on claims.
+- **0.40–0.59 — uncertain.** The evidence is mixed or insufficient: scope is ambiguous, the diff is empty/truncated/only harness files, or the work looks partial or stubbed. You cannot confirm the task was done as intended.
+- **0.00–0.39 — not verifiable.** You have little or no usable evidence the requested work landed.
+
+Things that should lower the score: acceptance items left unchecked; `verify` absent or not covering a requirement; a diff that is empty, harness-only, or truncated past the task's files; the session's summary claims work the diff does not show; implementation stubs, TODOs, or placeholder behavior in the named scope; unrequested scope replacing requested scope.
+
+Things that should **not** lower the score: style, naming, extra unrequested (but non-conflicting) work, or a verbose/terse summary.
+
+A `fail` at or above the configured threshold sends the task back for another attempt. A `pass` that scores below that threshold is treated as unfinished and is sent back to close the named gaps — so when you pass with confidence below the top band, you must list what is missing or merely unverified in `gaps`. Reserve high confidence for work you actually confirmed.
 
 End your reply with exactly this block and nothing after it:
 
@@ -51,5 +67,5 @@ SYMPHONY_JUDGE
 verdict: pass | fail
 confidence: <0.0-1.0>
 summary: <one line: what you checked and your conclusion>
-gaps: <one line, only when verdict is fail: the specific missing or wrong items>
+gaps: <one line: required when verdict is fail, or when a pass is below the top band — the specific missing, wrong, or unverified items>
 END_SYMPHONY_JUDGE

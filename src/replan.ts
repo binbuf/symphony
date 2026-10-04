@@ -347,6 +347,13 @@ function autoReplanEvidence(ev: BreakdownEvidence): { stageLine: string; label: 
       text: squash(ev.reason ?? 'continue', 2000),
     };
   }
+  if (ev.stage === 'gap') {
+    return {
+      stageLine: 'the completion judge passed it below the required confidence bar, and the decision was that the upcoming plan is wrong enough to reshape around the gaps.',
+      label: 'judge gap analysis',
+      text: squash(ev.reason ?? '(no gaps reported)', 2000),
+    };
+  }
   return {
     stageLine: 'it is about to start, and the decision was that the upcoming plan is wrong enough to fix before running anything.',
     label: 'trigger',

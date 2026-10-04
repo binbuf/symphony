@@ -5,7 +5,7 @@ Task: {taskId} — {taskTitle} (phase: {taskPhase}; {taskOrder}/{taskCount})
 Task file: {taskFile}
 Attempt: {attempt} · continuation: {continuation}
 Progress: {doneCount} completed · {blockedCount} blocked/failed; see {roadmap} for task status.
-{retryNote}{continuationNote}{operatingFrame}
+{retryNote}{gapNote}{continuationNote}{operatingFrame}
 {mcpNote}{visionNote}## Where things are
 - {roadmap} — neighbouring tasks. The harness owns bullet markers, trailing "⟵" tags, and generated status; do not edit them.
 - {progressDir}/ — per-task findings written by earlier sessions; {progress} indexes them. Read the notes relevant to this task.

@@ -190,7 +190,7 @@ export function buildSplitPrompt(ctx: RunContext, parent: Task, opts: { sequence
       : 'The parent had no task file; the subtask files are new.',
     firstChild,
     firstChildFile,
-    noteBlock: opts.note ? `## Guidance from the human (authoritative)\n${opts.note}\n` : '',
+    noteBlock: opts.note ? `## Guidance (authoritative)\n${opts.note}\n` : '',
     lintCommand: lintCommand(ctx),
   };
   return renderPrompt('split.md', vars);

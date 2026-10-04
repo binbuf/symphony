@@ -387,6 +387,11 @@ export interface BreakdownConfig {
   onFailure: boolean;
   /** Ask before stopping for a task that reported blocked, instead of leaving the block whole. */
   onBlocked: boolean;
+  /**
+   * Ask when the completion judge passes a task but below `judge.minConfidence`: break the work into
+   * subtasks that carry the missing items, rewrite the plan, or continue the task to close the gaps.
+   */
+  onGap: boolean;
   rules: BreakdownRules;
   /**
    * Which decision source answers: `auto` tries Jev, then the fallback LLM, then the rules; the other
@@ -753,6 +758,7 @@ export const DEFAULTS: Config = {
     onContinue: true,
     onFailure: true,
     onBlocked: true,
+    onGap: true,
     rules: {
       afterContinuations: 1,
       afterFailedAttempts: 1,
@@ -1421,6 +1427,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         onContinue: boolOr(breakRaw.onContinue, DEFAULTS.breakdown.onContinue, 'breakdown.onContinue', warnings),
         onFailure: boolOr(breakRaw.onFailure, DEFAULTS.breakdown.onFailure, 'breakdown.onFailure', warnings),
         onBlocked: boolOr(breakRaw.onBlocked, DEFAULTS.breakdown.onBlocked, 'breakdown.onBlocked', warnings),
+        onGap: boolOr(breakRaw.onGap, DEFAULTS.breakdown.onGap, 'breakdown.onGap', warnings),
         rules: {
           afterContinuations: Math.max(0, numberOr(breakRulesRaw.afterContinuations, DEFAULTS.breakdown.rules.afterContinuations, 'breakdown.rules.afterContinuations', warnings)),
           afterFailedAttempts: Math.max(0, numberOr(breakRulesRaw.afterFailedAttempts, DEFAULTS.breakdown.rules.afterFailedAttempts, 'breakdown.rules.afterFailedAttempts', warnings)),

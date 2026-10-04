@@ -76,6 +76,10 @@ export function breakdownGate(b: BreakdownConfig, ev: BreakdownEvidence): { open
     if (!b.onBlocked) return { open: false, why: 'breakdown.onBlocked is off' };
     return { open: true, why: 'the task reported blocked (human input needed)' };
   }
+  if (ev.stage === 'gap') {
+    if (!b.onGap) return { open: false, why: 'breakdown.onGap is off' };
+    return { open: true, why: 'the judge passed the work below judge.minConfidence (gaps remain)' };
+  }
   if (!b.onFailure) return { open: false, why: 'breakdown.onFailure is off' };
   if (ev.category && !b.rules.onCategories.includes(ev.category)) return { open: false, why: `category ${ev.category} is not in breakdown.rules.onCategories` };
   if (ev.attempts < b.rules.afterFailedAttempts) return { open: false, why: `${ev.attempts} session${ev.attempts === 1 ? '' : 's'} (< breakdown.rules.afterFailedAttempts ${b.rules.afterFailedAttempts})` };
@@ -86,6 +90,11 @@ export function breakdownGate(b: BreakdownConfig, ev: BreakdownEvidence): { open
 export function rulesVerdict(b: BreakdownConfig, ev: BreakdownEvidence, why: string): BreakdownVerdict {
   if (ev.stage === 'blocked' && b.rules.blockedAction === 'proceed') {
     return { action: 'proceed', source: 'rules', reason: `${why}; leaving the ordinary blocked path (breakdown.rules.blockedAction is "proceed")` };
+  }
+  // At the gap stage the deterministic floor is `proceed` (continue the task to close the gaps): the
+  // judge's own gaps are the guidance, and splitting is the model sources' call, not the default.
+  if (ev.stage === 'gap') {
+    return { action: 'proceed', source: 'rules', reason: `${why}; continuing the task to close the gaps the judge named` };
   }
   const closing = ev.stage === 'start'
     ? 'split before running it'
@@ -210,6 +219,7 @@ const STAGE_LINES: Record<BreakdownStage, string> = {
   continue: 'The task has used one or more sessions, each ending with "continue" (unfinished), and another slice is about to start. Should it keep going, or is the task too large for this approach?',
   failure: 'The task failed. Should the harness break it into smaller subtasks, retry it on a more capable model, or give up?',
   blocked: 'The task reported blocked: the session finished what it could and left items that need a human. The run is about to stop for that human. Should the task be broken into smaller subtasks first, should the upcoming plan be rewritten (for example to add a prerequisite the block names), or is the block the real unit of work?',
+  gap: 'The task reported done and its tests pass, but the independent completion judge passed it only below the required confidence bar: required work is missing or merely unverified. Should the task be continued to close those gaps, broken into subtasks that carry the missing items, or is the plan around it wrong?',
 };
 
 const STAGE_DECISIONS: Record<BreakdownStage, string> = {
@@ -217,6 +227,7 @@ const STAGE_DECISIONS: Record<BreakdownStage, string> = {
   continue: '- continue: the work is converging; let the next slice run.\n- split: it is not converging, or is too large; break it into smaller subtasks.\n- replan: the slices show the plan itself is wrong; rewrite the upcoming plan instead of slicing on.',
   failure: '- split: smaller subtasks are more likely to succeed than a stronger model.\n- replan: the failure shows the plan around this task is wrong; rewrite the upcoming plan.\n- escalate: a more capable model would plausibly finish it from the same context.\n- stop: neither helps (missing context or a human decision).\n- proceed: unclear; take the ordinary failure path.',
   blocked: '- split: the task mixes automatable work with the human item; split it so the automatable parts can land now and the human gets a smaller, clear block. Splitting cannot create a missing prerequisite, so do not choose it for that case.\n- replan: the plan around the task is wrong — either upcoming work depends on the block, or the blocked task depends on a prerequisite or missing piece of work that is not in the plan (for example a prerequisite ticket that does not exist yet), or the upcoming work is mis-sized/mis-ordered around it; rewrite the upcoming plan, adding or reordering that work so the human item is isolated.\n- proceed: the block is the real unit of work; leave the ordinary blocked path (stop for the human, or continue past it as configured).',
+  gap: '- continue: the task is the right unit and the named gaps are small enough to close in one more continuation; keep the task and close exactly those gaps.\n- split: the missing work is substantial or mixes several independent pieces; break the task into smaller subtasks that carry the missing items, so each can be finished and checked on its own.\n- replan: the gaps show the plan around the task is wrong (upcoming work is mis-sized, mis-ordered, duplicative, or missing a piece the gap names); rewrite the upcoming plan to add or reorder that work.',
 };
 
 /** The fallback-LLM prompt: a self-contained snapshot so the read-only session answers without tools. `hint` is an earlier source's below-threshold lean. */
@@ -230,6 +241,8 @@ export function buildBreakdownPrompt(ev: BreakdownEvidence, gateReason: string, 
     evidence.push(`- failure: ${squash(ev.reason ?? '(no message)', 400)}`);
   } else if (ev.stage === 'blocked') {
     evidence.push(`- block summary: ${squash(ev.reason ?? '(none given)', 400)}`);
+  } else if (ev.stage === 'gap') {
+    evidence.push(`- judge gaps: ${squash(ev.reason ?? '(none given)', 600)}`);
   }
   if (hint) evidence.push(`- prior signal: ${hint}`);
   return renderPrompt('breakdown.md', {

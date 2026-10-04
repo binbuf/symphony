@@ -68,7 +68,7 @@ export interface SplitRequest {
  * A breakdown performed by the runner itself (an automatic split). Wired by the CLI to the `split`
  * machinery with the run's lock shared; absent in unit tests, where no automatic split is possible.
  */
-export type PerformSplit = (taskId: string) => Promise<SplitResult>;
+export type PerformSplit = (taskId: string, note?: string) => Promise<SplitResult>;
 
 /**
  * A plan-wide rewrite performed by the runner itself (an automatic replan). Wired by the CLI to the
@@ -390,7 +390,9 @@ async function autoBreakdown(ctx: RunContext, task: Task, ev: BreakdownEvidence)
   }
   let result: SplitResult;
   try {
-    result = await ctx.performSplit(task.id);
+    // At the gap stage hand the judge's gap analysis to the split session as authoritative guidance,
+    // so the subtasks it writes carry the specific missing/unverified items rather than a generic split.
+    result = await ctx.performSplit(task.id, ev.stage === 'gap' ? ev.reason : undefined);
   } catch (e) {
     ctx.log.warn(`${task.id}: breakdown did not complete (${(e as Error).message}); carrying on with the task as it is`);
     return { verdict, split: false, replan: false };
@@ -803,9 +805,9 @@ export function buildOperatingFrame(ctx: RunContext, task: Task): string {
   return lines.join('\n');
 }
 
-function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError: string | undefined, continuation: number, indexBody?: string): PromptCtx {
+function promptCtx(ctx: RunContext, task: Task, st: TaskState, spec: SessionSpec, lastError: string | undefined, continuation: number, indexBody?: string, gapAnalysis?: string): PromptCtx {
   const mcpProfile = resolveMcpProfile(ctx.config, 'task', task, ctx.cli);
-  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, variant: spec.variant, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody, visionNote: ctx.config.vision.enabled ? visionPromptNote() : undefined, mcpNote: mcpProfile ? mcpPromptNote(mcpProfile) : undefined, operatingFrame: buildOperatingFrame(ctx, task) };
+  return { paths: ctx.paths, task, tasks: ctx.tasks, state: ctx.state, attempt: st.attempts, continuation, providerName: spec.providerName, model: spec.model, variant: spec.variant, maxProgressBytes: ctx.config.maxProgressBytes, designDocs: ctx.config.designDocs, lastError, gapAnalysis, progressDigest: ctx.config.progressDigest, inlineDesignDocs: ctx.config.inlineDesignDocs, maxIndexBytes: ctx.config.maxIndexBytes, maxTaskBytes: ctx.config.maxTaskBytes, indexBody, visionNote: ctx.config.vision.enabled ? visionPromptNote() : undefined, mcpNote: mcpProfile ? mcpPromptNote(mcpProfile) : undefined, operatingFrame: buildOperatingFrame(ctx, task) };
 }
 
 /** Abortable, STOP- and split-aware backoff. Returns true when the run should stop waiting. */
@@ -959,6 +961,9 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   // Seed from state so a task paused (STOP) mid-continuation resumes as the next slice, not a fresh task.
   let continuation = st.continuation ?? 0;
   let iterations = 0;
+  // Set when the completion judge passed the work below `judge.minConfidence`: the next continuation
+  // session gets the judge's gap analysis injected as authoritative guidance, then this clears.
+  let pendingGap: string | undefined;
   let final: Final | undefined;
   let halt: Halted | undefined;
 
@@ -1145,12 +1150,14 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     patchRoadmap(ctx, task.id, 'running');
     log.info(`=== ${task.id} ${task.title} (session ${st.attempts}${retryCount > 0 ? `, retry ${retryCount}/${maxAttempts}` : ''}${continuation > 0 ? `, continuation ${continuation}/${maxContinuations}` : ''}) provider=${spec.providerName} model=${spec.model ?? 'default'} variant=${spec.variant ?? 'default'} timeout=${spec.timeoutMin}min`);
 
-    const pc = promptCtx(ctx, task, st, spec, lastTransient ? lastTransient.message : st.lastError?.message, continuation);
+    const pc = promptCtx(ctx, task, st, spec, lastTransient ? lastTransient.message : st.lastError?.message, continuation, undefined, pendingGap);
     const prompt = lastTransient && resumeId
       ? buildResumePrompt(pc, lastTransient.message)
       : continuation > 0
         ? buildContinuePrompt(pc)
         : buildTaskPrompt(pc);
+    // The gap analysis was rendered into this session's prompt; a later slice must not see it as stale.
+    pendingGap = undefined;
     const sessionKind: SessionRun['kind'] = escalating ? 'escalate' : onFallback ? 'fallback' : continuation > 0 && !lastTransient ? 'continue' : resumeId ? 'resume' : 'task';
     let outcome = await runOneSession(ctx, task, st, provider, spec, prompt, { kind: sessionKind, logKind: escalating || retryCount > 0 ? 'retry' : 'task', attempt, resumeId, timeoutMin: spec.timeoutMin });
     resumeId = outcome.sessionId ?? resumeId;
@@ -1382,6 +1389,30 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
             }
             const uncertain = verdict.confidence === undefined ? 'no confidence reported' : `below judge.minConfidence ${config.judge.minConfidence}`;
             log.warn(`${task.id}: ${msg} (${uncertain}); accepting the done`);
+          } else if (verdict && verdict.verdict === 'pass' && (verdict.confidence === undefined || verdict.confidence < config.judge.minConfidence)) {
+            // The judge passed the work but below the required confidence: it is unverified or has named
+            // gaps. Ask breakdown whether the missing work belongs in subtasks or a plan rewrite; when it
+            // declines, continue the task itself with the judge's gap analysis injected as guidance.
+            const pctLabel = verdict.confidence !== undefined ? `${Math.round(verdict.confidence * 100)}%` : 'no confidence reported';
+            const gapText = `${verdict.summary}${verdict.gaps ? ` — gaps: ${verdict.gaps}` : ''}`;
+            log.warn(`${task.id}: judge passed at ${pctLabel} (below judge.minConfidence ${Math.round(config.judge.minConfidence * 100)}%); the work is unverified or incomplete: ${gapText}`);
+            const bd = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'gap', { reason: gapText, continuations: continuation }));
+            if (bd.split) return { status: st.status, split: true };
+            if (bd.replan) return { status: st.status, replan: true };
+            if (continuation < maxContinuations) {
+              continuation += 1;
+              st.continuation = continuation;
+              pendingGap = `${verdict.summary}${verdict.gaps ? `\n- specific gaps / unverified items: ${verdict.gaps}` : ''}`;
+              refreshDerivedDocs(ctx);
+              if (config.commitPerSession) commitIntermediate(ctx, task, st);
+              recordAttemptDelta(ctx, task, st);
+              saveState(paths, state);
+              resumeId = undefined;
+              lastTransient = undefined;
+              log.info(`${task.id}: starting gap-analysis continuation ${continuation}/${maxContinuations} to close the judge's gaps`);
+              continue;
+            }
+            log.warn(`${task.id}: judge below the confidence bar but maxContinuations (${maxContinuations}) reached; accepting the done as reported`);
           }
         }
       }
