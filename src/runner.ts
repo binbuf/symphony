@@ -8,8 +8,8 @@ import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { commitAll, currentBranch, describeCommit } from './git.js';
 import { contractsFor, dependencyClosure, isLandedSubset, parseAcceptance, summarizeAcceptance, topoOrder, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
 import { fireHook } from './hooks.js';
-import { classifyError, classifyEscalation, classifySessionResult, jevProblem } from './jev.js';
-import { collectChanges, runJudge, type JudgeEvidence, type JudgeVerdict } from './judge.js';
+import { classifyCompletion, classifyError, classifyEscalation, classifySessionResult, jevProblem } from './jev.js';
+import { collectChanges, runJudge, type JudgeEvidence, type JudgeJevCheck, type JudgeVerdict } from './judge.js';
 import { createLogger, openRunSinks, type Logger, type RunSinks } from './logger.js';
 import { writeTaskLog } from './logs.js';
 import { mcpPromptNote, planMcp, resolveMcpProfile } from './mcp.js';
@@ -212,6 +212,69 @@ function harnessChangedFiles(paths: Paths, files: string[]): string[] {
 }
 
 /**
+ * The independent Jev cross-check before an enforceable rejection. It reuses the judge's evidence
+ * (compact; Jev cannot read the worktree) and can only *soften*: the demotion proceeds only when Jev
+ * independently agrees the completion should be rejected. A Jev that is unavailable, too slow, or
+ * unconvincing returns undefined, and the LLM judge's decision stands. Runs only when `jev.enabled`
+ * and `judge.jev` are both on. Records a `judge` step for the check so it is tracked like any run.
+ */
+async function runJevJudgeCheck(
+  ctx: RunContext,
+  task: Task,
+  st: TaskState,
+  ev: JudgeEvidence,
+  verdict: JudgeVerdict,
+): Promise<JudgeJevCheck | undefined> {
+  const { config, log, paths, state } = ctx;
+  const problem = jevProblem(config.jev, process.env);
+  if (problem) {
+    log.warn(`${task.id}: judge.jev is on but the Jev cross-check is unavailable (${problem}); enforcing as the judge decided`);
+    return undefined;
+  }
+  const started = nowIso();
+  let note = '';
+  const decision = await classifyCompletion(
+    config.jev,
+    {
+      taskTitle: task.title,
+      taskBody: ev.taskBody,
+      acceptance: ev.acceptance?.length ? ev.acceptance.map((a) => `- [${a.checked ? 'x' : ' '}] ${a.text}${a.blocking ? '' : ' [deferrable]'}`).join('\n') : undefined,
+      verify: ev.verifyCommand ? `${ev.verifyCommand} → ${ev.verifyOk ? 'passed' : 'failed or not run'}` : undefined,
+      evidence: [
+        verdict.summary ? `reviewer summary: ${verdict.summary}` : '',
+        verdict.gaps ? `reviewer gaps: ${verdict.gaps}` : '',
+        ev.changedFiles?.length ? `changed files: ${ev.changedFiles.slice(0, 40).join(', ')}` : '',
+        ev.diff?.trim() ? `diff:\n${ev.diff}` : '',
+      ].filter(Boolean).join('\n'),
+    },
+    { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal, note: (m) => { note = m; } },
+  );
+  // Jev confirms only when it independently calls it a fail above its own confidence bar. Anything
+  // else — a pass, a weak fail, or no usable answer — declines the demotion.
+  const agreed = !!decision && decision.verdict === 'fail' && decision.confidence >= config.jev.minConfidence;
+  if (decision?.costUsd !== undefined) addDecisionCost(ctx, task, decision.costUsd);
+  const pct = decision ? Math.round(decision.confidence * 100) : 0;
+  const summary = decision
+    ? `independent Jev cross-check: ${agreed ? 'confirms the rejection' : `declines to enforce (${decision.verdict} ${pct}%)`}`
+    : `Jev cross-check returned no usable answer${note ? ` (${note})` : ''}`;
+  st.logs.push({
+    kind: 'judge', jsonl: '', log: '', prompt: '', started,
+    status: decision ? `${decision.verdict} ${pct}%${agreed ? ' confirmed' : ' declined'}` : 'no answer',
+    provider: 'jev',
+    model: decision?.model ?? config.jev.model,
+    summary,
+    costUsd: decision?.costUsd,
+    durationS: Math.max(0, Math.round((Date.now() - Date.parse(started)) / 1000)),
+  });
+  saveState(paths, state);
+  updatePipelineStatus(paths, ctx.tasks, state, log);
+  log.info(`${task.id}: judge.jev cross-check ${decision ? `${decision.verdict.toUpperCase()} ${pct}%` : 'no answer'} — ${agreed ? 'confirms the rejection' : 'the done stands'}`);
+  return decision
+    ? { verdict: decision.verdict, confidence: decision.confidence, agreed, summary, model: decision.model, costUsd: decision.costUsd }
+    : undefined;
+}
+
+/**
  * Run the independent completion judge for a task about to be finalized `done`, if the judge is
  * enabled and has not already hit `judge.maxPerTask` for this terminal `done` attempt. Gathers the
  * evidence (task intent, acceptance items, the verify result, the worktree diff and the session's own
@@ -299,6 +362,19 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
     updatePipelineStatus(paths, ctx.tasks, state, log);
     return undefined;
   }
+  // Decide whether a failing verdict enforces. `judge.jev`, when armed, cross-checks a rejection
+  // before it demotes the done: Jev can only make the judge more conservative, never manufacture a
+  // rejection. An unavailable/unconvincing Jev leaves the judge's decision in place.
+  const confident = verdict.confidence !== undefined && verdict.confidence >= config.judge.minConfidence;
+  verdict.enforce = !verdict.ok && confident && config.judge.onFail === 'fail';
+  if (verdict.enforce && config.judge.jev && config.jev.enabled) {
+    const check = await runJevJudgeCheck(ctx, task, st, ev, verdict);
+    if (check) {
+      verdict.jev = check;
+      verdict.enforce = check.agreed;
+      if (!check.agreed) log.warn(`${task.id}: judge.jev cross-check did not confirm the rejection; the done stands`);
+    }
+  }
   st.judge = {
     verdict: verdict.verdict,
     ok: verdict.ok,
@@ -309,6 +385,7 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
     provider: verdict.provider,
     model: verdict.model,
     costUsd: verdict.costUsd,
+    jev: verdict.jev ? { verdict: verdict.jev.verdict, confidence: verdict.jev.confidence, agreed: verdict.jev.agreed, model: verdict.jev.model, costUsd: verdict.jev.costUsd } : undefined,
   };
   saveState(paths, state);
   // Reflect the verdict in ROADMAP.md immediately, not only at the next task boundary, so the judge
@@ -316,15 +393,14 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
   updatePipelineStatus(paths, ctx.tasks, state, log);
   const pct = verdict.confidence !== undefined ? ` ${Math.round(verdict.confidence * 100)}%` : '';
   log.info(`${task.id}: judge ${verdict.ok ? 'passed' : 'failed'}${pct} — ${verdict.summary}${verdict.gaps ? ` (gaps: ${verdict.gaps})` : ''}`);
-  const confident = verdict.confidence !== undefined && verdict.confidence >= config.judge.minConfidence;
-  const rejects = !verdict.ok && confident && config.judge.onFail === 'fail';
   await slackNotify(ctx, 'taskJudge', {
     title: `${task.id} judge ${verdict.ok ? 'PASS' : 'FAIL'}${pct} — ${task.title}`,
     lines: [
       `${verdict.verdict.toUpperCase()}${pct} · ${verdict.provider ?? '?'}${verdict.model ? ` · ${verdict.model}` : ''}`,
       verdict.summary,
       verdict.gaps ? `gaps: ${verdict.gaps}` : '',
-      verdict.ok ? '' : rejects ? 'rejected the done; the task re-enters recovery (retry/escalation/breakdown)' : 'advisory only; the done stands',
+      verdict.jev ? `Jev cross-check: ${verdict.jev.verdict.toUpperCase()}${verdict.jev.confidence !== undefined ? ` ${Math.round(verdict.jev.confidence * 100)}%` : ''} — ${verdict.jev.agreed ? 'confirmed' : 'declined; the done stands'}` : '',
+      verdict.ok ? '' : verdict.enforce ? 'rejected the done; the task re-enters recovery (retry/escalation/breakdown)' : 'advisory only; the done stands',
     ],
   }, task.id);
   return verdict;
@@ -430,7 +506,7 @@ function mkError(c: Classified): LastError {
  */
 function jevMisconfigHalt(config: Config): Halted | undefined {
   if (!config.jev.enabled) return undefined;
-  const armed = config.jev.resultFallback || config.jev.failureTriage || config.jev.escalationDecision || config.jev.breakdownDecision;
+  const armed = config.jev.resultFallback || config.jev.failureTriage || config.jev.escalationDecision || config.jev.breakdownDecision || (config.judge.enabled && config.judge.jev);
   if (!armed) return undefined;
   const problem = jevProblem(config.jev, process.env);
   if (!problem) return undefined;
@@ -1376,13 +1452,14 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           const verdict = await runCompletionJudge(ctx, task, st, block.summary);
           if (verdict && verdict.verdict === 'fail') {
             const pct = verdict.confidence !== undefined ? ` (${Math.round(verdict.confidence * 100)}%)` : '';
-            const confident = verdict.confidence !== undefined && verdict.confidence >= config.judge.minConfidence;
             const msg = `judge rejected the completion${pct}: ${verdict.summary}${verdict.gaps ? ` — gaps: ${verdict.gaps}` : ''}`;
-            if (confident && config.judge.onFail === 'fail') {
+            // `enforce` is decided by runCompletionJudge, after any `judge.jev` cross-check.
+            if (verdict.enforce) {
               st.judge!.enforced = true;
-              // Mark the judge run that triggered this rerun in the task's judge log row, so the TUI
-              // and ROADMAP.md both show the rejection that sent the task back through recovery.
-              const lastJudgeLog = [...st.logs].reverse().find((l) => l.kind === 'judge');
+              // Mark the judge verdict row that triggered this rerun, so the TUI and ROADMAP.md both
+              // show the rejection that sent the task back through recovery. The Jev cross-check row
+              // (provider `jev`) is skipped — it already records whether it confirmed or declined.
+              const lastJudgeLog = [...st.logs].reverse().find((l) => l.kind === 'judge' && l.provider !== 'jev');
               if (lastJudgeLog && !/enforced/.test(lastJudgeLog.status ?? '')) {
                 lastJudgeLog.status = `${lastJudgeLog.status ?? verdict.verdict} enforced`;
               }
@@ -1396,7 +1473,9 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
               final = { status: 'failed', summary: msg, lastError: { category: 'judge', message: msg, transient: false, fatal: false, at: nowIso() } };
               break;
             }
-            const uncertain = verdict.confidence === undefined ? 'no confidence reported' : `below judge.minConfidence ${config.judge.minConfidence}`;
+            const uncertain = verdict.jev && !verdict.jev.agreed
+              ? `Jev cross-check ${verdict.jev.verdict === 'pass' ? 'passed' : 'declined to enforce'}`
+              : verdict.confidence === undefined ? 'no confidence reported' : `below judge.minConfidence ${config.judge.minConfidence}`;
             log.warn(`${task.id}: ${msg} (${uncertain}); accepting the done`);
           }
         }

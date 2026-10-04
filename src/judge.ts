@@ -58,6 +58,24 @@ export interface JudgeVerdict {
   /** Provider/model that ran the judge, for the task log. */
   provider?: string;
   model?: string;
+  /**
+   * Whether a failing verdict should be enforced (demote the `done`). Set by the runner after any
+   * `judge.jev` cross-check, so the caller does not have to re-derive it. Undefined when not applied.
+   */
+  enforce?: boolean;
+  /** The independent Jev cross-check, when `judge.jev` ran before an enforceable rejection. */
+  jev?: JudgeJevCheck;
+}
+
+/** One independent Jev review of a rejection the judge is about to enforce. */
+export interface JudgeJevCheck {
+  verdict: JudgeVerdictKind;
+  confidence?: number;
+  /** True when Jev agrees the completion should be rejected; only then does the demotion proceed. */
+  agreed: boolean;
+  summary?: string;
+  model?: string;
+  costUsd?: number;
 }
 
 export interface JudgeDeps {

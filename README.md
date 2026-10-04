@@ -669,6 +669,8 @@ It runs up to four independent **workflows**, each behind its own flag:
 | `minConfidence` | `0.7` | below this the answer is discarded and the deterministic path runs |
 | `acceptStatuses` | `[done, continue]` | dispositions `resultFallback` may settle |
 
+The [judge](#judge) can also use Jev, through `judge.jev` in the judge stanza (not listed above): with both that and `jev.enabled` set, an enforceable rejection is cross-checked by Jev first. It counts as an armed workflow for the missing-key halt.
+
 ### `resultFallback`
 
 A session that ended cleanly without a `SYMPHONY_RESULT` block is normally recovered by **nudging**: resuming it and asking it to report, at the cost of a whole extra session. With this on, Jev reads the task title and the tail of the output and answers a `choice` — `done`, `continue`, `blocked`, or `failed`. A confident answer in `acceptStatuses` settles the session and skips the nudge; otherwise the nudge runs exactly as before.
@@ -775,7 +777,8 @@ The [verify command](#the-lifecycle) checks what it was told to check — tests,
   "maxPerTask": 1,
   "includeDiff": true,
   "maxDiffBytes": 20000,
-  "timeoutMin": 10
+  "timeoutMin": 10,
+  "jev": false
 }
 ```
 
@@ -789,10 +792,13 @@ The [verify command](#the-lifecycle) checks what it was told to check — tests,
 | `includeDiff` | `true` | inline the worktree diff so the read-only session can see what changed |
 | `maxDiffBytes` | `20000` | byte cap for the inlined diff |
 | `timeoutMin` | `10` | hard wall clock for one judge session; on timeout the `done` is accepted as reported |
+| `jev` | `false` | cross-check an enforceable rejection with [Jev](#jev) before demoting the `done`; requires `jev.enabled` too. Jev reviews the same inlined evidence (it cannot read the worktree) and the demotion proceeds only if Jev independently agrees — so it can only make the judge *more* conservative, never manufacture a rejection. An unavailable or unconvincing Jev leaves the judge's decision in force |
 
 The judge is **advisory by construction when uncertain**: a verdict below `minConfidence`, a verdict that reports no confidence, a session that times out, a provider that is missing or errors, and any unparseable answer all fall back to *accepting the `done` as reported*. It can only ever stop a task the run was about to mark done; it never adds work. The latest verdict is recorded on the task and written to its `docs/logs/TNN.md` under `## Judge`, so a rejected completion is visible in the committed log, and the judge provider is preflighted with the rest of the run so a missing binary is reported before the first task starts.
 
-The judge sees the task's stated intent and the uncommitted worktree diff (untracked files are named so it can read them directly). It runs pinned to read-only (`autoApprove: false`, `readOnly: true`), but how far that is *enforced* is provider-dependent, exactly as for the [pipeline watcher](#pipeline-watch): `claude` and `codex` run in an explicit read-only sandbox, while the other CLIs rely on their default, where reads are permitted and writes are not auto-approved. Because it runs before the task's commit, an enforced rejection sends the task back through the normal failure path and the task's work stays in the tree for the retry.
+The judge sees the task's stated intent and the uncommitted worktree diff (untracked files are named so it can read them directly; harness-owned changes such as the ROADMAP status block and progress notes are labelled `[harness]` so they are not read as scope). It runs pinned to read-only (`autoApprove: false`, `readOnly: true`), but how far that is *enforced* is provider-dependent, exactly as for the [pipeline watcher](#pipeline-watch): `claude` and `codex` run in an explicit read-only sandbox, while the other CLIs rely on their default, where reads are permitted and writes are not auto-approved. Because it runs before the task's commit, an enforced rejection sends the task back through the normal failure path and the task's work stays in the tree for the retry.
+
+**Jev cross-check.** With `judge.jev: true` and `jev.enabled: true`, a *confident failing* verdict that would demote the `done` is first handed to [Jev](#jev) as an independent second read of the same inlined evidence (the task body, acceptance, verify result and diff). Jev cannot read the worktree, so it is deliberately used only to make the judge more conservative: the demotion proceeds only when Jev independently calls it a `fail` above `jev.minConfidence`. A Jev `pass`, an unconvincing `fail`, an unavailable key, or a timeout leaves the judge's rejection in force — Jev never manufactures a rejection the judge did not already reach. The cross-check is charged like any Jev call and recorded as its own `judge` step (provider `jev`), and the split decision is written to the task log under `## Judge`.
 
 **Tracking each run.** Every judge session is recorded as its own step on the task from the moment it starts, so it is visible as it happens: the [run view](#the-lifecycle) shows a `run N · judge` row under the task — `running`, then the verdict as its status — and toasts each verdict (`T05 judge FAIL 82%`) and, when a rejection enforces a rerun, `→ rerun`; the generated `ROADMAP.md` status block gains a `Judge runs (N): T05 FAIL 82% · T05 PASS 88% · …` line (updated immediately when a run starts and again when it finishes, not only at the next task boundary, with `enforced` appended to a rejection that sent the task back); and the committed task log `docs/logs/TNN.md` lists the run under `## Sessions` alongside the `## Judge` verdict. Setting `slack.events.taskJudge: false` silences the `taskJudge` Slack post if the per-run noise is unwanted.
 
@@ -945,7 +951,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, adaptive image description, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt explains it (see [Vision tool](#vision-tool)) |
 | `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true` except `watch`, `10000` | post lifecycle events to a Slack channel or DM a user, threading a task's later events under its start (see [Slack notifications](#slack-notifications)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
-| `judge.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.onFail`, `.minConfidence`, `.maxPerTask`, `.includeDiff`, `.maxDiffBytes`, `.timeoutMin` | `false`, the `watch` block's, `fail`, `0.7`, `1`, `true`, `20000`, `10` | independent read-only completion judge after a task's verify passes: checks the task's intent against the work that landed and can demote a confident rejection (see [Judge](#judge)) |
+| `judge.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.onFail`, `.minConfidence`, `.maxPerTask`, `.includeDiff`, `.maxDiffBytes`, `.timeoutMin`, `.jev` | `false`, the `watch` block's, `fail`, `0.7`, `1`, `true`, `20000`, `10`, `false` | independent read-only completion judge after a task's verify passes: checks the task's intent against the work that landed and can demote a confident rejection (see [Judge](#judge)); `.jev` adds an independent [Jev](#jev) cross-check before a rejection is enforced |
 | `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.onBlocked`, `.rules.*`, `.decision`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `true`, `1`/`1`/`[task, verify]`/`proceed`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, when a task reports blocked, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
 

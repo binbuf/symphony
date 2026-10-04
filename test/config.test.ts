@@ -41,6 +41,18 @@ test('config file merges per provider and unknown keys warn', () => {
   assert.ok(warnings.some((w) => w.includes('bogus')));
 });
 
+test('judge.jev defaults off and parses on', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  assert.equal(loadConfig(paths, {}).config.judge.jev, false);
+  writeFileSync(paths.config, JSON.stringify({ judge: { enabled: true, jev: true } }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.judge.enabled, true);
+  assert.equal(config.judge.jev, true);
+  assert.deepEqual(warnings, []);
+});
+
 test('retry backoff knobs parse, with warnings for out-of-range values', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-'));
   const paths = resolvePaths(dir);

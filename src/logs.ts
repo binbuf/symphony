@@ -64,6 +64,10 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
     if (j.enforced) lines.push('- enforced: the done was demoted to failed and re-entered the recovery path');
     lines.push(`- summary: ${j.summary}`);
     if (j.gaps) lines.push(`- gaps: ${j.gaps}`);
+    if (j.jev) {
+      const jv = j.jev;
+      lines.push(`- Jev cross-check: ${jv.verdict.toUpperCase()}${jv.confidence !== undefined ? ` (${Math.round(jv.confidence * 100)}%)` : ''} · ${jv.agreed ? 'confirmed the rejection' : 'declined; the done stood'}${jv.model ? ` · ${jv.model}` : ''}`);
+    }
   }
   lines.push('');
   lines.push('## Sessions');
@@ -84,7 +88,8 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
       lines.push(`- summary: ${l.summary?.trim() || '_(none)_'}`);
       if (l.provider) lines.push(`- model: ${l.provider}${l.model ? ` · ${l.model}` : ''}${l.variant ? ` · variant ${l.variant}` : ''}`);
       if (l.mcp) lines.push(`- mcp: ${l.mcp.length ? l.mcp.join(', ') : 'none'}`);
-      lines.push(`- raw: ${l.jsonl} · log: ${l.log} · prompt: ${l.prompt}`);
+      // A Jev classification has no session files; skip the raw line rather than print empty paths.
+      if (l.jsonl || l.log || l.prompt) lines.push(`- raw: ${l.jsonl} · log: ${l.log} · prompt: ${l.prompt}`);
       lines.push('');
     });
     if (lines[lines.length - 1] === '') lines.pop();

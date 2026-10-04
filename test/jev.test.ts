@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULTS, type JevConfig } from '../src/config.js';
-import { classifyError, classifyEscalation, classifySessionResult, jevBaseUrl, jevProblem, parseDecision, parseErrorDecision, parseEscalationDecision } from '../src/jev.js';
+import { classifyCompletion, classifyError, classifyEscalation, classifySessionResult, jevBaseUrl, jevProblem, parseCompletionDecision, parseDecision, parseErrorDecision, parseEscalationDecision } from '../src/jev.js';
 
 const jevConfig = (over: Partial<JevConfig> = {}): JevConfig => ({ ...DEFAULTS.jev, enabled: true, ...over });
 
@@ -139,4 +139,29 @@ test('parseEscalationDecision maps the choice to a boolean and rejects anything 
   assert.equal(parseEscalationDecision({ answers: { decision: { type: 'choice', choice: 'maybe', confidence: 0.9 } } }), undefined);
   assert.equal(parseEscalationDecision({ answers: { decision: { type: 'noul', noul: 0.9 } } }), undefined);
   assert.equal(parseEscalationDecision({}), undefined);
+});
+
+test('classifyCompletion posts the reviewer evidence and parses the verdict', async () => {
+  let body: { questions: { verdict: { type: string; criteria: Record<string, string> } }; state: { task: { title: string }; reviewer_evidence: string } } | undefined;
+  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
+    body = JSON.parse(String(init?.body));
+    return jsonResponse({ model: 'typesafe/jev-1.13', answers: { verdict: { type: 'choice', choice: 'fail', confidence: 0.77 } }, usage: { cost: 0.00002 } });
+  }) as unknown as typeof fetch;
+
+  const d = await classifyCompletion(jevConfig(), { taskTitle: 'Do the thing', taskBody: '## Goal\nShip it.', acceptance: '- [ ] audit trail', verify: 'npm test → passed', evidence: 'reviewer gaps: no audit trail' }, { fetchImpl, env: { OPENROUTER_API_KEY: 'k' } });
+  assert.equal(d?.verdict, 'fail');
+  assert.equal(d?.confidence, 0.77);
+  assert.equal(d?.costUsd, 0.00002);
+  assert.equal(body?.questions.verdict.type, 'choice');
+  assert.deepEqual(Object.keys(body?.questions.verdict.criteria ?? {}), ['pass', 'fail']);
+  assert.equal(body?.state.task.title, 'Do the thing');
+  assert.match(body?.state.reviewer_evidence ?? '', /no audit trail/);
+});
+
+test('parseCompletionDecision accepts pass/fail and rejects anything else', () => {
+  assert.equal(parseCompletionDecision({ answers: { verdict: { type: 'choice', choice: 'pass', confidence: 0.9 } } })?.verdict, 'pass');
+  assert.equal(parseCompletionDecision({ answers: { verdict: { type: 'choice', choice: 'fail', confidence: 0.9 } } })?.verdict, 'fail');
+  assert.equal(parseCompletionDecision({ answers: { verdict: { type: 'choice', choice: 'maybe', confidence: 0.9 } } }), undefined);
+  assert.equal(parseCompletionDecision({ answers: { verdict: { type: 'noul', noul: 0.9 } } }), undefined);
+  assert.equal(parseCompletionDecision({}), undefined);
 });

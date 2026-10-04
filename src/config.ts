@@ -235,6 +235,14 @@ export interface JudgeConfig {
   maxDiffBytes: number;
   /** Hard wall clock for one judge session; on timeout the `done` is accepted as reported. */
   timeoutMin: number;
+  /**
+   * Independent Jev cross-check before an enforceable rejection. Requires `jev.enabled` too. When a
+   * confident failing verdict is about to demote the `done`, Jev reviews the same inlined evidence
+   * (it cannot read the worktree) and the demotion proceeds only if Jev independently agrees. Jev can
+   * therefore only make the judge more conservative — it never manufactures a rejection. Off by
+   * default.
+   */
+  jev: boolean;
 }
 
 /**
@@ -736,6 +744,7 @@ export const DEFAULTS: Config = {
     includeDiff: true,
     maxDiffBytes: 20_000,
     timeoutMin: 10,
+    jev: false,
   },
   mcp: {
     enabled: false,
@@ -1392,6 +1401,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         includeDiff: boolOr(judgeRaw.includeDiff, DEFAULTS.judge.includeDiff, 'judge.includeDiff', warnings),
         maxDiffBytes: positiveOr(judgeRaw.maxDiffBytes, DEFAULTS.judge.maxDiffBytes, 'judge.maxDiffBytes', warnings),
         timeoutMin: positiveOr(judgeRaw.timeoutMin, DEFAULTS.judge.timeoutMin, 'judge.timeoutMin', warnings),
+        jev: boolOr(judgeRaw.jev, DEFAULTS.judge.jev, 'judge.jev', warnings),
       };
     })(),
     mcp: {

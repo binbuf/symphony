@@ -404,6 +404,61 @@ export function parseDecision(json: unknown): JevDecision | undefined {
   return { status: choice.choice as ReportedStatus, confidence: choice.confidence, probabilities: choice.probabilities, model: choice.model, costUsd: choice.costUsd };
 }
 
+/** The two options Jev weighs when independently reviewing a judge's rejection of a `done`. */
+export const COMPLETION_OPTIONS = ['pass', 'fail'] as const;
+
+export interface JevCompletionDecision {
+  verdict: 'pass' | 'fail';
+  confidence: number;
+  probabilities?: Record<string, number>;
+  /** The dated model snapshot that served the request. */
+  model?: string;
+  costUsd?: number;
+}
+
+/**
+ * Ask Jev to independently review a completion a judge is about to reject. Used only as a
+ * cross-check before an enforceable rejection: Jev sees the same inlined evidence the judge did
+ * (it cannot read the worktree) and can only *soften* the decision. A confident `fail` agrees the
+ * demotion should proceed; anything else declines it. The judge remains the primary reader.
+ */
+export async function classifyCompletion(
+  config: JevConfig,
+  input: { taskTitle: string; taskBody?: string; acceptance?: string; verify?: string; evidence: string },
+  deps: JevDeps = {},
+): Promise<JevCompletionDecision | undefined> {
+  const json = await callSystemOne(
+    config,
+    {
+      task: { title: input.taskTitle, body: input.taskBody ? headAndTail(input.taskBody, 8000) : null },
+      acceptance: input.acceptance ?? null,
+      verify: input.verify ?? null,
+      reviewer_evidence: input.evidence ? headAndTail(input.evidence, 8000) : null,
+    },
+    {
+      verdict: {
+        type: 'choice',
+        instructions: 'A coding task reported done and an independent reviewer judged it FAIL, naming the gaps below. Judging only the evidence provided, should the completion actually be rejected?',
+        criteria: {
+          pass: 'The requested work is present and satisfies the task\'s own scope and blocking acceptance items; the reviewer\'s rejection is not warranted.',
+          fail: 'A blocking acceptance item is unmet, the named scope is missing or only stubbed, the work contradicts the task, or the change the task asked for is absent — the rejection is warranted.',
+        },
+      },
+    },
+    deps,
+  );
+  const decision = parseCompletionDecision(json);
+  if (!decision && json !== undefined) deps.note?.(`unusable answer: ${describeAnswer(json)}`);
+  return decision;
+}
+
+/** Read the `verdict` choice of a completion review. Exported for tests. */
+export function parseCompletionDecision(json: unknown): JevCompletionDecision | undefined {
+  const choice = readChoice(json, 'verdict');
+  if (!choice || !(COMPLETION_OPTIONS as readonly string[]).includes(choice.choice)) return undefined;
+  return { verdict: choice.choice as 'pass' | 'fail', confidence: choice.confidence, probabilities: choice.probabilities, model: choice.model, costUsd: choice.costUsd };
+}
+
 /** Read the `category` choice out of a System One response. Exported for tests. */
 export function parseErrorDecision(json: unknown): JevErrorDecision | undefined {
   const choice = readChoice(json, 'category');

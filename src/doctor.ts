@@ -156,7 +156,8 @@ export function runDoctor(i: DoctorInput): Check[] {
     const jdModelProvider = jd.modelProvider ?? i.config.watch.modelProvider ?? i.config.providers[jdProvider].modelProvider;
     const model = composeModel(jdProvider, jdModelProvider, jd.model || i.config.watch.model);
     const action = jd.onFail === 'fail' ? 'a confident fail demotes the done' : 'a failing verdict is advisory only';
-    add('judge', 'ok', `independent completion judge before each done · ${jdProvider}${model ? ` · ${model}` : ''} · ${action} (min confidence ${jd.minConfidence}, max ${jd.maxPerTask || '∞'} per done)`);
+    const jevNote = jd.jev && i.config.jev.enabled ? ' · rejections cross-checked by Jev first' : jd.jev ? ' · judge.jev is on but jev.enabled is false, so no cross-check runs' : '';
+    add('judge', jd.jev && !i.config.jev.enabled ? 'warn' : 'ok', `independent completion judge before each done · ${jdProvider}${model ? ` · ${model}` : ''} · ${action}${jevNote} (min confidence ${jd.minConfidence}, max ${jd.maxPerTask || '∞'} per done)`);
   }
 
   if (i.config.vision.enabled) {
