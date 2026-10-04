@@ -49,7 +49,7 @@ export interface JudgeRecord {
   /** Whether this failing verdict actually demoted the task (judge.onFail === 'fail' and confident). */
   enforced?: boolean;
   /** The independent Jev cross-check on an enforceable rejection, when `judge.jev` ran. */
-  jev?: { verdict: 'pass' | 'fail'; confidence?: number; agreed: boolean; model?: string; costUsd?: number };
+  jev?: { verdict: 'pass' | 'fail'; confidence?: number; decisive: boolean; agreed: boolean; model?: string; costUsd?: number };
   at: string;
   provider?: string;
   model?: string;

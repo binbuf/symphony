@@ -12,7 +12,7 @@ import type { RunContext, RunFlags } from '../src/runner.js';
 import { newTaskState, type State } from '../src/state.js';
 import { buildStatusTable } from '../src/status.js';
 import type { Task } from '../src/tasks.js';
-import { TuiApp } from '../src/tui/app.js';
+import { LOG_TYPES, TuiApp } from '../src/tui/app.js';
 import { runWithResume, runWithTui } from '../src/tui/index.js';
 import type { TuiModel } from '../src/tui/model.js';
 import { KeyParser, type Key, type MouseButton, type MouseKey } from '../src/tui/keys.js';
@@ -238,6 +238,52 @@ test('TuiApp: t toggles live-output wrapping, which reflows a long line instead 
   assert.equal(priv.focusMaxWidth(), cols, 'a wrapped panel has nothing left to pan to');
   press('t');
   assert.equal(priv.logLineCount(), 1, 'toggling back returns to one clipped row per line');
+});
+
+test('TuiApp: f filters the live output by message type and F restores every line', () => {
+  const app = new TuiApp(makeCtx([task('T01', 1)], { version: 1, tasks: {} }), new AnsiTerminal(() => {}));
+  const priv = app as unknown as {
+    handleKey(k: Key): void;
+    dialog?: { choices?: Array<{ key: string }> };
+    logLineCount(): number;
+    logFilter?: Set<string>;
+  };
+  const press = (char: string) => priv.handleKey({ type: 'char', char });
+  app.pushOutput('12:00:00 INFO T01: [jev] escalation check\n');
+  app.pushOutput('[text] the agent said hello\n');
+  app.pushOutput('[tool] read_file: src/x.ts\n');
+  app.pushOutput('12:00:01 ERROR something broke\n');
+  assert.equal(priv.logLineCount(), 4);
+
+  // f opens a menu with one choice per message type plus the two show-all aliases.
+  press('f');
+  assert.equal(priv.dialog?.choices?.length, LOG_TYPES.length + 2);
+
+  // 5 = [jev]: only the jev line survives, and the panel title names the filter.
+  press('5');
+  assert.ok(priv.dialog, 'the filter menu stays open across toggles');
+  assert.equal(priv.logLineCount(), 1);
+  priv.handleKey({ type: 'key', name: 'escape' });
+  const filtered = stripAnsi(app.renderLines(80, 20).join('\n'));
+  assert.match(filtered, /\[jev\]/);
+  assert.doesNotMatch(filtered, /agent said hello/);
+  assert.match(filtered, /FILTER jev/);
+
+  // Adding text widens the set; the buffer is untouched, so both types now show.
+  press('f');
+  press('1');
+  priv.handleKey({ type: 'key', name: 'escape' });
+  assert.equal(priv.logLineCount(), 2);
+  const two = stripAnsi(app.renderLines(80, 20).join('\n'));
+  assert.match(two, /\[jev\]/);
+  assert.match(two, /agent said hello/);
+  assert.doesNotMatch(two, /something broke/);
+
+  // F clears the filter in one key, restoring every line.
+  priv.handleKey({ type: 'char', char: 'F' });
+  assert.equal(priv.logFilter, undefined);
+  assert.equal(priv.logLineCount(), 4);
+  assert.doesNotMatch(stripAnsi(app.renderLines(80, 20).join('\n')), /FILTER/);
 });
 
 test('TuiApp: P opens the pause menu for asap, the next boundary, or the selected task', () => {

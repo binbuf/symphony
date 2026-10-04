@@ -71,7 +71,13 @@ export interface JudgeVerdict {
 export interface JudgeJevCheck {
   verdict: JudgeVerdictKind;
   confidence?: number;
-  /** True when Jev agrees the completion should be rejected; only then does the demotion proceed. */
+  /**
+   * True when Jev reached a usable opinion (a parsed verdict at or above `jev.minConfidence`).
+   * A decisive `fail` agrees with the rejection; a decisive `pass` disagrees. When not decisive
+   * — no answer, unavailable, or below the confidence bar — the judge's own decision stands.
+   */
+  decisive: boolean;
+  /** True when Jev agrees the completion should be rejected; only then is the rejection enforced. */
   agreed: boolean;
   summary?: string;
   model?: string;
@@ -227,14 +233,17 @@ function truncateDiffFiles(diff: string, maxBytes: number): string {
 /**
  * Snapshot the uncommitted worktree as evidence: the changed-file list plus a diff against HEAD.
  * Untracked files (agent-created sources) are not in `git diff`, so they are named so the read-only
- * judge can open them directly. Never throws.
+ * judge can open them directly. The file list is always gathered; `includeDiff: false` only skips
+ * the (potentially large) diff body, leaving the judge the names it needs to read files directly.
+ * Never throws.
  */
-export function collectChanges(root: string, maxBytes: number): { files: string[]; diff: string; truncated: boolean } {
+export function collectChanges(root: string, maxBytes: number, includeDiff = true): { files: string[]; diff: string; truncated: boolean } {
   try {
     const status = git(root, ['status', '--porcelain']);
     const files = status.code === 0 && status.stdout
       ? [...new Set(status.stdout.split('\n').filter(Boolean).map((l) => porcelainPath(l)).filter(Boolean))]
       : [];
+    if (!includeDiff) return { files, diff: '', truncated: false };
     const d = git(root, ['diff', '--no-color', 'HEAD']);
     const raw = d.code === 0 ? d.stdout : '';
     const untracked = untrackedFiles(root);

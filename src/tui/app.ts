@@ -82,6 +82,28 @@ function colorLog(line: string): string {
 }
 
 /**
+ * The message classes the live-output filter can toggle, in menu order. A line can belong to several
+ * (an `[result] ERROR` is both `result` and `error`), so filtering on any one of a line's types keeps
+ * it — which is what you want when hunting for every error regardless of its origin.
+ */
+export const LOG_TYPES = ['text', 'think', 'tool', 'result', 'jev', 'error', 'warn', 'info'] as const;
+export type LogType = (typeof LOG_TYPES)[number];
+
+/** The filter classes a captured stream line belongs to, by its tags. */
+export function logTypes(line: string): LogType[] {
+  const types: LogType[] = [];
+  if (line.includes('[text]')) types.push('text');
+  if (line.includes('[think]')) types.push('think');
+  if (line.includes('[tool]') || line.includes('[tool-result')) types.push('tool');
+  if (line.includes('[result]')) types.push('result');
+  if (line.includes('[jev]')) types.push('jev');
+  if (/\bERROR\b|\[error\]|\[stderr\]/.test(line)) types.push('error');
+  if (/\bWARN\b/.test(line)) types.push('warn');
+  if (/\bINFO\b/.test(line)) types.push('info');
+  return types;
+}
+
+/**
  * The interactive run view: a self-updating status table on top, the live provider/harness stream
  * below, and a metrics + keybinding bar at the bottom. It renders from the same in-memory state the
  * runner mutates, and captures the run's stdout through `runWithTui` rather than owning a logger.
@@ -104,6 +126,8 @@ export class TuiApp {
   private expand = false;
   /** When true the live output wraps long lines instead of clipping and panning them. */
   private logWrap = false;
+  /** Active live-output message-type filter; undefined shows every line. */
+  private logFilter?: Set<LogType>;
   /** Anchor column of an in-progress middle-button drag, for horizontal panning. */
   private mouseDrag?: { x: number };
   private lastStatuses = new Map<string, string>();
@@ -360,6 +384,8 @@ export class TuiApp {
     if (char === 'w') return this.refreshWatch();
     if (char === 'e') return this.toggleExpand();
     if (char === 't') return this.toggleWrap();
+    if (char === 'f') return this.openLogFilter();
+    if (char === 'F') return this.setLogFilter(undefined, 'live output: showing all');
     if (char === 'z') return this.cycleLayout();
     if (char === '[' || char === '-') return this.adjustSplit(-0.05);
     if (char === ']' || char === '+') return this.adjustSplit(0.05);
@@ -750,6 +776,55 @@ export class TuiApp {
     this.render();
   }
 
+  /**
+   * The live-output filter menu (`f`): toggle any number of message types (text, think, tool,
+   * result, `[jev]`, error, warn, info) to keep only those lines, then `a` to return to the full
+   * stream. `F` clears the filter in one key. The menu stays open across toggles so a set can be
+   * built up; the buffer is never mutated, so clearing restores every line instantly.
+   */
+  private openLogFilter(): void {
+    const counts = new Map<LogType, number>();
+    for (const line of this.stream) for (const t of logTypes(line)) counts.set(t, (counts.get(t) ?? 0) + 1);
+    const on = (t: LogType): boolean => this.logFilter?.has(t) ?? false;
+    const lines = LOG_TYPES.map((t, i) => `${i + 1}  [${on(t) ? 'x' : ' '}] ${t.padEnd(7)} ${counts.get(t) ?? 0} lines`);
+    this.dialog = {
+      title: 'Filter live output',
+      lines: [
+        this.logFilter ? `showing ${this.visibleStream().length}/${this.stream.length} lines` : `showing all ${this.stream.length} lines`,
+        '',
+        ...lines,
+        '',
+        '1-8  toggle a type       a / 0  show all       Esc  close',
+      ],
+      choices: [
+        ...LOG_TYPES.map((t, i) => ({ key: String(i + 1), run: () => { this.toggleLogType(t); this.openLogFilter(); } })),
+        { key: 'a', run: () => { this.setLogFilter(undefined, 'live output: showing all'); this.openLogFilter(); } },
+        { key: '0', run: () => { this.setLogFilter(undefined, 'live output: showing all'); this.openLogFilter(); } },
+      ],
+    };
+    this.render();
+  }
+
+  /** Toggle one message type in the active filter, clearing it when no type remains selected. */
+  private toggleLogType(t: LogType): void {
+    const next = new Set(this.logFilter ?? []);
+    if (next.has(t)) next.delete(t);
+    else next.add(t);
+    this.setLogFilter(next.size ? next : undefined);
+  }
+
+  /** Apply a live-output filter (undefined = all lines), keeping the filtered tail in view. */
+  private setLogFilter(next: Set<LogType> | undefined, message?: string): void {
+    this.logFilter = next && next.size ? next : undefined;
+    this.wrapCache = undefined;
+    this.logPanel.vOffset = 0;
+    this.logPanel.hOffset = 0;
+    this.logPanel.follow = true;
+    if (this.layout !== 'top') this.focus = 'log';
+    this.toast(this.logFilter ? `live output filtered: ${[...this.logFilter].join(', ')}` : message ?? 'live output: showing all');
+    this.render();
+  }
+
   private adjustSplit(delta: number): void {
     this.splitRatio = clamp(this.splitRatio + delta, 0.2, 0.8);
     this.render();
@@ -820,13 +895,23 @@ export class TuiApp {
     // A wrapped panel always fits the viewport, so there is nothing to pan to.
     if (this.logWrap) return this.term.size().cols;
     let max = 0;
-    for (const line of this.stream) max = Math.max(max, displayWidth(line));
+    for (const line of this.visibleStream()) max = Math.max(max, displayWidth(line));
     return max;
+  }
+
+  /**
+   * The stream lines the active filter keeps (every line when no filter is set). The underlying
+   * buffer is untouched, so switching back to "all" is immediate.
+   */
+  private visibleStream(): string[] {
+    const filter = this.logFilter;
+    if (!filter || !filter.size) return this.stream;
+    return this.stream.filter((line) => logTypes(line).some((t) => filter.has(t)));
   }
 
   /** Number of display lines the live output occupies (wrapped or not), for scroll bounds. */
   private logLineCount(): number {
-    return this.logWrap ? this.wrappedLogLines().length : this.stream.length;
+    return this.logWrap ? this.wrappedLogLines().length : this.visibleStream().length;
   }
 
   /**
@@ -837,7 +922,7 @@ export class TuiApp {
     const cached = this.wrapCache;
     if (cached && cached.cols === cols && cached.version === this.streamVersion) return cached.lines;
     const lines: string[] = [];
-    for (const raw of this.stream) {
+    for (const raw of this.visibleStream()) {
       const color = colorFor(raw);
       for (const segment of wrapColumns(raw, cols)) {
         const padded = padTo(segment, cols);
@@ -934,12 +1019,13 @@ export class TuiApp {
           out[y++] = wrapped[idx];
         }
       } else {
-        const maxOff = Math.max(0, this.stream.length - bodyArea);
+        const visible = this.visibleStream();
+        const maxOff = Math.max(0, visible.length - bodyArea);
         const off = this.logPanel.follow ? maxOff : clamp(this.logPanel.vOffset, 0, maxOff);
         for (let i = 0; i < bodyArea; i++) {
           const idx = off + i;
-          if (idx >= this.stream.length) break;
-          out[y++] = colorLog(this.clip(this.stream[idx], this.logPanel.hOffset, cols));
+          if (idx >= visible.length) break;
+          out[y++] = colorLog(this.clip(visible[idx], this.logPanel.hOffset, cols));
         }
       }
     }
@@ -975,7 +1061,9 @@ export class TuiApp {
 
   private logTitleRight(): string {
     const mode = this.logPanel.follow ? 'FOLLOW' : 'SCROLL';
-    return `${this.logWrap ? 'WRAP · ' : ''}${mode} · ${this.stream.length} lines`;
+    const filter = this.logFilter ? `FILTER ${[...this.logFilter].join('+')} · ` : '';
+    const count = this.logFilter ? `${this.visibleStream().length}/${this.stream.length}` : String(this.stream.length);
+    return `${filter}${this.logWrap ? 'WRAP · ' : ''}${mode} · ${count} lines`;
   }
 
   // ---------------------------------------------------------------- pipeline watch panel
@@ -1051,7 +1139,7 @@ export class TuiApp {
 
   private hintsLine(): string {
     if (this.haltMode) return 'c clear halt & retry · b split the halted task · q quit · ↑↓ scroll · Tab focus';
-    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · b split · c clear-halt · p pause · P pause menu · w watch · e expand · t wrap · z zoom · [ ] panels';
+    const base = 'q quit · ? help · Tab focus · ↑↓ scroll · ←→ pan · PgUp/PgDn · Home/End · s follow · n/N task · a accept · b split · c clear-halt · p pause · P pause menu · w watch · e expand · t wrap · f filter · F all · z zoom · [ ] panels';
     return base;
   }
 
@@ -1086,6 +1174,8 @@ export class TuiApp {
         'w            run a pipeline-watch check now',
         'e            expand all status columns (pan the focused panel with ← →)',
         't            wrap long live-output lines (off = clip and pan)',
+        'f            filter live output by message type (text/think/tool/result/[jev]/error/warn/info)',
+        'F            clear the live-output filter (show every message type)',
         'z            cycle layout: both / status only / output only',
         '[ ]  or  - + adjust the panel sizes',
         '',

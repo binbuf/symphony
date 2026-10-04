@@ -394,6 +394,35 @@ test('judge.jev: an unavailable Jev leaves the judge rejection in force', async 
   }
 });
 
+test('judge.jev: an inconclusive Jev (below minConfidence) falls back to the judge and enforces', async () => {
+  const { dir, paths } = project('# R\n\n- [ ] T01 — Do it → [tasks/01-thing.md](tasks/01-thing.md)\n', { 'docs/tasks/01-thing.md': '# T01\n' });
+  writeFileSync(join(dir, 'fixtures', 'T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }), JSON.stringify({ type: 'fake_write', path: 'work.txt', content: 'done' }), claudeResult('done', 'shipped it')].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'judge-T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 'j' }), judgeBlock('fail', 0.9, 'scope missed', 'no writer')].join('\n') + '\n');
+  const config: Config = {
+    ...DEFAULTS, provider: 'fake', nudge: false, watch: { ...DEFAULTS.watch, enabled: false },
+    judge: { ...DEFAULTS.judge, enabled: true, provider: 'fake', model: 'm', jev: true },
+    jev: { ...DEFAULTS.jev, enabled: true, minConfidence: 0.7 },
+  };
+  const ctx = runnerCtx(dir, paths, config);
+  const prev = process.env.OPENROUTER_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'k';
+  // A weak pass must not veto a confident judge rejection: with no confident opinion, the judge's
+  // own decision stands and the done is demoted.
+  ctx.fetchImpl = (async () => jevVerdict('pass', 0.3)) as typeof fetch;
+  try {
+    const out = await runTask(ctx, ctx.tasks[0]);
+    assert.equal(out.status, 'failed');
+    assert.equal(ctx.state.tasks.T01.judge?.enforced, true);
+    assert.equal(ctx.state.tasks.T01.judge?.jev?.decisive, false);
+    assert.equal(ctx.state.tasks.T01.judge?.jev?.agreed, false);
+    const jevRow = ctx.state.tasks.T01.logs.find((l) => l.kind === 'judge' && l.provider === 'jev');
+    assert.match(jevRow!.status ?? '', /^pass 30% inconclusive$/);
+  } finally {
+    if (prev === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = prev;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
 test('resolveJudge falls back to the watch block and pins read-only', () => {
   const config: Config = {
     ...DEFAULTS,
@@ -423,6 +452,21 @@ test('collectChanges caps the diff by bytes without splitting code points', () =
   const changes = collectChanges(dir, 500);
   assert.equal(changes.truncated, true);
   assert.ok(Buffer.byteLength(changes.diff, 'utf8') <= 500, `diff is ${Buffer.byteLength(changes.diff, 'utf8')} bytes`);
+});
+
+test('collectChanges with includeDiff:false still lists changed files but omits the diff body', () => {
+  const { dir } = project('# R\n');
+  writeFileSync(join(dir, 'new.txt'), 'hello');
+  const tracked = join(dir, 'tracked.txt');
+  writeFileSync(tracked, 'one\n');
+  execFileSync('git', ['-C', dir, 'add', 'tracked.txt']);
+  execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+  writeFileSync(tracked, 'one\ntwo\n');
+  const changes = collectChanges(dir, 20_000, false);
+  assert.ok(changes.files.includes('tracked.txt'), changes.files.join(', '));
+  assert.ok(changes.files.includes('new.txt'), changes.files.join(', '));
+  assert.equal(changes.diff, '');
+  assert.equal(changes.truncated, false);
 });
 
 test('collectChanges keeps whole files and marks the rest omitted rather than cutting a hunk', () => {

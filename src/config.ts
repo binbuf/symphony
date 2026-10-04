@@ -238,9 +238,10 @@ export interface JudgeConfig {
   /**
    * Independent Jev cross-check before an enforceable rejection. Requires `jev.enabled` too. When a
    * confident failing verdict is about to demote the `done`, Jev reviews the same inlined evidence
-   * (it cannot read the worktree) and the demotion proceeds only if Jev independently agrees. Jev can
-   * therefore only make the judge more conservative — it never manufactures a rejection. Off by
-   * default.
+   * (it cannot read the worktree) and its verdict is treated as a second read: a decisive `fail`
+   * confirms the rejection and a decisive `pass` vetoes it (the done stands). An inconclusive Jev —
+   * no answer, unavailable, or below `jev.minConfidence` — falls back to the judge's own decision.
+   * Jev can therefore never manufacture a rejection the judge did not already reach. Off by default.
    */
   jev: boolean;
 }

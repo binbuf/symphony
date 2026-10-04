@@ -66,7 +66,8 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
     if (j.gaps) lines.push(`- gaps: ${j.gaps}`);
     if (j.jev) {
       const jv = j.jev;
-      lines.push(`- Jev cross-check: ${jv.verdict.toUpperCase()}${jv.confidence !== undefined ? ` (${Math.round(jv.confidence * 100)}%)` : ''} · ${jv.agreed ? 'confirmed the rejection' : 'declined; the done stood'}${jv.model ? ` · ${jv.model}` : ''}`);
+      const outcome = !jv.decisive ? 'inconclusive; the judge\'s decision stood' : jv.agreed ? 'confirmed the rejection' : 'declined; the done stood';
+      lines.push(`- Jev cross-check: ${jv.verdict.toUpperCase()}${jv.confidence !== undefined ? ` (${Math.round(jv.confidence * 100)}%)` : ''} · ${outcome}${jv.model ? ` · ${jv.model}` : ''}`);
     }
   }
   lines.push('');
