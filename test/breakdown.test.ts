@@ -197,6 +197,8 @@ test('parseBreakdownDecision normalizes the start/continue words Jev is actually
   assert.equal(parseBreakdownDecision({ answers: { decision: { type: 'choice', choice: 'continue', confidence: 0.9 } } }, 'continue')?.action, 'proceed');
   // A raw "run" with no stage is still accepted.
   assert.equal(parseBreakdownDecision({ answers: { decision: { type: 'choice', choice: 'run', confidence: 0.9 } } })?.action, 'proceed');
+  // The raw choice is kept, so probability lookups can exclude what Jev actually picked.
+  assert.equal(parseBreakdownDecision({ answers: { decision: { type: 'choice', choice: 'run', confidence: 0.9 } } }, 'start')?.choice, 'run');
 });
 
 test('parseBreakdownDecision rejects an action the stage never offered', () => {

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { PathOverrides, Paths } from './paths.js';
 import type { ProviderName } from './providers/types.js';
+import type { ReportedStatus } from './result.js';
 import type { Task } from './tasks.js';
 import { UsageError, fileExists, isRecord, parseTimeZone, type TimeZone } from './util.js';
 
@@ -108,9 +109,14 @@ export interface FallbackConfig {
   onCategories: string[];
 }
 
-/** Where a System One (Jev) decision call is routed. Only OpenRouter is built in. */
+/** Where a System One (Jev) decision call or a vision request is routed. Only OpenRouter is built in. */
 export const JEV_PROVIDERS = ['openrouter'] as const;
 export type JevProviderName = (typeof JEV_PROVIDERS)[number];
+
+/** Built-in base URL per System One / vision router; each config's `baseUrl` overrides it. */
+export const JEV_BASE_URLS: Record<JevProviderName, string> = {
+  openrouter: 'https://openrouter.ai/api',
+};
 
 /**
  * Optional Jev decision calls (TypeSafe's System One model) used as a fast fallback when a session
@@ -140,7 +146,7 @@ export interface JevConfig {
   /** Below this confidence the decision is discarded and the fallback runs instead. */
   minConfidence: number;
   /** Dispositions `resultFallback` is allowed to settle. Ending a task stays with the nudge by default. */
-  acceptStatuses: string[];
+  acceptStatuses: ReportedStatus[];
 }
 
 /**
@@ -1228,7 +1234,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         warnings.push('jev.enabled is true but jev.model is empty; Jev stays off');
         enabled = false;
       }
-      const acceptStatuses = stringArray(jevRaw.acceptStatuses, DEFAULTS.jev.acceptStatuses, 'jev.acceptStatuses', warnings).filter((s) => {
+      const acceptStatuses = stringArray(jevRaw.acceptStatuses, DEFAULTS.jev.acceptStatuses, 'jev.acceptStatuses', warnings).filter((s): s is ReportedStatus => {
         if (['done', 'continue', 'blocked', 'failed'].includes(s)) return true;
         warnings.push(`jev.acceptStatuses: ignoring unknown status ${JSON.stringify(s)}`);
         return false;

@@ -117,8 +117,23 @@ test('doctor reports the breakdown block: stages, decision chain and rules', () 
   const line = checks.find((c) => c.name === 'breakdown');
   assert.equal(line?.level, 'ok');
   assert.match(line?.detail ?? '', /on start\/continue\/failure\/blocked/);
-  assert.match(line?.detail ?? '', /decision auto \(jev → opencode · openrouter\/deepseek\/deepseek-v4\.1-flash → rules\)/);
+  // Jev is off, so the `auto` chain names only the fallback LLM; it must not claim a Jev step.
+  assert.match(line?.detail ?? '', /decision auto \(opencode · openrouter\/deepseek\/deepseek-v4\.1-flash → rules\)/);
+  assert.doesNotMatch(line?.detail ?? '', /jev/);
   assert.match(line?.detail ?? '', /max 1 per task/);
+
+  // With Jev armed, `auto` gains the System One step ahead of the fallback LLM.
+  const jevOn = { ...config, jev: { ...DEFAULTS.jev, enabled: true, breakdownDecision: true } };
+  assert.match(runDoctor({ paths, config: jevOn, state }).find((c) => c.name === 'breakdown')?.detail ?? '',
+    /decision auto \(jev → opencode · openrouter\/deepseek\/deepseek-v4\.1-flash → rules\)/);
+
+  // `llm` skips Jev entirely even when it is enabled; `jev` runs only Jev, then the rules.
+  const llm = { ...jevOn, breakdown: { ...config.breakdown, decision: 'llm' as const } };
+  assert.match(runDoctor({ paths, config: llm, state }).find((c) => c.name === 'breakdown')?.detail ?? '',
+    /decision llm \(opencode · openrouter\/deepseek\/deepseek-v4\.1-flash → rules\)/);
+  const jevOnly = { ...jevOn, breakdown: { ...config.breakdown, decision: 'jev' as const } };
+  assert.match(runDoctor({ paths, config: jevOnly, state }).find((c) => c.name === 'breakdown')?.detail ?? '',
+    /decision jev \(jev → rules\)/);
 
   // Enabled but no stage on is a warning, not a failure.
   const noStage = runDoctor({ paths, config: { ...config, breakdown: { ...config.breakdown, onStart: false, onContinue: false, onFailure: false, onBlocked: false } }, state });

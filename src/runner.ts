@@ -8,7 +8,7 @@ import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { commitAll, currentBranch, describeCommit, headSha } from './git.js';
 import { contractsFor, dependencyClosure, isLandedSubset, parseAcceptance, summarizeAcceptance, topoOrder, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
 import { fireHook } from './hooks.js';
-import { classifyEscalation, classifySessionResult, jevProblem } from './jev.js';
+import { classifyEscalation, classifySessionResult, jevProblem, runnerUp } from './jev.js';
 import { collectChanges, runJudge, type JudgeEvidence, type JudgeVerdict } from './judge.js';
 import { createLogger, openRunSinks, type Logger, type RunSinks } from './logger.js';
 import { writeTaskLog } from './logs.js';
@@ -985,7 +985,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal, note: (m) => { note = m; } },
         );
         const pct = decision ? Math.round(decision.confidence * 100) : 0;
-        if (decision?.costUsd !== undefined) { st.costUsd = (st.costUsd ?? 0) + decision.costUsd; ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd; }
+        addDecisionCost(ctx, task, decision?.costUsd);
         if (decision && decision.confidence >= config.jev.minConfidence) {
           if (!decision.escalate) {
             log.warn(`${task.id}: [jev] ${category} — ${reason}. Jev says a stronger model would not help (${pct}%); not escalating.`);
@@ -993,7 +993,8 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           }
           log.info(`${task.id}: [jev] Jev agrees escalation is worth it (${pct}%)`);
         } else if (decision) {
-          log.warn(`${task.id}: [jev] Jev's escalation call was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%); escalating as configured`);
+          const near = runnerUp(decision.probabilities, decision.escalate ? 'escalate' : 'stay');
+          log.warn(`${task.id}: [jev] Jev's escalation call was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)${near ? `, next ${near}` : ''}; escalating as configured`);
         } else {
           log.warn(`${task.id}: [jev] Jev returned no usable escalation decision${note ? ` (${note})` : ''}; escalating as configured`);
         }
@@ -1176,7 +1177,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         let note = '';
         const decision = await classifySessionResult(config.jev, { taskTitle: task.title, output: outcome.allText }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal, note: (m) => { note = m; } });
         // Charge any answered call, even when the disposition is not accepted below.
-        if (decision?.costUsd !== undefined) { st.costUsd = (st.costUsd ?? 0) + decision.costUsd; ctx.runCostUsd = (ctx.runCostUsd ?? 0) + decision.costUsd; }
+        addDecisionCost(ctx, task, decision?.costUsd);
         const pct = decision ? Math.round(decision.confidence * 100) : 0;
         if (decision && decision.confidence >= config.jev.minConfidence && config.jev.acceptStatuses.includes(decision.status)) {
           block = { status: decision.status, summary: `Jev classified the session as ${decision.status} (confidence ${pct}%)` };
@@ -1184,7 +1185,8 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         } else if (decision && !config.jev.acceptStatuses.includes(decision.status)) {
           log.warn(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev said ${decision.status} (${pct}%) but only ${config.jev.acceptStatuses.join('/')} are accepted`);
         } else if (decision) {
-          log.warn(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev's ${decision.status} was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)`);
+          const near = runnerUp(decision.probabilities, decision.status);
+          log.warn(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev's ${decision.status} was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)${near ? `, next ${near}` : ''}`);
         } else {
           log.warn(`${task.id}: [jev] no SYMPHONY_RESULT block; Jev returned no usable decision${note ? ` (${note})` : ''}`);
         }

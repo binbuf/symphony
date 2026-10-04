@@ -1,7 +1,7 @@
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveBreakdown, type BreakdownConfig, type Config } from './config.js';
-import { classifyBreakdown, jevProblem, type BreakdownStage } from './jev.js';
+import { classifyBreakdown, jevProblem, runnerUp, type BreakdownStage } from './jev.js';
 import { openRunSinks, type Logger } from './logger.js';
 import { planMcp } from './mcp.js';
 import type { Paths } from './paths.js';
@@ -154,8 +154,9 @@ export async function decideBreakdown(config: Config, ev: BreakdownEvidence, dep
           return { action: decision.action, source: 'jev', reason: `${gate.why} · Jev chose ${decision.action} (${pct}%)`, confidence: decision.confidence, costUsd: spentUsd || undefined };
         }
         if (decision) hint = `a fast classifier leaned "${decision.action}" (${pct}% confident), below the confidence bar — weigh it, but decide for yourself`;
+        const near = decision ? runnerUp(decision.probabilities, decision.choice) : undefined;
         deps.log?.warn(decision
-          ? `${ev.task.id}: [jev] breakdown decision "${decision.action}" was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%); falling back`
+          ? `${ev.task.id}: [jev] breakdown decision "${decision.action}" was only ${pct}% confident (min ${Math.round(config.jev.minConfidence * 100)}%)${near ? `, next ${near}` : ''}; falling back`
           : `${ev.task.id}: [jev] breakdown decision returned no usable answer${note ? ` (${note})` : ''}; falling back`);
       }
     }

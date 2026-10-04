@@ -143,7 +143,18 @@ export function runDoctor(i: DoctorInput): Check[] {
     const bdProvider = bd.provider ?? i.config.watch.provider;
     const bdModelProvider = bd.modelProvider ?? i.config.watch.modelProvider ?? i.config.providers[bdProvider].modelProvider;
     const model = composeModel(bdProvider, bdModelProvider, bd.model || i.config.watch.model);
-    const decision = bd.decision === 'rules' ? 'rules' : `${bd.decision} (jev → ${bdProvider}${model ? ` · ${model}` : ''} → rules)`;
+    const jevArmed = i.config.jev.enabled && i.config.jev.breakdownDecision;
+    const modelLabel = `${bdProvider}${model ? ` · ${model}` : ''}`;
+    // Describe the chain the mode actually runs: rules is the floor; `llm` adds the fallback session;
+    // `jev` adds the System One call, and only `auto` also falls through to the fallback session.
+    const chain = bd.decision === 'rules'
+      ? 'rules'
+      : bd.decision === 'llm'
+        ? `${modelLabel} → rules`
+        : bd.decision === 'jev'
+          ? (jevArmed ? 'jev → rules' : 'rules')
+          : (jevArmed ? `jev → ${modelLabel} → rules` : `${modelLabel} → rules`);
+    const decision = bd.decision === 'rules' ? 'rules' : `${bd.decision} (${chain})`;
     const rules = `afterContinuations=${bd.rules.afterContinuations}, afterFailedAttempts=${bd.rules.afterFailedAttempts}, onCategories=${bd.rules.onCategories.join('/') || 'none'}`;
     add('breakdown', stages ? 'ok' : 'warn', stages
       ? `on ${stages} · decision ${decision} · rules ${rules} · max ${bd.maxPerTask || '∞'} per task`

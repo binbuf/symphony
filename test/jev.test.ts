@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULTS, type JevConfig } from '../src/config.js';
-import { classifyEscalation, classifySessionResult, jevBaseUrl, jevProblem, parseDecision, parseEscalationDecision } from '../src/jev.js';
+import { classifyEscalation, classifySessionResult, jevBaseUrl, jevProblem, parseDecision, parseEscalationDecision, runnerUp } from '../src/jev.js';
 
 const jevConfig = (over: Partial<JevConfig> = {}): JevConfig => ({ ...DEFAULTS.jev, enabled: true, ...over });
 
@@ -27,6 +27,14 @@ test('parseDecision rejects malformed answers and unknown options', () => {
   assert.equal(parseDecision({ answers: {} }), undefined);
   assert.equal(parseDecision({ answers: { disposition: { type: 'noul', noul: 0.9 } } }), undefined);
   assert.equal(parseDecision({ answers: { disposition: { type: 'choice', choice: 'maybe', confidence: 0.9 } } }), undefined);
+});
+
+test('runnerUp names the next-most-likely option, excluding the chosen one', () => {
+  assert.equal(runnerUp({ done: 0.6, continue: 0.25, blocked: 0.1 }, 'done'), 'continue 25%');
+  assert.equal(runnerUp({ done: 0.6, continue: 0.25, blocked: 0.1 }, 'blocked'), 'done 60%');
+  assert.equal(runnerUp({ done: 0.6 }, 'done'), undefined);
+  assert.equal(runnerUp(undefined, 'done'), undefined);
+  assert.equal(runnerUp({}, 'done'), undefined);
 });
 
 test('jevProblem explains why the fallback cannot run', () => {
