@@ -224,7 +224,9 @@ test('an attach client can stop the harness through the control channel', async 
     model.stopHarness();
     const code = await run;
     assert.equal(code, 143, 'the harness stops the run instead of finishing it');
-    assert.equal(ctx.state.tasks.T01.status, 'running', 'the stopped task is recorded unfinished');
+    assert.equal(ctx.state.tasks.T01.status, 'failed', 'the stopped task is recorded unfinished');
+    assert.equal(ctx.state.tasks.T01.lastError?.category, 'interrupted', 'the stop is recorded as an interruption');
+    assert.equal(ctx.state.tasks.T01.attempts, 0, 'the interrupted session does not count as an attempt');
     assert.equal(ctx.state.tasks.T02?.status ?? 'pending', 'pending', 'T02 never ran');
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;

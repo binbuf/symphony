@@ -8,7 +8,7 @@ import { loadProject } from '../project.js';
 import { parseRoadmap } from '../roadmap.js';
 import type { RunContext, SplitRequest } from '../runner.js';
 import { readRuntime, type RuntimeState } from '../runtime.js';
-import { liveLock, loadState, saveState, type State } from '../state.js';
+import { activeLock, loadState, saveState, type State } from '../state.js';
 import { discoverTasks, type Task } from '../tasks.js';
 import type { TimeZone } from '../util.js';
 import type { WatchState } from '../watch.js';
@@ -169,7 +169,7 @@ export class RemoteTuiModel implements TuiModel {
   }
 
   isLive(): boolean {
-    return liveLock(this.paths) !== undefined;
+    return activeLock(this.paths) !== undefined;
   }
 
   poll(): void {

@@ -216,12 +216,20 @@ export function readLock(paths: Paths): Lock | undefined {
   } catch { return undefined; }
 }
 
-export function liveLock(paths: Paths): Lock | undefined {
+/** A lock owned by a live process (including this one) whose heartbeat is fresh. */
+export function activeLock(paths: Paths): Lock | undefined {
   const l = readLock(paths);
-  if (!l || l.pid === process.pid || !pidAlive(l.pid)) return undefined;
+  if (!l || !pidAlive(l.pid)) return undefined;
   // Guard against pid reuse: a live pid whose lock has not been refreshed for a long time is stale.
   const seen = Date.parse(l.heartbeat ?? l.startedAt);
   if (Number.isFinite(seen) && Date.now() - seen > LOCK_STALE_MS) return undefined;
+  return l;
+}
+
+/** A live lock held by *another* process; the current process's own lock is ignored. */
+export function liveLock(paths: Paths): Lock | undefined {
+  const l = activeLock(paths);
+  if (!l || l.pid === process.pid) return undefined;
   return l;
 }
 
