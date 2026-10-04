@@ -111,6 +111,7 @@ const KIND_NOUN: Record<McpSessionKind, string> = {
   split: 'split session',
   replan: 'replan session',
   breakdown: 'breakdown session',
+  judge: 'judge session',
 };
 
 /** Where a non-empty selection came from: `mcp.defaultServers` reads as the task/escalation default. */

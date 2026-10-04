@@ -54,6 +54,17 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
     lines.push(`- result: ${st.verify.ok ? 'pass' : `FAIL (exit ${st.verify.code ?? 'timeout'})`} at ${st.verify.at}`);
     if (st.verify.output) { lines.push('', '```', st.verify.output, '```'); }
   }
+  if (st.judge) {
+    const j = st.judge;
+    lines.push('');
+    lines.push('## Judge');
+    lines.push('');
+    lines.push(`- verdict: ${j.verdict.toUpperCase()}${j.confidence !== undefined ? ` (${Math.round(j.confidence * 100)}% confident)` : ''} at ${j.at}`);
+    if (j.provider) lines.push(`- model: ${j.provider}${j.model ? ` · ${j.model}` : ''}`);
+    if (j.enforced) lines.push('- enforced: the done was demoted to failed and re-entered the recovery path');
+    lines.push(`- summary: ${j.summary}`);
+    if (j.gaps) lines.push(`- gaps: ${j.gaps}`);
+  }
   lines.push('');
   lines.push('## Sessions');
   lines.push('');

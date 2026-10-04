@@ -2,13 +2,14 @@ import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from
 import { join, relative } from 'node:path';
 import { decideBreakdown, type BreakdownEvidence, type BreakdownStage, type BreakdownVerdict } from './breakdown.js';
 import { classifyFailure, evidenceText, makeClassified, type Classified, type FailureEvidence } from './classify.js';
-import { resolveEscalation, resolveFallback, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
+import { resolveEscalation, resolveFallback, resolveJudge, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
 import { writeProgressIndex } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { commitAll, currentBranch, describeCommit } from './git.js';
 import { contractsFor, dependencyClosure, isLandedSubset, summarizeAcceptance, topoOrder, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
 import { fireHook } from './hooks.js';
 import { classifyError, classifyEscalation, classifySessionResult, jevProblem } from './jev.js';
+import { collectChanges, runJudge, type JudgeEvidence, type JudgeVerdict } from './judge.js';
 import { createLogger, openRunSinks, type Logger, type RunSinks } from './logger.js';
 import { writeTaskLog } from './logs.js';
 import { mcpPromptNote, planMcp, resolveMcpProfile } from './mcp.js';
@@ -119,6 +120,8 @@ export interface RunContext {
   contracts?: Map<string, TaskContract>;
   /** Automatic breakdowns attempted per task id in this run; bounds a task that keeps failing. */
   autoSplits?: Map<string, number>;
+  /** Judge sessions run per task id in this run; bounds a demote/re-run loop. */
+  judgeCounts?: Map<string, number>;
   /** Slack thread roots per task id (task id → root message `ts`), so later events reply in-thread. */
   slackThreads?: Map<string, string>;
   /** Called when the run itself rewrote the plan (an automatic breakdown), so a live view can refresh. */
@@ -194,6 +197,73 @@ function addDecisionCost(ctx: RunContext, task: Task, costUsd: number | undefine
   ctx.runCostUsd = (ctx.runCostUsd ?? 0) + costUsd;
   const st = ctx.state.tasks[task.id];
   if (st) st.costUsd = (st.costUsd ?? 0) + costUsd;
+}
+
+/**
+ * Run the independent completion judge for a task about to be finalized `done`, if the judge is
+ * enabled and has not already hit `judge.maxPerTask` this run. Gathers the evidence (task intent,
+ * acceptance items, the verify result, the worktree diff and the session's own summary), runs one
+ * read-only session, charges its cost, and records the verdict on the task state. Returns undefined
+ * when the judge is off, over budget, or produced no usable verdict — in every such case the caller
+ * accepts the `done` as reported rather than failing a task on the judge's own infrastructure.
+ */
+async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, sessionSummary: string | undefined): Promise<JudgeVerdict | undefined> {
+  const { config, log, paths } = ctx;
+  // A judge-eligible `done` supersedes any earlier verdict: clear a stale fail/enforced record from a
+  // previous attempt so a task that now ends done can never carry a demoted verdict in its log.
+  delete st.judge;
+  saveState(paths, ctx.state);
+  const max = config.judge.maxPerTask;
+  const counts = (ctx.judgeCounts ??= new Map());
+  const used = counts.get(task.id) ?? 0;
+  if (max > 0 && used >= max) {
+    log.warn(`${task.id}: judge already ran ${used} time(s) this run (judge.maxPerTask ${max}); accepting the done as reported`);
+    return undefined;
+  }
+  counts.set(task.id, used + 1);
+
+  const contract = contractsOf(ctx).get(task.id);
+  const changes = config.judge.includeDiff
+    ? collectChanges(paths.root, config.judge.maxDiffBytes)
+    : { files: [], diff: '', truncated: false };
+  const progressPath = join(paths.progressDir, `${task.id}.md`);
+  const progressNote = existsSync(progressPath) ? readFileSync(progressPath, 'utf8') : undefined;
+  const ev: JudgeEvidence = {
+    taskId: task.id,
+    taskTitle: task.title,
+    taskPhase: task.phase,
+    status: 'done',
+    attempts: st.attempts,
+    taskBody: taskFileBody(task, config.maxTaskBytes),
+    acceptance: contract?.acceptance,
+    verifyCommand: st.verify?.command,
+    verifyOk: st.verify?.ok,
+    verifyOutput: st.verify?.output,
+    sessionSummary,
+    changedFiles: changes.files,
+    diff: changes.diff,
+    diffTruncated: changes.truncated,
+    progressNote,
+  };
+
+  const verdict = await runJudge(config, ev, { paths, log, abort: ctx.abort.signal });
+  if (!verdict) return undefined;
+  addDecisionCost(ctx, task, verdict.costUsd);
+  st.judge = {
+    verdict: verdict.verdict,
+    ok: verdict.ok,
+    confidence: verdict.confidence,
+    summary: verdict.summary,
+    gaps: verdict.gaps,
+    at: nowIso(),
+    provider: verdict.provider,
+    model: verdict.model,
+    costUsd: verdict.costUsd,
+  };
+  saveState(paths, ctx.state);
+  const pct = verdict.confidence !== undefined ? ` ${Math.round(verdict.confidence * 100)}%` : '';
+  log.info(`${task.id}: judge ${verdict.ok ? 'passed' : 'failed'}${pct} — ${verdict.summary}${verdict.gaps ? ` (gaps: ${verdict.gaps})` : ''}`);
+  return verdict;
 }
 
 /**
@@ -1234,6 +1304,31 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           }
           log.info(`${task.id}: verify passed`);
         }
+        // Independent completion judge: after the mechanical verify (if any) passes, a separate
+        // read-only session checks the task's own intent against what actually landed. Only a
+        // confident failing verdict enforces; a weak verdict, or one that reports no confidence at
+        // all, is advisory — the done stands and the verdict is recorded for the log.
+        if (config.judge.enabled) {
+          const verdict = await runCompletionJudge(ctx, task, st, block.summary);
+          if (verdict && verdict.verdict === 'fail') {
+            const pct = verdict.confidence !== undefined ? ` (${Math.round(verdict.confidence * 100)}%)` : '';
+            const confident = verdict.confidence !== undefined && verdict.confidence >= config.judge.minConfidence;
+            const msg = `judge rejected the completion${pct}: ${verdict.summary}${verdict.gaps ? ` — gaps: ${verdict.gaps}` : ''}`;
+            if (confident && config.judge.onFail === 'fail') {
+              st.judge!.enforced = true;
+              saveState(paths, state);
+              log.error(`${task.id}: ${msg}`);
+              const rec = await recover('judge', msg);
+              if (rec === 'split') return { status: st.status, split: true };
+              if (rec === 'replan') return { status: st.status, replan: true };
+              if (rec === 'escalated') continue;
+              final = { status: 'failed', summary: msg, lastError: { category: 'judge', message: msg, transient: false, fatal: false, at: nowIso() } };
+              break;
+            }
+            const uncertain = verdict.confidence === undefined ? 'no confidence reported' : `below judge.minConfidence ${config.judge.minConfidence}`;
+            log.warn(`${task.id}: ${msg} (${uncertain}); accepting the done`);
+          }
+        }
       }
       if (block.status === 'failed') {
         // A session can report `failed` because the provider or a tool hiccuped — a dropped
@@ -1488,6 +1583,15 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   if (fbPreflight && !seenProviders.has(fbPreflight.spec.providerName)) {
     extraProviders.push({ spec: fbPreflight.spec, provider: getProvider(fbPreflight.spec.providerName), label: 'fallback' });
   }
+  // And the judge, which launches after every `done` when enabled.
+  if (config.judge.enabled) {
+    const judgePreflight = resolveJudge(config, variantSupported);
+    judgePreflight.warnings.forEach((w) => log.warn(`judge: ${w}`));
+    if (!seenProviders.has(judgePreflight.spec.providerName)) {
+      seenProviders.add(judgePreflight.spec.providerName);
+      extraProviders.push({ spec: judgePreflight.spec, provider: getProvider(judgePreflight.spec.providerName), label: 'judge' });
+    }
+  }
   if (!preflight(ctx, spec, provider, { skipAuth: flags.dryRun, ignoreHalt: flags.dryRun, extraProviders })) {
     log.error('preflight failed; fix the ✗ items above (or run: symphony doctor)');
     return 4;
@@ -1542,6 +1646,10 @@ export async function runCommand(ctx: RunContext): Promise<number> {
         const stages = [bd.onStart && 'start', bd.onContinue && 'continue', bd.onFailure && 'failure', bd.onBlocked && 'blocked'].filter(Boolean).join(', ') || '(no stage on)';
         const fallback = bd.decision === 'rules' ? '' : ` → ${bd.provider ?? config.watch.provider}${(bd.model || config.watch.model) ? ` · ${bd.model || config.watch.model}` : ''}`;
         log.plain(`breakdown: ${stages} · decision ${bd.decision}${fallback} → rules at continuation ${bd.rules.afterContinuations} / attempt ${bd.rules.afterFailedAttempts} (${bd.rules.onCategories.join(', ')})`);
+      }
+      if (config.judge.enabled) {
+        const jp = resolveJudge(config, variantSupported);
+        log.plain(`judge: ${jp.spec.providerName}${jp.spec.model ? ` · ${jp.spec.model}` : ''} checks every done (onFail ${config.judge.onFail}, min confidence ${config.judge.minConfidence}, max ${config.judge.maxPerTask || '∞'} per task)`);
       }
       log.plain(`command: ${describeCmd(cmd)}`);
       log.plain(`--- prompt for ${t.id} (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);

@@ -150,6 +150,15 @@ export function runDoctor(i: DoctorInput): Check[] {
       : `breakdown.enabled is true but onStart/onContinue/onFailure/onBlocked are all false; nothing will trigger`);
   }
 
+  const jd = i.config.judge;
+  if (jd.enabled) {
+    const jdProvider = jd.provider ?? i.config.watch.provider;
+    const jdModelProvider = jd.modelProvider ?? i.config.watch.modelProvider ?? i.config.providers[jdProvider].modelProvider;
+    const model = composeModel(jdProvider, jdModelProvider, jd.model || i.config.watch.model);
+    const action = jd.onFail === 'fail' ? 'a confident fail demotes the done' : 'a failing verdict is advisory only';
+    add('judge', 'ok', `independent completion judge before each done · ${jdProvider}${model ? ` · ${model}` : ''} · ${action} (min confidence ${jd.minConfidence}, max ${jd.maxPerTask || '∞'} per task)`);
+  }
+
   if (i.config.vision.enabled) {
     const v = i.config.vision;
     const problem = visionProblem(v, process.env);

@@ -37,6 +37,23 @@ export interface LogRef {
 
 export interface LastError { category: string; message: string; transient: boolean; fatal: boolean; at: string }
 
+/** The independent judge's verdict on a task's `done`, as recorded on the task row and run log. */
+export interface JudgeRecord {
+  /** `pass` accepts the completion; `fail` is the judge's read that it was not done as intended. */
+  verdict: 'pass' | 'fail';
+  ok: boolean;
+  confidence?: number;
+  summary: string;
+  /** Specific missing/incorrect items, when the judge named them. */
+  gaps?: string;
+  /** Whether this failing verdict actually demoted the task (judge.onFail === 'fail' and confident). */
+  enforced?: boolean;
+  at: string;
+  provider?: string;
+  model?: string;
+  costUsd?: number;
+}
+
 export interface TaskState {
   title: string;
   status: TaskStatus;
@@ -73,6 +90,8 @@ export interface TaskState {
   commitSha?: string;
   /** Result of the harness-run verify command after the task reported done. */
   verify?: { command: string; ok: boolean; code?: number; output?: string; at: string };
+  /** The last independent judge verdict on a `done` (see JudgeRecord). */
+  judge?: JudgeRecord;
   logs: LogRef[];
   accepted?: { at: string; from: TaskStatus; note?: string };
   /** Acceptance items deferred by an automatic subset-accept (all remaining were deferrable). */

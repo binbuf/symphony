@@ -198,6 +198,46 @@ export interface WatchConfig {
 }
 
 /**
+ * Optional independent task judge. After a task reports `done` and its verify command passes, a
+ * separate, read-only LLM session reads the task's *intent* (Goal, Scope, acceptance items), the work
+ * that actually landed (the worktree diff), the verify evidence and the session's own summary, and
+ * decides whether the task was completed as intended. A test command can only check what it was told
+ * to check; the judge is what notices a task that passed its tests but missed its scope. Off by
+ * default. A confident failing verdict can demote the `done` back to a failure (the ordinary
+ * retry/escalation/breakdown path then re-engages) or be advisory only. The judge provider/model are
+ * independent of the run's, so it can be a stronger reviewer than the model that did the work.
+ */
+export interface JudgeConfig {
+  /** Master switch; off by default so an existing run behaves exactly as before until you opt in. */
+  enabled: boolean;
+  /** Provider the judge runs on (defaults to the watch block's provider). */
+  provider?: ProviderName;
+  /** Model the judge runs (defaults to the watch block's model, then the provider default). */
+  model: string;
+  /** OpenCode only: upstream provider for a bare `model` (defaults to the watch block's). */
+  modelProvider?: string;
+  /** Optional reasoning-effort override for the judge. Unset = the provider's default. */
+  variant?: string;
+  /**
+   * What a confident failing verdict does: `fail` demotes the `done` to a failure so the harness's
+   * ordinary recovery (retry, breakdown, escalation when configured) re-engages; `warn` only records
+   * the verdict and lets the `done` stand. Add `judge` to `escalation.onCategories` and
+   * `breakdown.rules.onCategories` to have those paths react to a rejected `done` too.
+   */
+  onFail: 'fail' | 'warn';
+  /** A failing verdict below this confidence, or one that reports none, is treated as a pass. */
+  minConfidence: number;
+  /** Judge sessions one task may take in a single run (0 = unlimited); bounds a demote/re-run loop. */
+  maxPerTask: number;
+  /** Inline the worktree diff into the judge's evidence so a read-only session can see what changed. */
+  includeDiff: boolean;
+  /** Byte cap for the inlined diff. */
+  maxDiffBytes: number;
+  /** Hard wall clock for one judge session; on timeout the `done` is accepted as reported. */
+  timeoutMin: number;
+}
+
+/**
  * Which lifecycle events post to Slack. Every event is gated twice: the master `slack.enabled`
  * switch and the event's own flag, so an integration can be armed without flooding a channel.
  */
@@ -282,7 +322,7 @@ export interface McpServerConfig {
   disabledTools?: string[];
 }
 
-export const MCP_SESSION_KINDS = ['task', 'watch', 'prepare', 'replan', 'split', 'breakdown', 'escalation'] as const;
+export const MCP_SESSION_KINDS = ['task', 'watch', 'prepare', 'replan', 'split', 'breakdown', 'escalation', 'judge'] as const;
 export type McpSessionKind = (typeof MCP_SESSION_KINDS)[number];
 
 /**
@@ -516,6 +556,8 @@ export interface Config {
   slack: SlackConfig;
   /** Periodic read-only progress/health summary in the TUI. See WatchConfig. */
   watch: WatchConfig;
+  /** Optional independent completion judge before a `done` is accepted. See JudgeConfig. */
+  judge: JudgeConfig;
   /** Per-session MCP server selection. See McpConfig. */
   mcp: McpConfig;
   /** Automatic task breakdown at task start, at a `continue` boundary, or instead of escalating. See BreakdownConfig. */
@@ -678,6 +720,19 @@ export const DEFAULTS: Config = {
     model: 'deepseek/deepseek-v4.1-flash',
     modelProvider: 'openrouter',
     timeoutMin: 5,
+  },
+  judge: {
+    enabled: false,
+    provider: undefined,
+    model: '',
+    modelProvider: undefined,
+    variant: undefined,
+    onFail: 'fail',
+    minConfidence: 0.7,
+    maxPerTask: 1,
+    includeDiff: true,
+    maxDiffBytes: 20_000,
+    timeoutMin: 10,
   },
   mcp: {
     enabled: false,
@@ -1006,6 +1061,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const slackRaw = isRecord(raw.slack) ? raw.slack : {};
   const slackEventsRaw = isRecord(slackRaw.events) ? slackRaw.events : {};
   const watchRaw = isRecord(raw.watch) ? raw.watch : {};
+  const judgeRaw = isRecord(raw.judge) ? raw.judge : {};
   const mcpRaw = isRecord(raw.mcp) ? raw.mcp : {};
   const breakRaw = isRecord(raw.breakdown) ? raw.breakdown : {};
   const breakRulesRaw = isRecord(breakRaw.rules) ? breakRaw.rules : {};
@@ -1294,6 +1350,49 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
           return undefined;
         })(),
         timeoutMin: positiveOr(watchRaw.timeoutMin, DEFAULTS.watch.timeoutMin, 'watch.timeoutMin', warnings),
+      };
+    })(),
+    judge: (() => {
+      let provider: ProviderName | undefined;
+      if (judgeRaw.provider !== undefined && judgeRaw.provider !== null) {
+        if (typeof judgeRaw.provider === 'string' && (PROVIDER_NAMES as string[]).includes(judgeRaw.provider)) {
+          provider = judgeRaw.provider as ProviderName;
+        } else {
+          warnings.push(`judge.provider: expected one of ${PROVIDER_NAMES.join(', ')}, got ${JSON.stringify(judgeRaw.provider)}; using the watch provider`);
+        }
+      }
+      const model = typeof judgeRaw.model === 'string' ? judgeRaw.model.trim() : DEFAULTS.judge.model;
+      let enabled = boolOr(judgeRaw.enabled, DEFAULTS.judge.enabled, 'judge.enabled', warnings);
+      // The judge can borrow the watch block's model; only disable when neither names one.
+      if (enabled && !model && !watchRaw.model && !DEFAULTS.watch.model) {
+        warnings.push('judge.enabled is true but neither judge.model nor watch.model names one; the judge stays off');
+        enabled = false;
+      }
+      return {
+        enabled,
+        provider,
+        model,
+        modelProvider: typeof judgeRaw.modelProvider === 'string' && judgeRaw.modelProvider.trim() ? judgeRaw.modelProvider.trim() : undefined,
+        variant: (() => {
+          const v = judgeRaw.variant;
+          if (v === undefined || v === null) return undefined;
+          if (typeof v === 'string') return v.trim() || undefined;
+          warnings.push(`judge.variant: expected a string, got ${JSON.stringify(v)}; using provider default`);
+          return undefined;
+        })(),
+        onFail: enumOr(judgeRaw.onFail, ['fail', 'warn'] as const, DEFAULTS.judge.onFail, 'judge.onFail', warnings),
+        minConfidence: (() => {
+          const n = numberOr(judgeRaw.minConfidence, DEFAULTS.judge.minConfidence, 'judge.minConfidence', warnings);
+          if (n < 0 || n > 1) {
+            warnings.push(`judge.minConfidence: expected a number in 0..1, got ${JSON.stringify(judgeRaw.minConfidence)}; using ${DEFAULTS.judge.minConfidence}`);
+            return DEFAULTS.judge.minConfidence;
+          }
+          return n;
+        })(),
+        maxPerTask: Math.max(0, Math.floor(numberOr(judgeRaw.maxPerTask, DEFAULTS.judge.maxPerTask, 'judge.maxPerTask', warnings))),
+        includeDiff: boolOr(judgeRaw.includeDiff, DEFAULTS.judge.includeDiff, 'judge.includeDiff', warnings),
+        maxDiffBytes: positiveOr(judgeRaw.maxDiffBytes, DEFAULTS.judge.maxDiffBytes, 'judge.maxDiffBytes', warnings),
+        timeoutMin: positiveOr(judgeRaw.timeoutMin, DEFAULTS.judge.timeoutMin, 'judge.timeoutMin', warnings),
       };
     })(),
     mcp: {
@@ -1742,6 +1841,51 @@ export function resolveWatch(
       autoApprove: false,
       readOnly: true,
       sources: { provider: 'watch', model: 'watch', modelProvider: w.modelProvider ? 'watch' : pc.modelProvider ? 'config' : 'provider default', variant: variant ? 'watch' : 'provider default' },
+    },
+    warnings,
+  };
+}
+
+/**
+ * The read-only completion-judge spec. Like the watcher it ignores CLI flags, env and front matter:
+ * `judge.provider`/`.model` win and fall back to the `watch` block, so the review can be a different
+ * model than the one that did the work. Pinned to `autoApprove: false` and `readOnly: true`: the
+ * judge is meant to read the tree it was handed and make no edits. How far that is enforced depends
+ * on the provider (see `readOnly` in providers/types.ts); the others rely on writes not being
+ * auto-approved.
+ */
+export function resolveJudge(
+  config: Config,
+  variantSupport: (p: ProviderName, bin: string, model: string | undefined, variant: string) => boolean = () => false,
+): { spec: SessionSpec; warnings: string[] } {
+  const j = config.judge;
+  const warnings: string[] = [];
+  const providerName = j.provider ?? config.watch.provider;
+  const pc = config.providers[providerName];
+  const modelProvider = j.modelProvider ?? config.watch.modelProvider ?? pc.modelProvider;
+  if (j.modelProvider && providerName !== 'opencode') warnings.push('judge.modelProvider is only used by opencode; ignored');
+  const model = composeModel(providerName, modelProvider, j.model.trim() || config.watch.model.trim() || pc.model);
+  let variant = j.variant ?? config.watch.variant;
+  if (variant && !variantSupport(providerName, pc.bin, model, variant)) {
+    warnings.push(`${providerName}${model ? ` model ${model}` : ''} does not support variant "${variant}" (judge.variant); using provider default`);
+    variant = undefined;
+  }
+  if (providerName === 'opencode' && model && !model.includes('/')) {
+    warnings.push(`opencode addresses a model as "provider/model"; set judge.modelProvider or watch.modelProvider (or use a "provider/model" model); got "${model}"`);
+  }
+  return {
+    spec: {
+      providerName,
+      bin: pc.bin,
+      model: model || undefined,
+      variant,
+      extraArgs: pc.extraArgs,
+      budgetUsd: undefined,
+      timeoutMin: j.timeoutMin,
+      idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
+      autoApprove: false,
+      readOnly: true,
+      sources: { provider: j.provider ? 'judge' : 'watch', model: j.model ? 'judge' : 'watch', modelProvider: j.modelProvider ? 'judge' : config.watch.modelProvider ? 'watch' : pc.modelProvider ? 'config' : 'provider default', variant: j.variant ? 'judge' : variant ? 'watch' : 'provider default' },
     },
     warnings,
   };

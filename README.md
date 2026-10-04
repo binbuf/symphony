@@ -10,7 +10,7 @@ A reasonably thin LLM task harness. Chain complex task sets together, use multip
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output. An optional [`mcp` block](#mcp-selection) can scope each session to a chosen subset of servers, so unrelated toolchains cost nothing.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [MCP selection](#mcp-selection) · [Providers](#providers) · [Escalation](#escalation) · [Fallback](#fallback) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Slack notifications](#slack-notifications) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [MCP selection](#mcp-selection) · [Providers](#providers) · [Escalation](#escalation) · [Fallback](#fallback) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Judge](#judge) · [Slack notifications](#slack-notifications) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -525,14 +525,14 @@ needs, so the schemas and results of unrelated toolchains never enter the conver
     "assets": ["gamma"]
   },
   "defaultServers": ["alpha"],
-  "sessions": { "watch": [], "prepare": [], "split": [], "breakdown": [], "escalation": [] }
+  "sessions": { "watch": [], "prepare": [], "split": [], "breakdown": [], "escalation": [], "judge": [] }
 }
 ```
 
 A task picks servers from its front matter — `capabilities: analysis`, or
 `mcp: alpha,beta` (the two are unioned). Resolution order: `--mcp a,b` / `--no-mcp` on the run,
 then task front matter, then `mcp.sessions.<kind>`, then `mcp.defaultServers` for tasks and escalated
-sessions and none for the other session kinds (watch, prepare, split, replan, breakdown). An
+sessions and none for the other session kinds (watch, prepare, split, replan, breakdown, judge). An
 escalated session inherits the task's selection because it is the same work on a stronger model.
 `run --dry-run` prints the resolved selection and the exact command, and `doctor` reports what the
 selected clients can enforce.
@@ -760,6 +760,40 @@ Configure it with the `watch` block; the provider and model are independent of t
 
 Set `"enabled": false` to turn it off. The panel appears once the watcher is armed (or, if its provider binary is missing, shows the error while the run continues), and the timer starts after preflight passes — not during `--dry-run`, `prepare`, or an empty run.
 
+## Judge
+
+The [verify command](#the-lifecycle) checks what it was told to check — tests, a build. It cannot tell whether a task that goes green actually did *what the task asked for*. The optional **judge** adds that independent check: after a task reports `done` and its verify passes, a separate **read-only** LLM session reads the task's own intent (Goal, Scope, Design notes, acceptance items), the work that landed (the worktree diff), the verify evidence and the session's own summary, and returns a verdict. It is **off by default**.
+
+```json
+"judge": {
+  "enabled": true,
+  "provider": "opencode",
+  "model": "z-ai/glm-5.3",
+  "modelProvider": "openrouter",
+  "onFail": "fail",
+  "minConfidence": 0.7,
+  "maxPerTask": 1,
+  "includeDiff": true,
+  "maxDiffBytes": 20000,
+  "timeoutMin": 10
+}
+```
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | turn the judge on |
+| `provider` / `model` / `modelProvider` / `variant` | the `watch` block's | where the judge runs; independent of the run's model, so the reviewer can be stronger than the model that did the work (`modelProvider` names the OpenCode upstream provider) |
+| `onFail` | `fail` | what a confident failing verdict does: `fail` demotes the `done` to a failure so the ordinary recovery (retry, [breakdown](#automatic-breakdowns), [escalation](#escalation)) re-engages; `warn` records the verdict and lets the `done` stand. Add `judge` to `escalation.onCategories` and `breakdown.rules.onCategories` to have those react to a rejected `done` |
+| `minConfidence` | `0.7` | a failing verdict below this, or one that reports no confidence, is treated as a pass, so a weak read cannot demote good work |
+| `maxPerTask` | `1` | judge sessions one task may take in a run (0 = unlimited); bounds a demote → re-run → demote loop |
+| `includeDiff` | `true` | inline the worktree diff so the read-only session can see what changed |
+| `maxDiffBytes` | `20000` | byte cap for the inlined diff |
+| `timeoutMin` | `10` | hard wall clock for one judge session; on timeout the `done` is accepted as reported |
+
+The judge is **advisory by construction when uncertain**: a verdict below `minConfidence`, a verdict that reports no confidence, a session that times out, a provider that is missing or errors, and any unparseable answer all fall back to *accepting the `done` as reported*. It can only ever stop a task the run was about to mark done; it never adds work. The latest verdict is recorded on the task and written to its `docs/logs/TNN.md` under `## Judge`, so a rejected completion is visible in the committed log, and the judge provider is preflighted with the rest of the run so a missing binary is reported before the first task starts.
+
+The judge sees the task's stated intent and the uncommitted worktree diff (untracked files are named so it can read them directly). It runs pinned to read-only (`autoApprove: false`, `readOnly: true`), but how far that is *enforced* is provider-dependent, exactly as for the [pipeline watcher](#pipeline-watch): `claude` and `codex` run in an explicit read-only sandbox, while the other CLIs rely on their default, where reads are permitted and writes are not auto-approved. Because it runs before the task's commit, an enforced rejection sends the task back through the normal failure path and the task's work stays in the tree for the retry.
+
 ## Slack notifications
 
 An unattended run is easier to trust when something tells you the moment it needs a human. Symphony can post a short message to a **channel** or **DM a user** on lifecycle events, reached through the Slack Web API with the token named by `slack.apiKeyEnv`. It is **off by default**, and the example ships with no channel or user so the block stays workspace-agnostic.
@@ -907,6 +941,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, adaptive image description, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt explains it (see [Vision tool](#vision-tool)) |
 | `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true` except `watch`, `10000` | post lifecycle events to a Slack channel or DM a user, threading a task's later events under its start (see [Slack notifications](#slack-notifications)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
+| `judge.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.onFail`, `.minConfidence`, `.maxPerTask`, `.includeDiff`, `.maxDiffBytes`, `.timeoutMin` | `false`, the `watch` block's, `fail`, `0.7`, `1`, `true`, `20000`, `10` | independent read-only completion judge after a task's verify passes: checks the task's intent against the work that landed and can demote a confident rejection (see [Judge](#judge)) |
 | `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.onBlocked`, `.rules.*`, `.decision`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `true`, `1`/`1`/`[task, verify]`/`proceed`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, when a task reports blocked, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
 

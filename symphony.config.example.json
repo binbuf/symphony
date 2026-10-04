@@ -169,6 +169,19 @@
     "modelProvider": "openrouter",
     "timeoutMin": 5
   },
+  "judge": {
+    "_judge": "Off by default. When enabled, after a task reports done and its verify passes, a separate read-only session reviews the task's Goal/Scope/acceptance against the worktree diff and returns pass/fail. onFail fail demotes a confident rejection so retry/escalation/breakdown re-engage; warn is advisory. Add \"judge\" to escalation.onCategories and breakdown.rules.onCategories to have those react to a rejected done.",
+    "enabled": false,
+    "provider": "opencode",
+    "model": "deepseek/deepseek-v4.1-flash",
+    "modelProvider": "openrouter",
+    "onFail": "fail",
+    "minConfidence": 0.7,
+    "maxPerTask": 1,
+    "includeDiff": true,
+    "maxDiffBytes": 20000,
+    "timeoutMin": 10
+  },
   "mcp": {
     "_mcp": "Off by default: the harness never touches a client's MCP config. With enabled:true each session gets only its selection — task front matter \"mcp:\"/\"capabilities:\" wins, then mcp.sessions.<kind>, then mcp.defaultServers; --mcp/--no-mcp override a run. A server needs a command (stdio) or url (remote) for claude/codex/opencode to enable or disable it inline; a name-only entry still works for Gemini's allowlist.",
     "enabled": false,

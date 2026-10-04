@@ -75,6 +75,27 @@ export function headAndTail(s: string, max: number): string {
   return `${t.slice(0, head)}${separator}${t.slice(t.length - (budget - head))}`;
 }
 
+/**
+ * Byte-budgeted head-and-tail truncation. Like `headAndTail`, but the cap is measured in UTF-8
+ * bytes (not UTF-16 code units) and neither boundary is allowed to split a code point. Used where the
+ * input is an arbitrary diff whose cap must hold against the real byte length.
+ */
+export function headAndTailBytes(s: string, maxBytes: number): string {
+  const buf = Buffer.from(s, 'utf8');
+  const limit = Math.max(0, Math.floor(maxBytes));
+  if (buf.length <= limit) return s;
+  const sep = Buffer.from('\n…\n', 'utf8');
+  if (limit <= sep.length) return buf.subarray(0, limit).toString('utf8');
+  const budget = limit - sep.length;
+  const headBytes = Math.ceil(budget * 0.6);
+  const tailBytes = budget - headBytes;
+  let headEnd = Math.min(headBytes, buf.length);
+  while (headEnd > 0 && (buf[headEnd] & 0xc0) === 0x80) headEnd--;
+  let tailStart = buf.length - tailBytes;
+  while (tailStart < buf.length && (buf[tailStart] & 0xc0) === 0x80) tailStart++;
+  return `${buf.subarray(0, headEnd).toString('utf8')}${sep.toString('utf8')}${buf.subarray(tailStart).toString('utf8')}`;
+}
+
 export function ensureDir(p: string): void {
   mkdirSync(p, { recursive: true });
 }
