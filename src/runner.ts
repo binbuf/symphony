@@ -5,7 +5,7 @@ import { classifyFailure, type Classified, type FailureEvidence } from './classi
 import { resolveEscalation, resolveFallback, resolveJudge, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
 import { writeProgressIndex } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
-import { commitAll, currentBranch, describeCommit } from './git.js';
+import { commitAll, currentBranch, describeCommit, headSha } from './git.js';
 import { contractsFor, dependencyClosure, isLandedSubset, parseAcceptance, summarizeAcceptance, topoOrder, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
 import { fireHook } from './hooks.js';
 import { classifyEscalation, classifySessionResult, jevProblem } from './jev.js';
@@ -251,7 +251,7 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
   const acceptance = parsedAcceptance.length ? parsedAcceptance : contract?.acceptance;
   // The changed-file list is always gathered — it is cheap and tells the read-only judge what to
   // open — while `includeDiff: false` only skips inlining the (potentially large) diff body.
-  const changes = collectChanges(paths.root, config.judge.maxDiffBytes, config.judge.includeDiff);
+  const changes = collectChanges(paths.root, config.judge.maxDiffBytes, config.judge.includeDiff, st.baseSha);
   const progressPath = join(paths.progressDir, `${task.id}.md`);
   const progressNote = existsSync(progressPath) ? readFileSync(progressPath, 'utf8') : undefined;
   const ev: JudgeEvidence = {
@@ -1129,6 +1129,9 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     st.attempts += 1;
     iterations += 1;
     st.started = nowIso();
+    // Record where this session began: the judge diffs against it so work the session committed
+    // itself (the prompt allows a `${id}:`-prefixed commit) is still visible as evidence.
+    st.baseSha = headSha(paths.root);
     st.provider = spec.providerName;
     st.model = spec.model;
     st.variant = spec.variant;
@@ -1521,6 +1524,7 @@ function recoverStaleRuns(ctx: RunContext): void {
     st.lastError = { category: 'interrupted', message: 'harness stopped mid-session', transient: true, fatal: false, at: nowIso() };
     delete st.pid;
     delete st.started;
+    delete st.baseSha;
     saveState(paths, state);
     patchRoadmap(ctx, task.id, 'failed');
     log.warn(`${task.id}: was left "running" by an unclean stop; recovered automatically and will be retried`);

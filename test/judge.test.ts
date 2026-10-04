@@ -55,10 +55,17 @@ test('parseJudgeAnswer reads the block and a bare verdict line, mapping pass/fai
   assert.equal(parseJudgeAnswer('verdict: failed')?.verdict, 'fail');
   assert.equal(parseJudgeAnswer('verdict: maybe'), undefined);
   assert.equal(parseJudgeAnswer('no verdict here'), undefined);
-  // An out-of-range confidence is dropped rather than trusted.
-  assert.equal(parseJudgeAnswer('verdict: fail\nconfidence: 7\nsummary: x')?.confidence, undefined);
+  // A confidence written as a percentage is normalized so a confident fail is not downgraded; a
+  // nonsensical value is dropped rather than trusted.
+  assert.equal(parseJudgeAnswer('verdict: fail\nconfidence: 90\nsummary: x')?.confidence, 0.9);
+  assert.equal(parseJudgeAnswer('verdict: fail\nconfidence: 90%\nsummary: x')?.confidence, 0.9);
+  assert.equal(parseJudgeAnswer('verdict: fail\nconfidence: 250\nsummary: x')?.confidence, undefined);
   // A missing summary still yields a usable verdict.
   assert.equal(parseJudgeAnswer('SYMPHONY_JUDGE\nverdict: pass\nEND_SYMPHONY_JUDGE')?.summary, 'judge passed the completion');
+  // A summary wrapped over an indented continuation line is kept whole.
+  assert.equal(parseJudgeAnswer('verdict: fail\nconfidence: 0.9\nsummary: the export path is missing\n  and no test covers it')?.summary, 'the export path is missing and no test covers it');
+  // A `summary:` before the verdict (an echoed intro) is not mistaken for the verdict's own.
+  assert.equal(parseJudgeAnswer('SYMPHONY_JUDGE\nsummary: echoed intro\nverdict: fail\nsummary: the real one\nEND_SYMPHONY_JUDGE')?.summary, 'the real one');
   // A malformed block with no usable verdict still falls back to a verdict written just outside it.
   assert.equal(parseJudgeAnswer('SYMPHONY_JUDGE\n(no fields)\nEND_SYMPHONY_JUDGE\nverdict: fail\nsummary: missed scope')?.verdict, 'fail');
   // The bare-line fallback prefers the last verdict, so an echoed example cannot override the answer.
@@ -88,6 +95,15 @@ test('buildJudgePrompt is self-contained and leaks no placeholder', () => {
   assert.match(text, /ignore them when deciding/);
   assert.match(text, /SYMPHONY_JUDGE/);
   assert.match(text, /END_SYMPHONY_JUDGE/);
+});
+
+test('buildJudgePrompt words the verify intro for the actual verify state', () => {
+  const withVerify = buildJudgePrompt({ taskId: 'T1', taskTitle: 't', taskPhase: 'P', status: 'done', attempts: 1, verifyCommand: 'npm test', verifyOk: true });
+  assert.match(withVerify, /ran the project.s own verify command .* and it passed/);
+  // With no verify command the prompt must not claim a mechanical check backed the work.
+  const noVerify = buildJudgePrompt({ taskId: 'T1', taskTitle: 't', taskPhase: 'P', status: 'done', attempts: 1 });
+  assert.match(noVerify, /No verify command is configured for this task/);
+  assert.doesNotMatch(noVerify, /already ran the project/);
 });
 
 test('collectChanges names untracked files and captures tracked edits', () => {
@@ -341,6 +357,21 @@ test('collectChanges caps the diff by bytes without splitting code points', () =
   const changes = collectChanges(dir, 500);
   assert.equal(changes.truncated, true);
   assert.ok(Buffer.byteLength(changes.diff, 'utf8') <= 500, `diff is ${Buffer.byteLength(changes.diff, 'utf8')} bytes`);
+});
+
+test('collectChanges diffs against the session base so self-committed work is visible', () => {
+  const { dir } = project('# R\n');
+  writeFileSync(join(dir, 'a.txt'), 'one\n');
+  execFileSync('git', ['-C', dir, 'add', 'a.txt']);
+  execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+  const base = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD']).toString().trim();
+  // The session commits its own work: nothing is left in `git status`, but the judge must still see it.
+  writeFileSync(join(dir, 'a.txt'), 'one\ntwo\n');
+  execFileSync('git', ['-C', dir, 'add', 'a.txt']);
+  execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'T01: do it']);
+  const changes = collectChanges(dir, 20_000, true, base);
+  assert.ok(changes.files.includes('a.txt'), changes.files.join(', '));
+  assert.match(changes.diff, /\+two/);
 });
 
 test('collectChanges with includeDiff:false still lists changed files but omits the diff body', () => {

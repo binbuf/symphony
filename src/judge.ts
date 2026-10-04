@@ -83,23 +83,52 @@ const JUDGE_RE = /SYMPHONY_JUDGE[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*END_SYMPHONY_JUD
 
 type ParsedJudge = { verdict: JudgeVerdictKind; confidence?: number; summary: string; gaps?: string };
 
-/** Read the verdict fields from one block of text, or undefined when it carries no usable verdict. */
+/**
+ * Read a `key:` field from `body`, joining indented continuation lines up to the next field or the
+ * block's end marker. A value the model wrapped over several lines is kept whole rather than being
+ * truncated to its first line.
+ */
+function readField(body: string, key: string): string | undefined {
+  const m = new RegExp(`^[ \\t]*${key}[ \\t]*:[ \\t]*(.*)$`, 'im').exec(body);
+  if (!m) return undefined;
+  const parts = [m[1].trim()];
+  const lines = body.slice(m.index).split(/\r?\n/);
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    // A continuation must be indented; an unindented line starts a new field or prose.
+    if (!/^[ \t]+\S/.test(line)) break;
+    if (/^[ \t]*(verdict|confidence|summary|gaps)[ \t]*:/i.test(line) || /^[ \t]*END_SYMPHONY_JUDGE/i.test(line)) break;
+    parts.push(line.trim());
+    if (parts.join(' ').length > 800) break;
+  }
+  return parts.join(' ').trim() || undefined;
+}
+
+/**
+ * Read the verdict fields from one block of text, or undefined when it carries no usable verdict.
+ * Fields are read from the `verdict:` line onward so an unrelated `summary:` earlier in the block
+ * cannot be mistaken for this verdict's.
+ */
 function readJudgeFields(body: string): ParsedJudge | undefined {
   const verdict = /^[ \t]*verdict[ \t]*:[ \t]*([A-Za-z]+)/im.exec(body);
   if (!verdict) return undefined;
   const word = verdict[1].toLowerCase();
   const kind: JudgeVerdictKind | undefined = word === 'pass' || word === 'passed' ? 'pass' : word === 'fail' || word === 'failed' ? 'fail' : undefined;
   if (!kind) return undefined;
-  const confidenceRaw = /^[ \t]*confidence[ \t]*:[ \t]*([0-9]*\.?[0-9]+)/im.exec(body);
+  const rest = body.slice(verdict.index);
+  const confidenceRaw = /^[ \t]*confidence[ \t]*:[ \t]*([0-9]*\.?[0-9]+)[ \t]*%?/im.exec(rest);
   let confidence = confidenceRaw ? Number(confidenceRaw[1]) : undefined;
+  // A model that answers a percent (`90` or `90%`) still means 0.9; normalize before range-checking so
+  // a confident fail is not silently downgraded to advisory for writing the confidence the wrong way.
+  if (confidence !== undefined && confidence > 1 && confidence <= 100) confidence /= 100;
   if (confidence !== undefined && (confidence < 0 || confidence > 1 || !Number.isFinite(confidence))) confidence = undefined;
-  const summary = /^[ \t]*summary[ \t]*:[ \t]*(.+)$/im.exec(body);
-  const gaps = /^[ \t]*gaps[ \t]*:[ \t]*(.+)$/im.exec(body);
+  const summary = readField(rest, 'summary');
+  const gaps = readField(rest, 'gaps');
   return {
     verdict: kind,
     confidence,
-    summary: summary ? squash(summary[1], 300) : kind === 'pass' ? 'judge passed the completion' : 'judge rejected the completion',
-    gaps: gaps ? squash(gaps[1], 400) : undefined,
+    summary: summary ? squash(summary, 300) : kind === 'pass' ? 'judge passed the completion' : 'judge rejected the completion',
+    gaps: gaps ? squash(gaps, 400) : undefined,
   };
 }
 
@@ -134,12 +163,17 @@ export function buildJudgePrompt(ev: JudgeEvidence): string {
     : '- (the task file declares no acceptance checkboxes)';
 
   const verify: string[] = [];
+  let verifyIntro: string;
   if (ev.verifyCommand) {
     verify.push(`- command: \`${ev.verifyCommand}\``);
     verify.push(`- result: ${ev.verifyOk ? 'passed' : 'failed or not run'}`);
     if (ev.verifyOutput) { verify.push('', '```', headAndTailBytes(ev.verifyOutput, 4000), '```'); }
+    verifyIntro = ev.verifyOk
+      ? 'The harness already ran the project\u2019s own verify command (tests/build) and it passed.'
+      : 'The project\u2019s own verify command was configured but did not pass; weigh that when deciding.';
   } else {
     verify.push('- (no verify command is configured; the judge is the only independent check)');
+    verifyIntro = 'No verify command is configured for this task, so your verdict is the only independent completion check.';
   }
 
   const diff: string[] = [];
@@ -165,6 +199,7 @@ export function buildJudgePrompt(ev: JudgeEvidence): string {
     attempts: ev.attempts,
     taskBody: ev.taskBody?.trim() ? headAndTailBytes(ev.taskBody, 12_000) : '(no task file — the roadmap bullet is the whole task)',
     acceptance,
+    verifyIntro,
     verifySection: verify.join('\n'),
     diffSection: diff.join('\n'),
     sessionSummary: ev.sessionSummary?.trim() ? squash(ev.sessionSummary, 1500) : '(no summary reported)',
@@ -212,20 +247,32 @@ function truncateDiffFiles(diff: string, maxBytes: number): string {
 }
 
 /**
- * Snapshot the uncommitted worktree as evidence: the changed-file list plus a diff against HEAD.
- * Untracked files (agent-created sources) are not in `git diff`, so they are named so the read-only
- * judge can open them directly. The file list is always gathered; `includeDiff: false` only skips
- * the (potentially large) diff body, leaving the judge the names it needs to read files directly.
- * Never throws.
+ * Snapshot the worktree as evidence: the changed-file list plus a diff against `since` (default
+ * HEAD). Untracked files (agent-created sources) are not in `git diff`, so they are named so the
+ * read-only judge can open them directly. When `since` is an older commit — the task's session start
+ * — committed changes are absent from `git status`, so the file list is widened to the name-only diff
+ * and the diff body spans both committed and uncommitted work (a session may commit its own task).
+ * The file list is always gathered; `includeDiff: false` only skips the (potentially large) diff body,
+ * leaving the judge the names it needs to read files directly. Never throws.
  */
-export function collectChanges(root: string, maxBytes: number, includeDiff = true): { files: string[]; diff: string; truncated: boolean } {
+export function collectChanges(root: string, maxBytes: number, includeDiff = true, since?: string): { files: string[]; diff: string; truncated: boolean } {
   try {
+    const rev = since && since.trim() ? since.trim() : 'HEAD';
+    const base = rev === 'HEAD' ? undefined : rev;
     const status = git(root, ['status', '--porcelain']);
-    const files = status.code === 0 && status.stdout
+    let files = status.code === 0 && status.stdout
       ? [...new Set(status.stdout.split('\n').filter(Boolean).map((l) => porcelainPath(l)).filter(Boolean))]
       : [];
+    // Against an older base, tracked files the session committed are missing from `status`; add the
+    // full name-only diff so the judge still sees them.
+    if (base) {
+      const names = git(root, ['diff', '--name-only', '--no-color', base]);
+      if (names.code === 0 && names.stdout) {
+        files = [...new Set([...files, ...names.stdout.split('\n').filter(Boolean).map((f) => f.trim().replace(/\\/g, '/'))])];
+      }
+    }
     if (!includeDiff) return { files, diff: '', truncated: false };
-    const d = git(root, ['diff', '--no-color', 'HEAD']);
+    const d = git(root, ['diff', '--no-color', rev]);
     const raw = d.code === 0 ? d.stdout : '';
     const untracked = untrackedFiles(root);
     const note = untracked.length ? `\n# untracked files (not shown in the diff; read them directly):\n${untracked.map((f) => `#   ${f}`).join('\n')}\n` : '';

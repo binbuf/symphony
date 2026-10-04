@@ -18,6 +18,12 @@ export function gitToplevel(root: string): string | undefined {
   return r.code === 0 ? r.stdout : undefined;
 }
 
+/** Current HEAD commit hash, or undefined on an unborn branch (or outside a repo). */
+export function headSha(root: string): string | undefined {
+  const r = git(root, ['rev-parse', 'HEAD']);
+  return r.code === 0 && r.stdout ? r.stdout : undefined;
+}
+
 /** Current branch name; works on an unborn branch (before the first commit) and reports detached HEAD. */
 export function currentBranch(root: string): string {
   const sym = git(root, ['symbolic-ref', '--short', '-q', 'HEAD']);

@@ -69,6 +69,12 @@ export interface TaskState {
   continuation?: number;
   started?: string;
   finished?: string;
+  /**
+   * HEAD at the start of this task's current session. The judge diffs the worktree against it (not
+   * just `HEAD`) so a session that committed its own work with the `${id}:` prefix still shows what
+   * landed instead of an empty diff.
+   */
+  baseSha?: string;
   durationS: number;
   costUsd?: number;
   /** Provider-reported token usage summed across this task's sessions, when any reported it. */
