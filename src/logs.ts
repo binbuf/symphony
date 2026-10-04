@@ -64,11 +64,6 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
     if (j.enforced) lines.push('- enforced: the done was demoted to failed and re-entered the recovery path');
     lines.push(`- summary: ${j.summary}`);
     if (j.gaps) lines.push(`- gaps: ${j.gaps}`);
-    if (j.jev) {
-      const jv = j.jev;
-      const outcome = !jv.decisive ? 'inconclusive; the judge\'s decision stood' : jv.agreed ? 'confirmed the rejection' : 'declined; the done stood';
-      lines.push(`- Jev cross-check: ${jv.verdict.toUpperCase()}${jv.confidence !== undefined ? ` (${Math.round(jv.confidence * 100)}%)` : ''} · ${outcome}${jv.model ? ` · ${jv.model}` : ''}`);
-    }
   }
   lines.push('');
   lines.push('## Sessions');

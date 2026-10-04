@@ -124,8 +124,6 @@ export interface JevConfig {
   enabled: boolean;
   /** Workflow: settle a session that ended cleanly without a SYMPHONY_RESULT block. */
   resultFallback: boolean;
-  /** Workflow: place a failure the regex classifier could not (the `unknown` bucket). */
-  failureTriage: boolean;
   /** Workflow: read the task + failure and decide whether escalating to the escalation model is worth it. */
   escalationDecision: boolean;
   /** Workflow: read the task and its progress and answer split / proceed / escalate / stop for an automatic breakdown. */
@@ -235,15 +233,6 @@ export interface JudgeConfig {
   maxDiffBytes: number;
   /** Hard wall clock for one judge session; on timeout the `done` is accepted as reported. */
   timeoutMin: number;
-  /**
-   * Independent Jev cross-check before an enforceable rejection. Requires `jev.enabled` too. When a
-   * confident failing verdict is about to demote the `done`, Jev reviews the same inlined evidence
-   * (it cannot read the worktree) and its verdict is treated as a second read: a decisive `fail`
-   * confirms the rejection and a decisive `pass` vetoes it (the done stands). An inconclusive Jev —
-   * no answer, unavailable, or below `jev.minConfidence` — falls back to the judge's own decision.
-   * Jev can therefore never manufacture a rejection the judge did not already reach. Off by default.
-   */
-  jev: boolean;
 }
 
 /**
@@ -680,7 +669,6 @@ export const DEFAULTS: Config = {
   jev: {
     enabled: false,
     resultFallback: true,
-    failureTriage: true,
     escalationDecision: true,
     breakdownDecision: true,
     provider: 'openrouter',
@@ -745,7 +733,6 @@ export const DEFAULTS: Config = {
     includeDiff: true,
     maxDiffBytes: 20_000,
     timeoutMin: 10,
-    jev: false,
   },
   mcp: {
     enabled: false,
@@ -1249,7 +1236,6 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
       return {
         enabled,
         resultFallback: boolOr(jevRaw.resultFallback, DEFAULTS.jev.resultFallback, 'jev.resultFallback', warnings),
-        failureTriage: boolOr(jevRaw.failureTriage, DEFAULTS.jev.failureTriage, 'jev.failureTriage', warnings),
         escalationDecision: boolOr(jevRaw.escalationDecision, DEFAULTS.jev.escalationDecision, 'jev.escalationDecision', warnings),
         breakdownDecision: boolOr(jevRaw.breakdownDecision, DEFAULTS.jev.breakdownDecision, 'jev.breakdownDecision', warnings),
         provider,
@@ -1402,7 +1388,6 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         includeDiff: boolOr(judgeRaw.includeDiff, DEFAULTS.judge.includeDiff, 'judge.includeDiff', warnings),
         maxDiffBytes: positiveOr(judgeRaw.maxDiffBytes, DEFAULTS.judge.maxDiffBytes, 'judge.maxDiffBytes', warnings),
         timeoutMin: positiveOr(judgeRaw.timeoutMin, DEFAULTS.judge.timeoutMin, 'judge.timeoutMin', warnings),
-        jev: boolOr(judgeRaw.jev, DEFAULTS.judge.jev, 'judge.jev', warnings),
       };
     })(),
     mcp: {

@@ -1,4 +1,3 @@
-import type { ErrorCategory } from './classify.js';
 import type { JevConfig, JevProviderName } from './config.js';
 import type { ReportedStatus } from './result.js';
 import { headAndTail, isRecord, squash } from './util.js';
@@ -10,27 +9,6 @@ const BASE_URLS: Record<JevProviderName, string> = {
 
 const STATUSES: ReportedStatus[] = ['done', 'continue', 'blocked', 'failed'];
 
-/**
- * Categories Jev may assign to a failure the harness could not classify itself. Only the ones whose
- * handling differs are offered; harness-set categories (timeout, stall, interrupted, budget, …) are
- * derived from evidence the model never sees.
- */
-export const JEV_ERROR_CATEGORIES: ErrorCategory[] = ['auth', 'billing', 'usage_limit', 'rate_limit', 'overloaded', 'server', 'network', 'model', 'config', 'task', 'unknown'];
-
-const ERROR_CRITERIA: Record<string, string> = {
-  auth: 'Credentials, token, login or permission problem with the provider.',
-  billing: 'Payment, credits or account balance problem (e.g. 402, out of credits).',
-  usage_limit: 'A subscription or plan usage limit was hit; it resets later.',
-  rate_limit: 'Too many requests or throttling (e.g. 429); retrying shortly may work.',
-  overloaded: 'The provider is overloaded or at capacity (e.g. 529).',
-  server: 'A provider-side 5xx or internal server error.',
-  network: 'A transport problem: connection reset/refused, DNS, socket, fetch failure.',
-  model: 'The requested model does not exist or is not available.',
-  config: 'Bad flags, arguments or request shape (unknown option, invalid request).',
-  task: 'No provider problem: the agent simply did not complete the task.',
-  unknown: 'None of the above, or the evidence is too thin to tell.',
-};
-
 export interface JevDecision {
   status: ReportedStatus;
   /** Jev's confidence in the chosen option, 0..1. */
@@ -40,14 +18,6 @@ export interface JevDecision {
   /** The dated model snapshot that served the request. */
   model?: string;
   /** What the call cost, from the response's usage block. */
-  costUsd?: number;
-}
-
-export interface JevErrorDecision {
-  category: ErrorCategory;
-  confidence: number;
-  probabilities?: Record<string, number>;
-  model?: string;
   costUsd?: number;
 }
 
@@ -188,32 +158,6 @@ export async function classifySessionResult(
     deps,
   );
   const decision = parseDecision(json);
-  if (!decision && json !== undefined) deps.note?.(`unusable answer: ${describeAnswer(json)}`);
-  return decision;
-}
-
-/**
- * Ask Jev to place a failure the harness could not classify into one of the categories it already
- * understands. The harness's regex stays the primary classifier; this only fills the `unknown` gap.
- */
-export async function classifyError(
-  config: JevConfig,
-  input: { evidence: string; exitCode?: number | null; resultSubtype?: string },
-  deps: JevDeps = {},
-): Promise<JevErrorDecision | undefined> {
-  const json = await callSystemOne(
-    config,
-    { error_text: tail(input.evidence, 8000), exit_code: input.exitCode ?? null, result_subtype: input.resultSubtype ?? null },
-    {
-      category: {
-        type: 'choice',
-        instructions: 'A coding-agent CLI session failed and its error text did not match any known pattern. Which single category best describes the failure?',
-        criteria: ERROR_CRITERIA,
-      },
-    },
-    deps,
-  );
-  const decision = parseErrorDecision(json);
   if (!decision && json !== undefined) deps.note?.(`unusable answer: ${describeAnswer(json)}`);
   return decision;
 }
@@ -402,66 +346,4 @@ export function parseDecision(json: unknown): JevDecision | undefined {
   const choice = readChoice(json, 'disposition');
   if (!choice || !(STATUSES as string[]).includes(choice.choice)) return undefined;
   return { status: choice.choice as ReportedStatus, confidence: choice.confidence, probabilities: choice.probabilities, model: choice.model, costUsd: choice.costUsd };
-}
-
-/** The two options Jev weighs when independently reviewing a judge's rejection of a `done`. */
-export const COMPLETION_OPTIONS = ['pass', 'fail'] as const;
-
-export interface JevCompletionDecision {
-  verdict: 'pass' | 'fail';
-  confidence: number;
-  probabilities?: Record<string, number>;
-  /** The dated model snapshot that served the request. */
-  model?: string;
-  costUsd?: number;
-}
-
-/**
- * Ask Jev to independently review a completion a judge is about to reject. Used only as a
- * cross-check before an enforceable rejection: Jev sees the same inlined evidence the judge did
- * (it cannot read the worktree) and can only *soften* the decision. A confident `fail` agrees the
- * demotion should proceed; anything else declines it. The judge remains the primary reader.
- */
-export async function classifyCompletion(
-  config: JevConfig,
-  input: { taskTitle: string; taskBody?: string; acceptance?: string; verify?: string; evidence: string },
-  deps: JevDeps = {},
-): Promise<JevCompletionDecision | undefined> {
-  const json = await callSystemOne(
-    config,
-    {
-      task: { title: input.taskTitle, body: input.taskBody ? headAndTail(input.taskBody, 8000) : null },
-      acceptance: input.acceptance ?? null,
-      verify: input.verify ?? null,
-      reviewer_evidence: input.evidence ? headAndTail(input.evidence, 8000) : null,
-    },
-    {
-      verdict: {
-        type: 'choice',
-        instructions: 'A coding task reported done and an independent reviewer judged it FAIL, naming the gaps below. Judging only the evidence provided, should the completion actually be rejected?',
-        criteria: {
-          pass: 'The requested work is present and satisfies the task\'s own scope and blocking acceptance items; the reviewer\'s rejection is not warranted.',
-          fail: 'A blocking acceptance item is unmet, the named scope is missing or only stubbed, the work contradicts the task, or the change the task asked for is absent — the rejection is warranted.',
-        },
-      },
-    },
-    deps,
-  );
-  const decision = parseCompletionDecision(json);
-  if (!decision && json !== undefined) deps.note?.(`unusable answer: ${describeAnswer(json)}`);
-  return decision;
-}
-
-/** Read the `verdict` choice of a completion review. Exported for tests. */
-export function parseCompletionDecision(json: unknown): JevCompletionDecision | undefined {
-  const choice = readChoice(json, 'verdict');
-  if (!choice || !(COMPLETION_OPTIONS as readonly string[]).includes(choice.choice)) return undefined;
-  return { verdict: choice.choice as 'pass' | 'fail', confidence: choice.confidence, probabilities: choice.probabilities, model: choice.model, costUsd: choice.costUsd };
-}
-
-/** Read the `category` choice out of a System One response. Exported for tests. */
-export function parseErrorDecision(json: unknown): JevErrorDecision | undefined {
-  const choice = readChoice(json, 'category');
-  if (!choice || !(JEV_ERROR_CATEGORIES as string[]).includes(choice.choice)) return undefined;
-  return { category: choice.choice as ErrorCategory, confidence: choice.confidence, probabilities: choice.probabilities, model: choice.model, costUsd: choice.costUsd };
 }

@@ -1230,15 +1230,6 @@ test('Jev may not end a task as failed by default; the nudge runs instead', asyn
   }
 });
 
-/** A fetch double for the Jev error-classification call. */
-function jevErrorFetch(category: string, confidence: number): typeof fetch {
-  return (async () => new Response(JSON.stringify({
-    model: 'typesafe/jev-1.13',
-    answers: { category: { type: 'choice', choice: category, confidence } },
-    usage: { cost: 0.00001 },
-  }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
-}
-
 /** A session that failed with error text no classifyFailure rule matches. */
 function unclassifiedFailureFixture(dir: string): void {
   writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
@@ -1247,59 +1238,16 @@ function unclassifiedFailureFixture(dir: string): void {
   ].join('\n') + '\n');
 }
 
-test('an unclassified failure is retried when Jev reads it as transient', async () => {
-  const { dir, paths, task } = project();
-  unclassifiedFailureFixture(dir);
-  writeFileSync(join(dir, 'fixtures', 'T01.resume.jsonl'), [
-    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
-    claudeResult('done', 'recovered on retry'),
-  ].join('\n') + '\n');
-  const state: State = loadState(paths);
-  const config = { ...DEFAULTS, provider: 'fake' as const, retry: { maxAttempts: 2, backoffSec: [0] }, jev: { ...DEFAULTS.jev, enabled: true } };
-  const warnings: string[] = [];
-  const log: Logger = { info() {}, warn: (m) => warnings.push(m), error() {}, plain() {}, banner() {} };
-  const ctx: RunContext = { paths, config, cli: {}, flags, log, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: jevErrorFetch('server', 0.9) };
-  process.env.OPENROUTER_API_KEY = 'sk-or-test';
-  try {
-    const out = await runTask(ctx, task);
-    assert.equal(out.status, 'done');
-    assert.equal(state.tasks.T01.attempts, 1); // a transient retry is not a task attempt
-    assert.equal(state.tasks.T01.transientRetries, 1); // but it is recorded as a retry
-    assert.ok(warnings.some((l) => /Jev reads it as server/.test(l)), warnings.join('\n'));
-  } finally {
-    delete process.env.OPENROUTER_API_KEY;
-    delete process.env.SYMPHONY_FAKE_FIXTURES;
-  }
-});
-
-test('a low-confidence Jev failure triage still charges the call that was made', async () => {
-  const { dir, paths, task } = project();
-  unclassifiedFailureFixture(dir);
-  const state: State = loadState(paths);
-  const config = { ...DEFAULTS, provider: 'fake' as const, retry: { maxAttempts: 2, backoffSec: [0] }, jev: { ...DEFAULTS.jev, enabled: true } };
-  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: jevErrorFetch('server', 0.3) };
-  process.env.OPENROUTER_API_KEY = 'sk-or-test';
-  try {
-    const out = await runTask(ctx, task);
-    assert.equal(out.status, 'failed'); // the answer was too weak to change the unknown category
-    assert.equal(state.tasks.T01.lastError?.category, 'unknown');
-    assert.equal(state.tasks.T01.costUsd, 0.00001); // but the call was paid for
-  } finally {
-    delete process.env.OPENROUTER_API_KEY;
-    delete process.env.SYMPHONY_FAKE_FIXTURES;
-  }
-});
-
-test('the same unclassified failure stays terminal when Jev is off', async () => {
+test('an unclassified failure stays terminal', async () => {
   const { dir, paths, task } = project();
   unclassifiedFailureFixture(dir);
   const state: State = loadState(paths);
   const config = { ...DEFAULTS, provider: 'fake' as const, retry: { maxAttempts: 2, backoffSec: [0] } };
-  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl: jevErrorFetch('server', 0.9) };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
   try {
     const out = await runTask(ctx, task);
     assert.equal(out.status, 'failed');
-    assert.equal(state.tasks.T01.attempts, 1); // no tie-breaker, no retry
+    assert.equal(state.tasks.T01.attempts, 1); // no rule matched, so no retry
     assert.equal(state.tasks.T01.lastError?.category, 'unknown');
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
@@ -1427,7 +1375,7 @@ test('run halts when Jev is enabled but its API key is missing', async () => {
 test('Jev enabled with no workflow armed does not halt for a missing key', async () => {
   const { paths, task } = project();
   const state: State = loadState(paths);
-  const jev = { ...DEFAULTS.jev, enabled: true, resultFallback: false, failureTriage: false, escalationDecision: false, breakdownDecision: false };
+  const jev = { ...DEFAULTS.jev, enabled: true, resultFallback: false, escalationDecision: false, breakdownDecision: false };
   const config = { ...DEFAULTS, provider: 'fake' as const, jev };
   const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
   const saved = process.env.OPENROUTER_API_KEY;

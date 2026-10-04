@@ -638,13 +638,12 @@ Every session records the provider and model that ran it in `docs/logs/TNN.md`, 
 
 **Jev** — TypeSafe's System One decision model — makes fast, typed calls that replace brittle hand-written decisions in the harness. It is reached through [OpenRouter](https://openrouter.ai/settings/keys), so your OpenRouter key is all you need. Jev is off by default. When it is enabled, at least one workflow is armed, and its API key is missing, the run halts rather than run with the decision workflows silently disabled (with no workflow armed there is nothing to disable, so the run proceeds); a timeout or a low-confidence answer still falls back to the harness's own deterministic behavior.
 
-It runs up to four independent **workflows**, each behind its own flag:
+It runs up to three independent **workflows**, each behind its own flag:
 
 ```json
 "jev": {
   "enabled": true,
   "resultFallback": true,
-  "failureTriage": true,
   "escalationDecision": true,
   "breakdownDecision": true,
   "provider": "openrouter",
@@ -660,7 +659,6 @@ It runs up to four independent **workflows**, each behind its own flag:
 |---|---|---|
 | `enabled` | `false` | master switch for every workflow below |
 | `resultFallback` | `true` | settle a session that omitted its `SYMPHONY_RESULT` block |
-| `failureTriage` | `true` | place a failure the regex classifier could not |
 | `escalationDecision` | `true` | decide whether a failed task is worth escalating |
 | `breakdownDecision` | `true` | decide split / replan / carry on / escalate / stop for an open [automatic breakdown](#automatic-breakdowns) |
 | `provider` | `openrouter` | where the System One call goes; `baseUrl` overrides it |
@@ -671,17 +669,11 @@ It runs up to four independent **workflows**, each behind its own flag:
 | `minConfidence` | `0.7` | below this the answer is discarded and the deterministic path runs |
 | `acceptStatuses` | `[done, continue]` | dispositions `resultFallback` may settle |
 
-The [judge](#judge) can also use Jev, through `judge.jev` in the judge stanza (not listed above): with both that and `jev.enabled` set, an enforceable rejection is cross-checked by Jev first. It counts as an armed workflow for the missing-key halt.
-
 ### `resultFallback`
 
 A session that ended cleanly without a `SYMPHONY_RESULT` block is normally recovered by **nudging**: resuming it and asking it to report, at the cost of a whole extra session. With this on, Jev reads the task title and the tail of the output and answers a `choice` — `done`, `continue`, `blocked`, or `failed`. A confident answer in `acceptStatuses` settles the session and skips the nudge; otherwise the nudge runs exactly as before.
 
 `acceptStatuses` defaults to `done` and `continue` on purpose: those are the safe, high-value cases, while ending a task as `blocked` or `failed` stays with the agent. A Jev-classified `done` still has to pass the harness's own `verify`, so it cannot smuggle a finished-looking session past the independent check.
-
-### `failureTriage`
-
-`classifyFailure` is a set of hand-written regex rules over the provider's error text, backed by structured signals when the adapter can see them: an HTTP `429`/`5xx`, a provider `isRetryable`, or any provider `error` event becomes a transient retry even when the wording is unrecognised (an unrecognised `4xx` stays terminal, since it is a request problem, not a throttle). When none match and no such signal exists, the failure lands in `unknown`, which the harness treats as terminal and does not retry. With this on, that `unknown` is put to a `choice` — `auth`, `billing`, `usage_limit`, `rate_limit`, `overloaded`, `server`, `network`, `model`, `config`, `task`, or `unknown` — and the answer is mapped back through the harness's own fatal/transient rules, so a `server` or `rate_limit` becomes a retry that might have succeeded anyway. The regex stays primary: Jev is consulted only when the rules admit they do not know. Unlike the others, this workflow can halt a run (a Jev-classified `auth` is fatal), so tune `minConfidence` against your own error logs before leaving it unattended.
 
 ### `escalationDecision`
 
@@ -779,8 +771,7 @@ The [verify command](#the-lifecycle) checks what it was told to check — tests,
   "maxPerTask": 1,
   "includeDiff": true,
   "maxDiffBytes": 20000,
-  "timeoutMin": 10,
-  "jev": false
+  "timeoutMin": 10
 }
 ```
 
@@ -794,13 +785,10 @@ The [verify command](#the-lifecycle) checks what it was told to check — tests,
 | `includeDiff` | `true` | inline the worktree diff so the read-only session can see what changed |
 | `maxDiffBytes` | `20000` | byte cap for the inlined diff |
 | `timeoutMin` | `10` | hard wall clock for one judge session; on timeout the `done` is accepted as reported |
-| `jev` | `false` | cross-check an enforceable rejection with [Jev](#jev) before demoting the `done`; requires `jev.enabled` too. Jev reviews the same inlined evidence (it cannot read the worktree) as a second read: a decisive `fail` confirms the rejection, a decisive `pass` vetoes it (the done stands), and an inconclusive Jev — no answer, unavailable, or below `jev.minConfidence` — leaves the judge's own decision in force. Jev can never manufacture a rejection the judge did not already reach |
 
 The judge is **advisory by construction when uncertain**: a verdict below `minConfidence`, a verdict that reports no confidence, a session that times out, a provider that is missing or errors, and any unparseable answer all fall back to *accepting the `done` as reported*. It can only ever stop a task the run was about to mark done; it never adds work. The latest verdict is recorded on the task and written to its `docs/logs/TNN.md` under `## Judge`, so a rejected completion is visible in the committed log, and the judge provider is preflighted with the rest of the run so a missing binary is reported before the first task starts.
 
 The judge sees the task's stated intent and the uncommitted worktree diff (untracked files are named so it can read them directly; harness-owned changes such as the ROADMAP status block and progress notes are labelled `[harness]` so they are not read as scope). It runs pinned to read-only (`autoApprove: false`, `readOnly: true`), but how far that is *enforced* is provider-dependent, exactly as for the [pipeline watcher](#pipeline-watch): `claude` and `codex` run in an explicit read-only sandbox, while the other CLIs rely on their default, where reads are permitted and writes are not auto-approved. Because it runs before the task's commit, an enforced rejection sends the task back through the normal failure path and the task's work stays in the tree for the retry.
-
-**Jev cross-check.** With `judge.jev: true` and `jev.enabled: true`, a *confident failing* verdict that would demote the `done` is first handed to [Jev](#jev) as an independent second read of the same inlined evidence (the task body, acceptance, verify result and diff). Jev cannot read the worktree, so its verdict is used only as a second opinion: a decisive Jev `fail` above `jev.minConfidence` confirms the judge's rejection and the demotion proceeds, while a decisive Jev `pass` declines it and the `done` stands. An inconclusive Jev — no usable answer, an unavailable key, a timeout, or an answer below the confidence bar — falls back to the judge's own decision (the rejection is enforced). Jev therefore never manufactures a rejection the judge did not already reach, and it is the one that vetoes a rejection, not the reverse. The cross-check is charged like any Jev call and recorded as its own `judge` step (provider `jev`), and the decision is written to the task log under `## Judge`.
 
 **Tracking each run.** Every judge session is recorded as its own step on the task from the moment it starts, so it is visible as it happens: the [run view](#the-lifecycle) shows a `run N · judge` row under the task — `running`, then the verdict as its status — and toasts each verdict (`T05 judge FAIL 82%`) and, when a rejection enforces a rerun, `→ rerun`; the generated `ROADMAP.md` status block gains a `Judge runs (N): T05 FAIL 82% · T05 PASS 88% · …` line (updated immediately when a run starts and again when it finishes, not only at the next task boundary, with `enforced` appended to a rejection that sent the task back); and the committed task log `docs/logs/TNN.md` lists the run under `## Sessions` alongside the `## Judge` verdict. Setting `slack.events.taskJudge: false` silences the `taskJudge` Slack post if the per-run noise is unwanted.
 
@@ -949,11 +937,11 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
 | `escalation.enabled`, `.provider`, `.model`, `.modelProvider`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `fallback.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.afterAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, –, `2`, `[rate_limit, overloaded, server, network, stall, crash]` | switch a task to a second provider/model after repeated transient infrastructure faults (see [Fallback](#fallback)) |
-| `jev.enabled`, `.resultFallback`, `.failureTriage`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `true`, `openrouter`, `typesafe/jev-1.13`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
+| `jev.enabled`, `.resultFallback`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `openrouter`, `typesafe/jev-1.13`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, adaptive image description, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt explains it (see [Vision tool](#vision-tool)) |
 | `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true` except `watch`, `10000` | post lifecycle events to a Slack channel or DM a user, threading a task's later events under its start (see [Slack notifications](#slack-notifications)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
-| `judge.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.onFail`, `.minConfidence`, `.maxPerTask`, `.includeDiff`, `.maxDiffBytes`, `.timeoutMin`, `.jev` | `false`, the `watch` block's, `fail`, `0.7`, `1`, `true`, `20000`, `10`, `false` | independent read-only completion judge after a task's verify passes: checks the task's intent against the work that landed and can demote a confident rejection (see [Judge](#judge)); `.jev` adds an independent [Jev](#jev) cross-check before a rejection is enforced |
+| `judge.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.onFail`, `.minConfidence`, `.maxPerTask`, `.includeDiff`, `.maxDiffBytes`, `.timeoutMin` | `false`, the `watch` block's, `fail`, `0.7`, `1`, `true`, `20000`, `10` | independent read-only completion judge after a task's verify passes: checks the task's intent against the work that landed and can demote a confident rejection (see [Judge](#judge)) |
 | `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.onBlocked`, `.rules.*`, `.decision`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `true`, `1`/`1`/`[task, verify]`/`proceed`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, when a task reports blocked, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
 

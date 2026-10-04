@@ -41,18 +41,6 @@ test('config file merges per provider and unknown keys warn', () => {
   assert.ok(warnings.some((w) => w.includes('bogus')));
 });
 
-test('judge.jev defaults off and parses on', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-'));
-  const paths = resolvePaths(dir);
-  mkdirSync(paths.symphony, { recursive: true });
-  assert.equal(loadConfig(paths, {}).config.judge.jev, false);
-  writeFileSync(paths.config, JSON.stringify({ judge: { enabled: true, jev: true } }));
-  const { config, warnings } = loadConfig(paths, {});
-  assert.equal(config.judge.enabled, true);
-  assert.equal(config.judge.jev, true);
-  assert.deepEqual(warnings, []);
-});
-
 test('retry backoff knobs parse, with warnings for out-of-range values', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-'));
   const paths = resolvePaths(dir);
@@ -490,7 +478,6 @@ test('jev config parses, defaults to OpenRouter with typesafe/jev-1.13, and vali
   assert.equal(DEFAULTS.jev.model, 'typesafe/jev-1.13');
   // Every workflow ships on, so flipping `enabled` turns them all on until you opt one out.
   assert.equal(DEFAULTS.jev.resultFallback, true);
-  assert.equal(DEFAULTS.jev.failureTriage, true);
   assert.equal(DEFAULTS.jev.escalationDecision, true);
   assert.equal(loadConfig(paths, {}).config.jev.enabled, false);
 
@@ -502,7 +489,6 @@ test('jev config parses, defaults to OpenRouter with typesafe/jev-1.13, and vali
   assert.deepEqual(config.jev.acceptStatuses, ['done']);
   assert.equal(config.jev.apiKeyEnv, 'OPENROUTER_API_KEY');
   assert.equal(config.jev.resultFallback, false);
-  assert.equal(config.jev.failureTriage, true);
   assert.equal(config.jev.escalationDecision, false);
   assert.equal(warnings.length, 0);
 

@@ -59,29 +59,10 @@ export interface JudgeVerdict {
   provider?: string;
   model?: string;
   /**
-   * Whether a failing verdict should be enforced (demote the `done`). Set by the runner after any
-   * `judge.jev` cross-check, so the caller does not have to re-derive it. Undefined when not applied.
+   * Whether a failing verdict should be enforced (demote the `done`). Set by the runner so the
+   * caller does not have to re-derive it. Undefined when not applied.
    */
   enforce?: boolean;
-  /** The independent Jev cross-check, when `judge.jev` ran before an enforceable rejection. */
-  jev?: JudgeJevCheck;
-}
-
-/** One independent Jev review of a rejection the judge is about to enforce. */
-export interface JudgeJevCheck {
-  verdict: JudgeVerdictKind;
-  confidence?: number;
-  /**
-   * True when Jev reached a usable opinion (a parsed verdict at or above `jev.minConfidence`).
-   * A decisive `fail` agrees with the rejection; a decisive `pass` disagrees. When not decisive
-   * — no answer, unavailable, or below the confidence bar — the judge's own decision stands.
-   */
-  decisive: boolean;
-  /** True when Jev agrees the completion should be rejected; only then is the rejection enforced. */
-  agreed: boolean;
-  summary?: string;
-  model?: string;
-  costUsd?: number;
 }
 
 export interface JudgeDeps {

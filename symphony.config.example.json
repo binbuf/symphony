@@ -114,7 +114,6 @@
   "jev": {
     "enabled": false,
     "resultFallback": true,
-    "failureTriage": true,
     "escalationDecision": true,
     "breakdownDecision": true,
     "provider": "openrouter",
@@ -181,8 +180,7 @@
     "maxPerTask": 1,
     "includeDiff": true,
     "maxDiffBytes": 20000,
-    "timeoutMin": 10,
-    "jev": false
+    "timeoutMin": 10
   },
   "mcp": {
     "_mcp": "Off by default: the harness never touches a client's MCP config. With enabled:true each session gets only its selection — task front matter \"mcp:\"/\"capabilities:\" wins, then mcp.sessions.<kind>, then mcp.defaultServers; --mcp/--no-mcp override a run. A server needs a command (stdio) or url (remote) for claude/codex/opencode to enable or disable it inline; a name-only entry still works for Gemini's allowlist.",

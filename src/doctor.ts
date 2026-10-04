@@ -128,7 +128,7 @@ export function runDoctor(i: DoctorInput): Check[] {
 
   if (i.config.jev.enabled) {
     const j = i.config.jev;
-    const workflows = [j.resultFallback ? 'resultFallback' : undefined, j.failureTriage ? 'failureTriage' : undefined, j.escalationDecision ? 'escalationDecision' : undefined, j.breakdownDecision ? 'breakdownDecision' : undefined].filter(Boolean);
+    const workflows = [j.resultFallback ? 'resultFallback' : undefined, j.escalationDecision ? 'escalationDecision' : undefined, j.breakdownDecision ? 'breakdownDecision' : undefined].filter(Boolean);
     const problem = jevProblem(j, process.env);
     const detail = `Jev [${workflows.join(', ') || 'no workflows'}] via ${j.provider} · ${j.model} (key from ${j.apiKeyEnv})`;
     const haltNote = workflows.length
@@ -156,8 +156,7 @@ export function runDoctor(i: DoctorInput): Check[] {
     const jdModelProvider = jd.modelProvider ?? i.config.watch.modelProvider ?? i.config.providers[jdProvider].modelProvider;
     const model = composeModel(jdProvider, jdModelProvider, jd.model || i.config.watch.model);
     const action = jd.onFail === 'fail' ? 'a confident fail demotes the done' : 'a failing verdict is advisory only';
-    const jevNote = jd.jev && i.config.jev.enabled ? ' · rejections cross-checked by Jev first' : jd.jev ? ' · judge.jev is on but jev.enabled is false, so no cross-check runs' : '';
-    add('judge', jd.jev && !i.config.jev.enabled ? 'warn' : 'ok', `independent completion judge before each done · ${jdProvider}${model ? ` · ${model}` : ''} · ${action}${jevNote} (min confidence ${jd.minConfidence}, max ${jd.maxPerTask || '∞'} per done)`);
+    add('judge', 'ok', `independent completion judge before each done · ${jdProvider}${model ? ` · ${model}` : ''} · ${action} (min confidence ${jd.minConfidence}, max ${jd.maxPerTask || '∞'} per done)`);
   }
 
   if (i.config.vision.enabled) {

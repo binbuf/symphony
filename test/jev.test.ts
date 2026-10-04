@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULTS, type JevConfig } from '../src/config.js';
-import { classifyCompletion, classifyError, classifyEscalation, classifySessionResult, jevBaseUrl, jevProblem, parseCompletionDecision, parseDecision, parseErrorDecision, parseEscalationDecision } from '../src/jev.js';
+import { classifyEscalation, classifySessionResult, jevBaseUrl, jevProblem, parseDecision, parseEscalationDecision } from '../src/jev.js';
 
 const jevConfig = (over: Partial<JevConfig> = {}): JevConfig => ({ ...DEFAULTS.jev, enabled: true, ...over });
 
@@ -78,42 +78,19 @@ test('deps.note explains a failed call: HTTP status with body, and network error
   assert.match(notes[0] ?? '', /HTTP 401.*nope/);
 
   const boom = (async () => { throw new Error('network down'); }) as unknown as typeof fetch;
-  assert.equal(await classifyError(cfg, { evidence: 'x' }, { fetchImpl: boom, env: { OPENROUTER_API_KEY: 'k' }, note: (m) => notes.push(m) }), undefined);
+  assert.equal(await classifyEscalation(cfg, { taskTitle: 't', failure: 'x' }, { fetchImpl: boom, env: { OPENROUTER_API_KEY: 'k' }, note: (m) => notes.push(m) }), undefined);
   assert.match(notes[1] ?? '', /request failed: network down/);
 });
 
 test('deps.note explains an unusable answer shape', async () => {
   const notes: string[] = [];
-  const wrongChoice = (async () => jsonResponse({ model: 'typesafe/jev-1.13', answers: { category: { type: 'choice', choice: 'made_up', confidence: 0.9 } } })) as unknown as typeof fetch;
-  assert.equal(await classifyError(jevConfig(), { evidence: 'x' }, { fetchImpl: wrongChoice, env: { OPENROUTER_API_KEY: 'k' }, note: (m) => notes.push(m) }), undefined);
-  assert.match(notes[0] ?? '', /unusable answer: answers category=made_up/);
+  const wrongChoice = (async () => jsonResponse({ model: 'typesafe/jev-1.13', answers: { decision: { type: 'choice', choice: 'made_up', confidence: 0.9 } } })) as unknown as typeof fetch;
+  assert.equal(await classifyEscalation(jevConfig(), { taskTitle: 't', failure: 'x' }, { fetchImpl: wrongChoice, env: { OPENROUTER_API_KEY: 'k' }, note: (m) => notes.push(m) }), undefined);
+  assert.match(notes[0] ?? '', /unusable answer: answers decision=made_up/);
 
   const noAnswers = (async () => jsonResponse({ model: 'typesafe/jev-1.13', error: 'nope' })) as unknown as typeof fetch;
   assert.equal(await classifySessionResult(jevConfig(), { taskTitle: 't', output: 'x' }, { fetchImpl: noAnswers, env: { OPENROUTER_API_KEY: 'k' }, note: (m) => notes.push(m) }), undefined);
   assert.match(notes[1] ?? '', /no answers block \(keys: model,error\)/);
-});
-
-test('classifyError posts the error state and parses the category', async () => {
-  let body: { questions: { category: { type: string; criteria: Record<string, string> } }; state: { exit_code: number; result_subtype: string } } | undefined;
-  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
-    body = JSON.parse(String(init?.body));
-    return jsonResponse({ model: 'typesafe/jev-1.13', answers: { category: { type: 'choice', choice: 'server', confidence: 0.88 } }, usage: { cost: 0.00001 } });
-  }) as unknown as typeof fetch;
-
-  const d = await classifyError(jevConfig(), { evidence: 'the widget exploded', exitCode: 1, resultSubtype: 'error_during_execution' }, { fetchImpl, env: { OPENROUTER_API_KEY: 'k' } });
-  assert.equal(d?.category, 'server');
-  assert.equal(d?.confidence, 0.88);
-  assert.equal(body?.questions.category.type, 'choice');
-  assert.ok(Object.keys(body?.questions.category.criteria ?? {}).includes('rate_limit'));
-  assert.equal(body?.state.exit_code, 1);
-  assert.equal(body?.state.result_subtype, 'error_during_execution');
-});
-
-test('parseErrorDecision accepts known categories and rejects anything else', () => {
-  assert.equal(parseErrorDecision({ answers: { category: { type: 'choice', choice: 'rate_limit', confidence: 0.9 } } })?.category, 'rate_limit');
-  assert.equal(parseErrorDecision({ answers: { category: { type: 'choice', choice: 'made_up', confidence: 0.9 } } }), undefined);
-  assert.equal(parseErrorDecision({ answers: { category: { type: 'noul', noul: 0.9 } } }), undefined);
-  assert.equal(parseErrorDecision({}), undefined);
 });
 
 test('classifyEscalation sends the task and failure and parses the decision', async () => {
@@ -139,29 +116,4 @@ test('parseEscalationDecision maps the choice to a boolean and rejects anything 
   assert.equal(parseEscalationDecision({ answers: { decision: { type: 'choice', choice: 'maybe', confidence: 0.9 } } }), undefined);
   assert.equal(parseEscalationDecision({ answers: { decision: { type: 'noul', noul: 0.9 } } }), undefined);
   assert.equal(parseEscalationDecision({}), undefined);
-});
-
-test('classifyCompletion posts the reviewer evidence and parses the verdict', async () => {
-  let body: { questions: { verdict: { type: string; criteria: Record<string, string> } }; state: { task: { title: string }; reviewer_evidence: string } } | undefined;
-  const fetchImpl = (async (_url: string | URL | Request, init?: RequestInit) => {
-    body = JSON.parse(String(init?.body));
-    return jsonResponse({ model: 'typesafe/jev-1.13', answers: { verdict: { type: 'choice', choice: 'fail', confidence: 0.77 } }, usage: { cost: 0.00002 } });
-  }) as unknown as typeof fetch;
-
-  const d = await classifyCompletion(jevConfig(), { taskTitle: 'Do the thing', taskBody: '## Goal\nShip it.', acceptance: '- [ ] audit trail', verify: 'npm test → passed', evidence: 'reviewer gaps: no audit trail' }, { fetchImpl, env: { OPENROUTER_API_KEY: 'k' } });
-  assert.equal(d?.verdict, 'fail');
-  assert.equal(d?.confidence, 0.77);
-  assert.equal(d?.costUsd, 0.00002);
-  assert.equal(body?.questions.verdict.type, 'choice');
-  assert.deepEqual(Object.keys(body?.questions.verdict.criteria ?? {}), ['pass', 'fail']);
-  assert.equal(body?.state.task.title, 'Do the thing');
-  assert.match(body?.state.reviewer_evidence ?? '', /no audit trail/);
-});
-
-test('parseCompletionDecision accepts pass/fail and rejects anything else', () => {
-  assert.equal(parseCompletionDecision({ answers: { verdict: { type: 'choice', choice: 'pass', confidence: 0.9 } } })?.verdict, 'pass');
-  assert.equal(parseCompletionDecision({ answers: { verdict: { type: 'choice', choice: 'fail', confidence: 0.9 } } })?.verdict, 'fail');
-  assert.equal(parseCompletionDecision({ answers: { verdict: { type: 'choice', choice: 'maybe', confidence: 0.9 } } }), undefined);
-  assert.equal(parseCompletionDecision({ answers: { verdict: { type: 'noul', noul: 0.9 } } }), undefined);
-  assert.equal(parseCompletionDecision({}), undefined);
 });
