@@ -61,6 +61,8 @@ test('parseJudgeAnswer reads the block and a bare verdict line, mapping pass/fai
   assert.equal(parseJudgeAnswer('SYMPHONY_JUDGE\nverdict: pass\nEND_SYMPHONY_JUDGE')?.summary, 'judge passed the completion');
   // A malformed block with no usable verdict still falls back to a verdict written just outside it.
   assert.equal(parseJudgeAnswer('SYMPHONY_JUDGE\n(no fields)\nEND_SYMPHONY_JUDGE\nverdict: fail\nsummary: missed scope')?.verdict, 'fail');
+  // The bare-line fallback prefers the last verdict, so an echoed example cannot override the answer.
+  assert.equal(parseJudgeAnswer('For example "verdict: pass".\nverdict: fail\nsummary: missed scope')?.verdict, 'fail');
 });
 
 test('buildJudgePrompt is self-contained and leaks no placeholder', () => {
@@ -68,7 +70,8 @@ test('buildJudgePrompt is self-contained and leaks no placeholder', () => {
     taskId: 'T05', taskTitle: 'Add CSV export', taskPhase: 'Phase 1', status: 'done', attempts: 2,
     taskBody: '## Goal\nAdd a CSV export.\n', acceptance: [{ text: 'export button works', checked: true, blocking: true }, { text: 'ships a schema doc', checked: false, blocking: false }],
     verifyCommand: 'npm test', verifyOk: true, verifyOutput: '3 passing',
-    sessionSummary: 'wired the export and its test', diff: 'diff --git a/x b/x\n+export', changedFiles: ['src/x.ts'],
+    sessionSummary: 'wired the export and its test', diff: 'diff --git a/x b/x\n+export', changedFiles: ['src/x.ts', 'docs/ROADMAP.md'],
+    harnessFiles: ['docs/ROADMAP.md'],
     progressNote: '- wrote src/x.ts',
   };
   const text = buildJudgePrompt(ev);
@@ -80,6 +83,9 @@ test('buildJudgePrompt is self-contained and leaks no placeholder', () => {
   assert.match(text, /3 passing/);
   assert.match(text, /wired the export and its test/);
   assert.match(text, /src\/x\.ts/);
+  // Harness bookkeeping is labelled so the judge does not read it as task scope.
+  assert.match(text, /- docs\/ROADMAP\.md \[harness\]/);
+  assert.match(text, /ignore them when deciding/);
   assert.match(text, /SYMPHONY_JUDGE/);
   assert.match(text, /END_SYMPHONY_JUDGE/);
 });
@@ -281,6 +287,26 @@ test('a failing verdict that reports no confidence is advisory, so the done stan
     assert.equal(out.status, 'done', 'with no confidence the failure cannot demote the done');
     assert.equal(ctx.state.tasks.T01.judge?.verdict, 'fail');
     assert.equal(ctx.state.tasks.T01.judge?.enforced, undefined);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a judge session that yields no verdict still charges its cost to the task', async () => {
+  const { dir, paths } = project('# R\n\n- [ ] T01 — Do it → [tasks/01-thing.md](tasks/01-thing.md)\n', { 'docs/tasks/01-thing.md': '# T01\n' });
+  writeFileSync(join(dir, 'fixtures', 'T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }), JSON.stringify({ type: 'fake_write', path: 'work.txt', content: 'done' }), claudeResult('done', 'shipped it')].join('\n') + '\n');
+  // The judge session answers with no usable verdict but reports a cost: it was still paid for, so
+  // the run/task cost must include it even though the done is accepted.
+  const noVerdict = JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'j', total_cost_usd: 0.005, result: 'I cannot tell from here' });
+  writeFileSync(join(dir, 'fixtures', 'judge-T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 'j' }), noVerdict].join('\n') + '\n');
+  const config: Config = { ...DEFAULTS, provider: 'fake', nudge: false, watch: { ...DEFAULTS.watch, enabled: false }, judge: { ...DEFAULTS.judge, enabled: true, provider: 'fake', model: 'm' } };
+  const ctx = runnerCtx(dir, paths, config);
+  try {
+    const out = await runTask(ctx, ctx.tasks[0]);
+    assert.equal(out.status, 'done', 'no verdict means the done stands');
+    assert.equal(ctx.state.tasks.T01.judge, undefined);
+    assert.equal(ctx.state.tasks.T01.costUsd, 0.005, 'the unverdicting judge session is still charged');
+    assert.equal(ctx.runCostUsd, 0.005);
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

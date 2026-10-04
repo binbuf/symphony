@@ -2,7 +2,7 @@ import { writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { resolveJudge, type Config } from './config.js';
 import { git, untrackedFiles } from './git.js';
-import { openRunSinks, type Logger } from './logger.js';
+import { openRunSinks, type Logger, type RunSinks } from './logger.js';
 import { planMcp } from './mcp.js';
 import type { Paths } from './paths.js';
 import { getProvider, variantSupported } from './providers/index.js';
@@ -39,6 +39,8 @@ export interface JudgeEvidence {
   sessionSummary?: string;
   /** Files touched by this task's uncommitted work, for the "what landed" section. */
   changedFiles?: string[];
+  /** Of `changedFiles`, the ones that are symphony bookkeeping (ROADMAP/PROGRESS/logs), not task work. */
+  harnessFiles?: string[];
   /** The worktree diff against HEAD. */
   diff?: string;
   diffTruncated?: boolean;
@@ -109,7 +111,15 @@ export function parseJudgeAnswer(text: string): ParsedJudge | undefined {
     const parsed = readJudgeFields(block[1]);
     if (parsed) return parsed;
   }
-  return readJudgeFields(text);
+  // Fallback: a bare `verdict:` line, read from the *last* one in the reply. Scanning from the front
+  // would let an echoed example, a quoted task body, or a restated prompt pick the verdict; the
+  // model's actual conclusion sits at the end. Fields are read from that line onward so the parsed
+  // confidence/summary/gaps belong to the same verdict.
+  const verdictLines = /^[ \t]*verdict[ \t]*:/gim;
+  let at = -1;
+  for (let m = verdictLines.exec(text); m; m = verdictLines.exec(text)) at = m.index;
+  if (at === -1) return undefined;
+  return readJudgeFields(text.slice(at));
 }
 
 /** The self-contained judge prompt, rendered from the template. */
@@ -129,8 +139,10 @@ export function buildJudgePrompt(ev: JudgeEvidence): string {
 
   const diff: string[] = [];
   if (ev.changedFiles?.length) {
-    diff.push(`- changed files (${ev.changedFiles.length}):`, ...ev.changedFiles.slice(0, 60).map((f) => `  - ${f}`));
+    const harness = new Set(ev.harnessFiles ?? []);
+    diff.push(`- changed files (${ev.changedFiles.length}):`, ...ev.changedFiles.slice(0, 60).map((f) => `  - ${f}${harness.has(f) ? ' [harness]' : ''}`));
     if (ev.changedFiles.length > 60) diff.push(`  - … and ${ev.changedFiles.length - 60} more`);
+    if (harness.size) diff.push('', '- files marked `[harness]` are symphony bookkeeping (the ROADMAP status block, progress notes, run logs); any hunks touching them are harness state, not evidence of the task\'s scope — ignore them when deciding.');
     diff.push('');
   }
   if (ev.diff?.trim()) {
@@ -228,13 +240,14 @@ export function collectChanges(root: string, maxBytes: number): { files: string[
 export async function runJudge(config: Config, ev: JudgeEvidence, deps: JudgeDeps = {}): Promise<JudgeVerdict | undefined> {
   const { paths, log, abort } = deps;
   if (!paths) return undefined;
+  let sinks: RunSinks | undefined;
   try {
     const { spec, warnings } = resolveJudge(config, variantSupported);
     warnings.forEach((w) => log?.warn(`judge: ${w}`));
     log?.info(`${ev.taskId}: judging the completion with ${spec.providerName}${spec.model ? ` · ${spec.model}` : ''} · timeout ${config.judge.timeoutMin} min`);
     const started = nowIso();
     const provider = getProvider(spec.providerName);
-    const sinks = openRunSinks(paths.runs, `judge-${ev.taskId}-${stamp()}`);
+    sinks = openRunSinks(paths.runs, `judge-${ev.taskId}-${stamp()}`);
     const prompt = buildJudgePrompt(ev);
     writeFileSync(sinks.promptPath, prompt);
     // Announce the run immediately so the caller can render it as an in-flight step; the same ref is
@@ -276,7 +289,6 @@ export async function runJudge(config: Config, ev: JudgeEvidence, deps: JudgeDep
       outcome = await session.done;
     } finally {
       abort?.removeEventListener('abort', onAbort);
-      await sinks.close();
     }
     const answer = parseJudgeAnswer(outcome.result.text || outcome.allText);
     const why = outcome.spawnError ?? outcome.result.errorSubtype ?? (outcome.timedOut ? 'timeout' : outcome.stalled ? 'stalled' : 'no verdict block');
@@ -305,5 +317,9 @@ export async function runJudge(config: Config, ev: JudgeEvidence, deps: JudgeDep
   } catch (e) {
     log?.warn(`${ev.taskId}: judge failed (${(e as Error).message}); accepting the done as reported`);
     return undefined;
+  } finally {
+    // Close the session files on every path, including a throw while building the command or spawning
+    // (before `session.done` exists), so a misbehaving provider cannot leak a file handle per attempt.
+    await sinks?.close().catch(() => {});
   }
 }

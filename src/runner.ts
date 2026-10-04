@@ -200,6 +200,18 @@ function addDecisionCost(ctx: RunContext, task: Task, costUsd: number | undefine
 }
 
 /**
+ * Of a task's changed paths, the ones that are symphony's own bookkeeping (the ROADMAP status block,
+ * the progress digest, per-task progress notes, run logs, `.symphony/` and the stop sentinel) rather
+ * than work the task was asked to do. Passed to the judge so it does not read harness state as scope.
+ */
+function harnessChangedFiles(paths: Paths, files: string[]): string[] {
+  const rel = (p: string) => relative(paths.root, p).replace(/\\/g, '/');
+  const exact = new Set([paths.roadmap, paths.progress, paths.index, paths.stop].map(rel));
+  const dirs = [paths.progressDir, paths.logsDir, paths.symphony].map((d) => `${rel(d).replace(/\/+$/, '')}/`);
+  return files.filter((f) => exact.has(f) || dirs.some((d) => f.startsWith(d)));
+}
+
+/**
  * Run the independent completion judge for a task about to be finalized `done`, if the judge is
  * enabled and has not already hit `judge.maxPerTask` for this terminal `done` attempt. Gathers the
  * evidence (task intent, acceptance items, the verify result, the worktree diff and the session's own
@@ -224,6 +236,9 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
   const used = counts.get(key) ?? 0;
   if (max > 0 && used >= max) {
     log.warn(`${task.id}: judge already ran ${used} time(s) for this done (judge.maxPerTask ${max}); accepting the done as reported`);
+    // The stale verdict was just cleared above; refresh ROADMAP so the generated status block does
+    // not keep showing it until the next task boundary.
+    updatePipelineStatus(paths, ctx.tasks, state, log);
     return undefined;
   }
   counts.set(key, used + 1);
@@ -252,6 +267,7 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
     verifyOutput: st.verify?.output,
     sessionSummary,
     changedFiles: changes.files,
+    harnessFiles: harnessChangedFiles(paths, changes.files),
     diff: changes.diff,
     diffTruncated: changes.truncated,
     progressNote,
@@ -272,6 +288,10 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
     },
     onLog: (ref) => {
       if (judgeRow) Object.assign(judgeRow, ref);
+      // Charge the session whether or not it produced a usable verdict: a judge that timed out,
+      // stalled, or answered unusably was still paid for, so the run/task cost and the budget must
+      // see it. Charging here (not only on a parsed verdict) keeps the accounting honest.
+      addDecisionCost(ctx, task, ref.costUsd);
       saveState(paths, state);
     },
   });
@@ -279,7 +299,6 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
     updatePipelineStatus(paths, ctx.tasks, state, log);
     return undefined;
   }
-  addDecisionCost(ctx, task, verdict.costUsd);
   st.judge = {
     verdict: verdict.verdict,
     ok: verdict.ok,
