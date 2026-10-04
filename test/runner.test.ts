@@ -1317,6 +1317,34 @@ test('Jev can approve an escalation, which then runs on the escalation model', a
   }
 });
 
+test('a model-source failure breakdown does not ask Jev the escalation question a second time', async () => {
+  const { paths, task, config } = escalationProject();
+  const state: State = loadState(paths);
+  let calls = 0;
+  // The first call is the failure-stage breakdown (a confident `proceed`); if the harness wrongly asks
+  // `escalationDecision` too, the second call answers `stay` and the escalation would be declined.
+  const fetchImpl = (async () => new Response(JSON.stringify({
+    model: 'typesafe/jev-1.13',
+    answers: { decision: { type: 'choice', choice: calls++ === 0 ? 'proceed' : 'stay', confidence: 0.9 } },
+    usage: { cost: 0.00001 },
+  }), { status: 200, headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch;
+  const ctx: RunContext = {
+    paths, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController(), fetchImpl,
+    config: { ...config, breakdown: { ...DEFAULTS.breakdown, enabled: true, decision: 'jev', onFailure: true }, jev: { ...DEFAULTS.jev, enabled: true } },
+    performSplit: async () => ({ code: 1, parentId: 'T01', children: [], error: 'not consulted' }),
+  };
+  process.env.OPENROUTER_API_KEY = 'sk-or-test';
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(calls, 1); // the failure-stage breakdown answered; the escalation gate did not re-ask
+    assert.equal(out.status, 'done'); // escalation proceeded as configured
+    assert.equal(state.tasks.T01.model, 'strong-model');
+  } finally {
+    delete process.env.OPENROUTER_API_KEY;
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
 test('with escalationDecision off, escalation stays deterministic and Jev is not consulted', async () => {
   const { paths, task, config } = escalationProject();
   const state: State = loadState(paths);

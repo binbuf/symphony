@@ -1229,11 +1229,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         }
       }
       const model = typeof jevRaw.model === 'string' && jevRaw.model.trim() ? jevRaw.model.trim() : DEFAULTS.jev.model;
-      let enabled = boolOr(jevRaw.enabled, DEFAULTS.jev.enabled, 'jev.enabled', warnings);
-      if (enabled && !model) {
-        warnings.push('jev.enabled is true but jev.model is empty; Jev stays off');
-        enabled = false;
-      }
+      const enabled = boolOr(jevRaw.enabled, DEFAULTS.jev.enabled, 'jev.enabled', warnings);
       const acceptStatuses = stringArray(jevRaw.acceptStatuses, DEFAULTS.jev.acceptStatuses, 'jev.acceptStatuses', warnings).filter((s): s is ReportedStatus => {
         if (['done', 'continue', 'blocked', 'failed'].includes(s)) return true;
         warnings.push(`jev.acceptStatuses: ignoring unknown status ${JSON.stringify(s)}`);

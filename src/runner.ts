@@ -968,7 +968,8 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
    * `escalationDecision` workflow is on, Jev reads the task and the failure first and may decline —
    * a stronger model is not worth a session when the task is stuck on missing context or a human
    * decision. Any Jev problem (off, no key, timeout, low confidence) escalates as configured.
-   * `skipDecision` is set when a breakdown decision already chose escalation, so Jev is not asked twice.
+   * `skipDecision` is set when a model-source breakdown decision already weighed the stronger model at
+   * the failure stage, so Jev is not asked the escalation question twice.
    */
   const tryEscalate = async (category: string, reason: string, opts: { skipDecision?: boolean } = {}): Promise<boolean> => {
     if (!escalation || escalations >= maxEscalations) return false;
@@ -1032,8 +1033,11 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     if (attempt.split) return 'split';
     if (attempt.replan) return 'replan';
     if (attempt.verdict?.action === 'stop') return 'failed';
-    // A breakdown verdict of `escalate` already weighed the stronger model, so Jev is not asked again.
-    if (await tryEscalate(category, reason, { skipDecision: attempt.verdict?.action === 'escalate' })) return 'escalated';
+    // A model-source breakdown verdict already weighed the stronger model on this failure: `escalate`
+    // chose it outright, and `proceed` deferred to the ordinary path. Asking `escalationDecision` again
+    // would put the same question to Jev twice, so only the deterministic rules leave it unanswered.
+    const decidedByModel = attempt.verdict?.source === 'jev' || attempt.verdict?.source === 'llm';
+    if (await tryEscalate(category, reason, { skipDecision: decidedByModel })) return 'escalated';
     return 'failed';
   };
 
