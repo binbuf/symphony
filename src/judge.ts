@@ -1,5 +1,5 @@
 import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { resolveJudge, type Config } from './config.js';
 import { git, untrackedFiles } from './git.js';
 import { openRunSinks, type Logger } from './logger.js';
@@ -7,8 +7,9 @@ import { planMcp } from './mcp.js';
 import type { Paths } from './paths.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { startSession } from './session.js';
+import type { LogRef } from './state.js';
 import { renderPrompt } from './templates.js';
-import { headAndTail, headAndTailBytes, squash, stamp } from './util.js';
+import { headAndTailBytes, nowIso, squash, stamp } from './util.js';
 
 /**
  * The independent completion judge. After a task reports `done` and its verify command passes, a
@@ -61,18 +62,22 @@ export interface JudgeDeps {
   paths?: Paths;
   log?: Logger;
   abort?: AbortSignal;
+  /**
+   * Receives a log reference for the judge session the moment it starts (relative paths, provider/
+   * model, status `running`) so the caller can show the judge step while it is in flight. The same
+   * object is later handed to `onLog` with the outcome filled in.
+   */
+  onStart?: (ref: Omit<LogRef, 'kind'>) => void;
+  /** Receives the same log reference once the session ends, with its status, cost and summary set. */
+  onLog?: (ref: Omit<LogRef, 'kind'>) => void;
 }
 
 const JUDGE_RE = /SYMPHONY_JUDGE[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*END_SYMPHONY_JUDGE/i;
 
-/**
- * Read the verdict out of a judge session's final text: the `SYMPHONY_JUDGE` block when present,
- * otherwise a bare `verdict:` line, so a model that ignores the framing still counts. Returns
- * undefined when there is no usable verdict.
- */
-export function parseJudgeAnswer(text: string): { verdict: JudgeVerdictKind; confidence?: number; summary: string; gaps?: string } | undefined {
-  const block = JUDGE_RE.exec(text);
-  const body = block ? block[1] : text;
+type ParsedJudge = { verdict: JudgeVerdictKind; confidence?: number; summary: string; gaps?: string };
+
+/** Read the verdict fields from one block of text, or undefined when it carries no usable verdict. */
+function readJudgeFields(body: string): ParsedJudge | undefined {
   const verdict = /^[ \t]*verdict[ \t]*:[ \t]*([A-Za-z]+)/im.exec(body);
   if (!verdict) return undefined;
   const word = verdict[1].toLowerCase();
@@ -91,6 +96,22 @@ export function parseJudgeAnswer(text: string): { verdict: JudgeVerdictKind; con
   };
 }
 
+/**
+ * Read the verdict out of a judge session's final text: the `SYMPHONY_JUDGE` block when present,
+ * otherwise a bare `verdict:` line, so a model that ignores the framing still counts. A block that
+ * carries no usable `verdict:` line (a malformed marker, a verdict written just outside it) falls
+ * back to scanning the whole reply rather than discarding an otherwise good verdict. Returns
+ * undefined only when neither the block nor the reply names a pass/fail verdict.
+ */
+export function parseJudgeAnswer(text: string): ParsedJudge | undefined {
+  const block = JUDGE_RE.exec(text);
+  if (block) {
+    const parsed = readJudgeFields(block[1]);
+    if (parsed) return parsed;
+  }
+  return readJudgeFields(text);
+}
+
 /** The self-contained judge prompt, rendered from the template. */
 export function buildJudgePrompt(ev: JudgeEvidence): string {
   const acceptance = ev.acceptance?.length
@@ -101,7 +122,7 @@ export function buildJudgePrompt(ev: JudgeEvidence): string {
   if (ev.verifyCommand) {
     verify.push(`- command: \`${ev.verifyCommand}\``);
     verify.push(`- result: ${ev.verifyOk ? 'passed' : 'failed or not run'}`);
-    if (ev.verifyOutput) { verify.push('', '```', headAndTail(ev.verifyOutput, 4000), '```'); }
+    if (ev.verifyOutput) { verify.push('', '```', headAndTailBytes(ev.verifyOutput, 4000), '```'); }
   } else {
     verify.push('- (no verify command is configured; the judge is the only independent check)');
   }
@@ -125,13 +146,52 @@ export function buildJudgePrompt(ev: JudgeEvidence): string {
     taskPhase: ev.taskPhase,
     status: ev.status,
     attempts: ev.attempts,
-    taskBody: ev.taskBody?.trim() ? headAndTail(ev.taskBody, 12_000) : '(no task file — the roadmap bullet is the whole task)',
+    taskBody: ev.taskBody?.trim() ? headAndTailBytes(ev.taskBody, 12_000) : '(no task file — the roadmap bullet is the whole task)',
     acceptance,
     verifySection: verify.join('\n'),
     diffSection: diff.join('\n'),
     sessionSummary: ev.sessionSummary?.trim() ? squash(ev.sessionSummary, 1500) : '(no summary reported)',
-    progressNote: ev.progressNote?.trim() ? headAndTail(ev.progressNote, 4000) : '(no progress note written)',
+    progressNote: ev.progressNote?.trim() ? headAndTailBytes(ev.progressNote, 4000) : '(no progress note written)',
   });
+}
+
+/**
+ * Parse one `git status --porcelain` line into its status code and file path. The two-char code and
+ * the single separating space are dropped, and a rename/copy arrow (`old -> new`) collapses to the
+ * destination path, so the evidence lists a clean path rather than `" M src/x.ts"`.
+ */
+function porcelainPath(line: string): string {
+  // `git()` trims stdout, so the very first line may have lost its leading status space. Match an
+  // optional one-or-two-char status and the separating whitespace, then keep the path that follows.
+  const m = /^\s*[ MADRCU?!]{1,2}\s+(.*)$/.exec(line);
+  let rest = m ? m[1] : line;
+  const arrow = rest.lastIndexOf(' -> ');
+  if (arrow !== -1) rest = rest.slice(arrow + 4);
+  return rest.trim().replace(/\\/g, '/');
+}
+
+/**
+ * Truncate a diff to a byte budget without cutting through a file: whole `diff --git` chunks are kept
+ * while they fit, the first over-budget file is byte-truncated, and the remaining files are replaced
+ * by a short "omitted" note (the read-only judge can open them directly). Never exceeds `maxBytes`.
+ */
+function truncateDiffFiles(diff: string, maxBytes: number): string {
+  const chunks = diff.split(/(?=^diff --git )/m).filter((c) => c.length > 0);
+  if (chunks.length <= 1) return headAndTailBytes(diff, maxBytes);
+  const parts: string[] = [];
+  let used = 0;
+  let omitted = 0;
+  const reserve = 96;
+  for (let i = 0; i < chunks.length; i++) {
+    const size = Buffer.byteLength(chunks[i], 'utf8');
+    if (used + size <= maxBytes - reserve) { parts.push(chunks[i]); used += size; }
+    else { omitted = chunks.length - i; break; }
+  }
+  if (!parts.length) return headAndTailBytes(diff, maxBytes);
+  const text = parts.join('');
+  const note = `\n# … ${omitted} file${omitted === 1 ? '' : 's'} omitted (diff exceeded judge.maxDiffBytes); read them directly.\n`;
+  if (Buffer.byteLength(text + note, 'utf8') > maxBytes) return headAndTailBytes(text, maxBytes);
+  return text + note;
 }
 
 /**
@@ -142,13 +202,18 @@ export function buildJudgePrompt(ev: JudgeEvidence): string {
 export function collectChanges(root: string, maxBytes: number): { files: string[]; diff: string; truncated: boolean } {
   try {
     const status = git(root, ['status', '--porcelain']);
-    const files = status.code === 0 && status.stdout ? status.stdout.split('\n').filter(Boolean).map((l) => l.replace(/\\/g, '/')) : [];
+    const files = status.code === 0 && status.stdout
+      ? [...new Set(status.stdout.split('\n').filter(Boolean).map((l) => porcelainPath(l)).filter(Boolean))]
+      : [];
     const d = git(root, ['diff', '--no-color', 'HEAD']);
-    let diff = d.code === 0 ? d.stdout : '';
+    const raw = d.code === 0 ? d.stdout : '';
     const untracked = untrackedFiles(root);
-    if (untracked.length) diff += `${diff ? '\n' : ''}\n# untracked files (not shown in the diff; read them directly):\n${untracked.map((f) => `#   ${f}`).join('\n')}\n`;
-    const truncated = Buffer.byteLength(diff, 'utf8') > maxBytes;
-    if (truncated) diff = headAndTailBytes(diff, maxBytes);
+    const note = untracked.length ? `\n# untracked files (not shown in the diff; read them directly):\n${untracked.map((f) => `#   ${f}`).join('\n')}\n` : '';
+    let diff = raw;
+    let truncated = Buffer.byteLength(raw + note, 'utf8') > maxBytes;
+    if (truncated) diff = truncateDiffFiles(raw, Math.max(0, maxBytes - Buffer.byteLength(note, 'utf8')));
+    diff += note;
+    if (Buffer.byteLength(diff, 'utf8') > maxBytes) { diff = headAndTailBytes(diff, maxBytes); truncated = true; }
     return { files, diff, truncated };
   } catch {
     return { files: [], diff: '', truncated: false };
@@ -167,10 +232,24 @@ export async function runJudge(config: Config, ev: JudgeEvidence, deps: JudgeDep
     const { spec, warnings } = resolveJudge(config, variantSupported);
     warnings.forEach((w) => log?.warn(`judge: ${w}`));
     log?.info(`${ev.taskId}: judging the completion with ${spec.providerName}${spec.model ? ` · ${spec.model}` : ''} · timeout ${config.judge.timeoutMin} min`);
+    const started = nowIso();
     const provider = getProvider(spec.providerName);
     const sinks = openRunSinks(paths.runs, `judge-${ev.taskId}-${stamp()}`);
     const prompt = buildJudgePrompt(ev);
     writeFileSync(sinks.promptPath, prompt);
+    // Announce the run immediately so the caller can render it as an in-flight step; the same ref is
+    // completed below, whether or not a verdict parses.
+    const ref: Omit<LogRef, 'kind'> = {
+      jsonl: relative(paths.root, sinks.jsonlPath),
+      log: relative(paths.root, sinks.logPath),
+      prompt: relative(paths.root, sinks.promptPath),
+      started,
+      status: 'running',
+      provider: spec.providerName,
+      model: spec.model,
+      variant: spec.variant,
+    };
+    deps.onStart?.(ref);
     const mcp = planMcp(config, 'judge', undefined, {}, provider.name, join(paths.runs, sinks.base), (m) => log?.warn(`${ev.taskId}: mcp: ${m}`));
     mcp?.notes.forEach((n) => log?.warn(`${ev.taskId}: mcp: ${n}`));
     const cmd = provider.buildCommand({
@@ -200,8 +279,16 @@ export async function runJudge(config: Config, ev: JudgeEvidence, deps: JudgeDep
       await sinks.close();
     }
     const answer = parseJudgeAnswer(outcome.result.text || outcome.allText);
+    const why = outcome.spawnError ?? outcome.result.errorSubtype ?? (outcome.timedOut ? 'timeout' : outcome.stalled ? 'stalled' : 'no verdict block');
+    // Complete the run's log reference (the TUI, the task log and ROADMAP.md track every judge
+    // session, including ones that end without a verdict).
+    ref.durationS = Math.round(outcome.durationMs / 1000);
+    ref.costUsd = outcome.costUsd;
+    ref.usage = outcome.usage;
+    ref.status = answer ? `${answer.verdict}${answer.confidence !== undefined ? ` ${Math.round(answer.confidence * 100)}%` : ''}` : why;
+    ref.summary = answer ? `${answer.summary}${answer.gaps ? ` — gaps: ${answer.gaps}` : ''}` : `judge session ended without a usable verdict (${why})`;
+    deps.onLog?.(ref);
     if (!answer) {
-      const why = outcome.spawnError ?? outcome.result.errorSubtype ?? (outcome.timedOut ? 'timeout' : outcome.stalled ? 'stalled' : 'no verdict block');
       log?.warn(`${ev.taskId}: judge returned no usable verdict (${why}); accepting the done as reported`);
       return undefined;
     }

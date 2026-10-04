@@ -785,7 +785,7 @@ The [verify command](#the-lifecycle) checks what it was told to check — tests,
 | `provider` / `model` / `modelProvider` / `variant` | the `watch` block's | where the judge runs; independent of the run's model, so the reviewer can be stronger than the model that did the work (`modelProvider` names the OpenCode upstream provider) |
 | `onFail` | `fail` | what a confident failing verdict does: `fail` demotes the `done` to a failure so the ordinary recovery (retry, [breakdown](#automatic-breakdowns), [escalation](#escalation)) re-engages; `warn` records the verdict and lets the `done` stand. Add `judge` to `escalation.onCategories` and `breakdown.rules.onCategories` to have those react to a rejected `done` |
 | `minConfidence` | `0.7` | a failing verdict below this, or one that reports no confidence, is treated as a pass, so a weak read cannot demote good work |
-| `maxPerTask` | `1` | judge sessions one task may take in a run (0 = unlimited); bounds a demote → re-run → demote loop |
+| `maxPerTask` | `1` | judge sessions each terminal `done` attempt may take (0 = unlimited). The budget is per completion, so a task that is rejected, re-run and reaches `done` again is judged again; the recovery paths (escalation/breakdown/retry) bound the loop |
 | `includeDiff` | `true` | inline the worktree diff so the read-only session can see what changed |
 | `maxDiffBytes` | `20000` | byte cap for the inlined diff |
 | `timeoutMin` | `10` | hard wall clock for one judge session; on timeout the `done` is accepted as reported |
@@ -793,6 +793,8 @@ The [verify command](#the-lifecycle) checks what it was told to check — tests,
 The judge is **advisory by construction when uncertain**: a verdict below `minConfidence`, a verdict that reports no confidence, a session that times out, a provider that is missing or errors, and any unparseable answer all fall back to *accepting the `done` as reported*. It can only ever stop a task the run was about to mark done; it never adds work. The latest verdict is recorded on the task and written to its `docs/logs/TNN.md` under `## Judge`, so a rejected completion is visible in the committed log, and the judge provider is preflighted with the rest of the run so a missing binary is reported before the first task starts.
 
 The judge sees the task's stated intent and the uncommitted worktree diff (untracked files are named so it can read them directly). It runs pinned to read-only (`autoApprove: false`, `readOnly: true`), but how far that is *enforced* is provider-dependent, exactly as for the [pipeline watcher](#pipeline-watch): `claude` and `codex` run in an explicit read-only sandbox, while the other CLIs rely on their default, where reads are permitted and writes are not auto-approved. Because it runs before the task's commit, an enforced rejection sends the task back through the normal failure path and the task's work stays in the tree for the retry.
+
+**Tracking each run.** Every judge session is recorded as its own step on the task from the moment it starts, so it is visible as it happens: the [run view](#the-lifecycle) shows a `run N · judge` row under the task — `running`, then the verdict as its status — and toasts each verdict (`T05 judge FAIL 82%`) and, when a rejection enforces a rerun, `→ rerun`; the generated `ROADMAP.md` status block gains a `Judge runs (N): T05 FAIL 82% · T05 PASS 88% · …` line (updated immediately when a run starts and again when it finishes, not only at the next task boundary, with `enforced` appended to a rejection that sent the task back); and the committed task log `docs/logs/TNN.md` lists the run under `## Sessions` alongside the `## Judge` verdict. Setting `slack.events.taskJudge: false` silences the `taskJudge` Slack post if the per-run noise is unwanted.
 
 ## Slack notifications
 
@@ -812,6 +814,7 @@ An unattended run is easier to trust when something tells you the moment it need
     "taskSplit": true,
     "taskReplan": true,
     "taskEscalated": true,
+    "taskJudge": true,
     "taskDone": true,
     "taskContinue": true,
     "taskFailed": true,
@@ -849,6 +852,7 @@ An unattended run is easier to trust when something tells you the moment it need
 | `taskSplit` | a breakdown replaced a task with subtasks |
 | `taskReplan` | a breakdown rewrote the upcoming plan (an automatic replan) and the run resumed on it |
 | `taskEscalated` | a failed task was handed to the escalation provider/model |
+| `taskJudge` | the [judge](#judge) reached a verdict on a task's `done` (pass or fail; an enforced rejection reruns the task) |
 | `taskDone` | a task finished `done` (after its verify, if one is configured) |
 | `taskContinue` | a task session reported `continue`; a fresh slice is starting |
 | `taskFailed` | a task finished `failed` |
@@ -861,7 +865,7 @@ An unattended run is easier to trust when something tells you the moment it need
 
 The two `budget*` events depend on another setting: they never fire unless `maxCostUsdPerRun` is configured (greater than zero). `budgetClose` fires once per run at 80% of the cap; `budgetExceeded` fires at the cap, just before the run halts. `watch` is **feature-flagged off by default** and also needs `watch.enabled`: it fires once per watcher check that produces a new summary, threaded (see below), and stays quiet when no task is running.
 
-**Threads.** With `taskStart` on, the first message about a task is an ordinary channel/DM message and every later message about that same task — `taskContinue`, `taskEscalated`, `taskSplit`, `taskReplan`, `taskDone`/`taskFailed`/`taskBlocked`, and a `watch` update — is posted as a reply in that message's thread, so a busy channel shows one root per task instead of a flat stream. Run-level events (`runStart`, `runEnd`, `halt`, `budget*`) are never threaded. A reply does not re-`mention` the user, even with `mention: true`; only the thread root pings. If `taskStart` is off, the first task event that actually posts becomes the thread root.
+**Threads.** With `taskStart` on, the first message about a task is an ordinary channel/DM message and every later message about that same task — `taskContinue`, `taskEscalated`, `taskJudge`, `taskSplit`, `taskReplan`, `taskDone`/`taskFailed`/`taskBlocked`, and a `watch` update — is posted as a reply in that message's thread, so a busy channel shows one root per task instead of a flat stream. Run-level events (`runStart`, `runEnd`, `halt`, `budget*`) are never threaded. A reply does not re-`mention` the user, even with `mention: true`; only the thread root pings. If `taskStart` is off, the first task event that actually posts becomes the thread root.
 
 **Messages.** Each headline carries the `[project]` tag, the task id and title (or the run/halt), and the resolved status; the detail lines add phase, provider/model/variant, duration, cost, summary and commit. For example:
 

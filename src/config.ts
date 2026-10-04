@@ -227,7 +227,7 @@ export interface JudgeConfig {
   onFail: 'fail' | 'warn';
   /** A failing verdict below this confidence, or one that reports none, is treated as a pass. */
   minConfidence: number;
-  /** Judge sessions one task may take in a single run (0 = unlimited); bounds a demote/re-run loop. */
+  /** Judge sessions each terminal `done` attempt may take (0 = unlimited); a re-run done is judged again. */
   maxPerTask: number;
   /** Inline the worktree diff into the judge's evidence so a read-only session can see what changed. */
   includeDiff: boolean;
@@ -252,6 +252,8 @@ export interface SlackEvents {
   taskReplan: boolean;
   /** A task failed and was handed to the escalation provider/model. */
   taskEscalated: boolean;
+  /** The judge reached a verdict on a task's `done` (pass or fail; a rejected done may trigger a rerun). */
+  taskJudge: boolean;
   /** A task finished `done` (its verify passed, if one is configured). */
   taskDone: boolean;
   /** A task session reported `continue` (a fresh slice is about to start). */
@@ -701,6 +703,7 @@ export const DEFAULTS: Config = {
       taskSplit: true,
       taskReplan: true,
       taskEscalated: true,
+      taskJudge: true,
       taskDone: true,
       taskContinue: true,
       taskFailed: true,
@@ -1303,6 +1306,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
           taskSplit: boolOr(slackEventsRaw.taskSplit, DEFAULTS.slack.events.taskSplit, 'slack.events.taskSplit', warnings),
           taskReplan: boolOr(slackEventsRaw.taskReplan, DEFAULTS.slack.events.taskReplan, 'slack.events.taskReplan', warnings),
           taskEscalated: boolOr(slackEventsRaw.taskEscalated, DEFAULTS.slack.events.taskEscalated, 'slack.events.taskEscalated', warnings),
+          taskJudge: boolOr(slackEventsRaw.taskJudge, DEFAULTS.slack.events.taskJudge, 'slack.events.taskJudge', warnings),
           taskDone: boolOr(slackEventsRaw.taskDone, DEFAULTS.slack.events.taskDone, 'slack.events.taskDone', warnings),
           taskContinue: boolOr(slackEventsRaw.taskContinue, DEFAULTS.slack.events.taskContinue, 'slack.events.taskContinue', warnings),
           taskFailed: boolOr(slackEventsRaw.taskFailed, DEFAULTS.slack.events.taskFailed, 'slack.events.taskFailed', warnings),
@@ -1362,12 +1366,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         }
       }
       const model = typeof judgeRaw.model === 'string' ? judgeRaw.model.trim() : DEFAULTS.judge.model;
-      let enabled = boolOr(judgeRaw.enabled, DEFAULTS.judge.enabled, 'judge.enabled', warnings);
-      // The judge can borrow the watch block's model; only disable when neither names one.
-      if (enabled && !model && !watchRaw.model && !DEFAULTS.watch.model) {
-        warnings.push('judge.enabled is true but neither judge.model nor watch.model names one; the judge stays off');
-        enabled = false;
-      }
+      const enabled = boolOr(judgeRaw.enabled, DEFAULTS.judge.enabled, 'judge.enabled', warnings);
       return {
         enabled,
         provider,

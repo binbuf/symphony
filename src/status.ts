@@ -86,15 +86,18 @@ export function buildStatusTable(tasks: Task[], state: State, opts: StatusTableO
     rowTask.push(t.id);
     // A task split across sessions or retried (att >= 2) gets one child line per session, so each
     // round reports its own start/end, duration and summary instead of only the task's running total.
-    if ((s?.attempts ?? 0) >= 2 && s?.logs?.length) {
-      s.logs.forEach((l, i) => {
-        const run = runTiming(l, running, tz);
-        const label = `run ${i + 1} · ${l.kind}`;
-        // The session's own provider and model, so an escalated run is visible in the table too.
-        rows.push(['  ↳', '', squash(label, cap(42)), l.status ?? '', '', run.duration, run.start, run.end, fmtCost(l.costUsd), squash(l.provider ?? '', cap(16)), squashTail(l.model ? `${l.model}${l.variant ? `#${l.variant}` : ''}` : '', cap(28)), squash(l.summary ?? '', cap(60))]);
-        rowTask.push(t.id);
-      });
-    }
+    // A judge session is shown as its own step even on a single-attempt task, so every judge run is
+    // visible in the table.
+    const logs = s?.logs ?? [];
+    const showAllLogs = (s?.attempts ?? 0) >= 2;
+    logs.forEach((l, i) => {
+      if (!showAllLogs && l.kind !== 'judge') return;
+      const run = runTiming(l, running, tz);
+      const label = `run ${i + 1} · ${l.kind}`;
+      // The session's own provider and model, so an escalated run is visible in the table too.
+      rows.push(['  ↳', '', squash(label, cap(42)), l.status ?? '', '', run.duration, run.start, run.end, fmtCost(l.costUsd), squash(l.provider ?? '', cap(16)), squashTail(l.model ? `${l.model}${l.variant ? `#${l.variant}` : ''}` : '', cap(28)), squash(l.summary ?? '', cap(60))]);
+      rowTask.push(t.id);
+    });
   }
   const head = ['id', 'phase', 'title', 'status', 'att', 'duration', 'start', 'end', 'cost', 'provider', 'model', 'summary'];
   const done = tasks.filter((t) => DONE_STATES.includes(state.tasks[t.id]?.status ?? 'pending')).length;
@@ -142,8 +145,14 @@ function idsFor(tasks: Task[], state: State, pick: (s: TaskStatus) => boolean): 
 export function buildPipelineStatus(tasks: Task[], state: State, updatedAt = nowIso()): string {
   const statusOf = (t: Task) => state.tasks[t.id]?.status ?? 'pending';
   const done = tasks.filter((t) => (DONE_STATES as string[]).includes(statusOf(t))).length;
-  const remaining = tasks.filter((t) => (ORDER.indexOf(statusOf(t)) >= 4)).map((t) => t.id);
+  const remaining = tasks.filter((t) => ORDER.indexOf(statusOf(t)) >= 4).map((t) => t.id);
   const last = [...tasks].reverse().find((t) => state.tasks[t.id]?.finished);
+
+  // Every judge session is recorded as a `judge` log row on its task, so the status block tracks each
+  // run (verdict + confidence, and `enforced` when the rejection sent the task back to a rerun).
+  const judgeRuns = tasks
+    .flatMap((t) => (state.tasks[t.id]?.logs ?? []).filter((l) => l.kind === 'judge').map((l) => ({ id: t.id, status: (l.status || 'no-verdict').toUpperCase(), at: l.started ?? '' })))
+    .sort((a, b) => a.at.localeCompare(b.at));
 
   const lines = [
     `**Pipeline status** — updated ${updatedAt} · ${done}/${tasks.length} done`,
@@ -153,6 +162,11 @@ export function buildPipelineStatus(tasks: Task[], state: State, updatedAt = now
     `- Failed: ${idsFor(tasks, state, (s) => s === 'failed')}`,
     `- Remaining: ${remaining.join(', ') || 'none'}`,
   ];
+  if (judgeRuns.length) {
+    const shown = judgeRuns.slice(-8);
+    const prefix = judgeRuns.length > shown.length ? '… ' : '';
+    lines.push(`- Judge runs (${judgeRuns.length}): ${prefix}${shown.map((r) => `${r.id} ${r.status}`).join(' · ')}`);
+  }
   if (last) {
     const st = state.tasks[last.id];
     lines.push(`- Last finished: ${last.id} — ${st?.status ?? 'pending'}${st?.summary ? ` · ${st.summary}` : ''}`);

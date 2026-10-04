@@ -61,6 +61,51 @@ test('buildPipelineStatus surfaces a halt and handles an all-pending pipeline', 
   assert.match(block, /- Halted: auth on T01 — no key/);
 });
 
+test('buildStatusTable shows a judge run as its own step even on a single-attempt task', () => {
+  const tasks = [task('T01', 1, 'Phase 1')];
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: {
+        ...newTaskState('t1'),
+        status: 'done',
+        attempts: 1,
+        logs: [
+          { kind: 'task', jsonl: 'a', log: 'a', prompt: 'a', status: 'done', summary: 'shipped it', started: '2026-01-02T01:00:00Z', durationS: 600 },
+          { kind: 'judge', jsonl: 'j', log: 'j', prompt: 'j', status: 'fail 82%', summary: 'scope missed', started: '2026-01-02T01:10:00Z', durationS: 30, provider: 'opencode', model: 'reviewer' },
+        ],
+      },
+    },
+  };
+  const table = buildStatusTable(tasks, state);
+  const children = table.rows.filter((r) => r[0] === '  ↳');
+  assert.equal(children.length, 1, 'only the judge run is shown as a child for a single-attempt task');
+  assert.match(children[0][2], /run 2 · judge/);
+  assert.equal(children[0][3], 'fail 82%');
+  assert.match(children[0][11], /scope missed/);
+});
+
+test('buildPipelineStatus lists every judge run, marking an enforced rerun', () => {
+  const tasks = [task('T01', 1, 'Phase 1')];
+  const state: State = {
+    version: 1,
+    tasks: {
+      T01: {
+        ...newTaskState('t1'),
+        status: 'failed',
+        logs: [
+          { kind: 'task', jsonl: 'a', log: 'a', prompt: 'a', status: 'done', started: '2026-01-02T01:00:00Z' },
+          { kind: 'judge', jsonl: 'j1', log: 'j1', prompt: 'j1', status: 'fail 90% enforced', started: '2026-01-02T01:10:00Z' },
+          { kind: 'task', jsonl: 'b', log: 'b', prompt: 'b', status: 'done', started: '2026-01-02T01:20:00Z' },
+          { kind: 'judge', jsonl: 'j2', log: 'j2', prompt: 'j2', status: 'pass 88%', started: '2026-01-02T01:30:00Z' },
+        ],
+      },
+    },
+  };
+  const block = buildPipelineStatus(tasks, state, 'now');
+  assert.match(block, /- Judge runs \(2\): T01 FAIL 90% ENFORCED · T01 PASS 88%/);
+});
+
 test('statusCommand shows start and end datetime stamps in the table', () => {
   const paths = resolvePaths(mkdtempSync(join(tmpdir(), 'symphony-status-')));
   const tasks = [task('T01', 1, 'Phase 1'), task('T02', 2, 'Phase 1'), task('T03', 3, 'Phase 1')];

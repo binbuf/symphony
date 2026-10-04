@@ -149,6 +149,7 @@
       "taskStart": true,
       "taskSplit": true,
       "taskEscalated": true,
+      "taskJudge": true,
       "taskDone": true,
       "taskContinue": true,
       "taskFailed": true,

@@ -59,6 +59,8 @@ test('parseJudgeAnswer reads the block and a bare verdict line, mapping pass/fai
   assert.equal(parseJudgeAnswer('verdict: fail\nconfidence: 7\nsummary: x')?.confidence, undefined);
   // A missing summary still yields a usable verdict.
   assert.equal(parseJudgeAnswer('SYMPHONY_JUDGE\nverdict: pass\nEND_SYMPHONY_JUDGE')?.summary, 'judge passed the completion');
+  // A malformed block with no usable verdict still falls back to a verdict written just outside it.
+  assert.equal(parseJudgeAnswer('SYMPHONY_JUDGE\n(no fields)\nEND_SYMPHONY_JUDGE\nverdict: fail\nsummary: missed scope')?.verdict, 'fail');
 });
 
 test('buildJudgePrompt is self-contained and leaks no placeholder', () => {
@@ -93,6 +95,9 @@ test('collectChanges names untracked files and captures tracked edits', () => {
   const changes = collectChanges(dir, 20_000);
   assert.ok(changes.files.some((f) => f.includes('tracked.txt')), changes.files.join(', '));
   assert.ok(changes.files.some((f) => f.includes('new.txt')), changes.files.join(', '));
+  // Paths are clean: no porcelain status code or separator whitespace.
+  assert.ok(changes.files.includes('tracked.txt'), changes.files.join(', '));
+  assert.ok(changes.files.includes('new.txt'), changes.files.join(', '));
   assert.match(changes.diff, /\+two/);
   assert.match(changes.diff, /untracked files .*read them directly/);
   assert.equal(changes.truncated, false);
@@ -110,6 +115,23 @@ test('runJudge runs a read-only fake session and reads its verdict and cost', as
     assert.equal(v?.gaps, 'no audit trail');
     assert.equal(v?.provider, 'fake');
     assert.equal(v?.costUsd, 0.002);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('runJudge hands the session to onLog so the run can be tracked', async () => {
+  const { dir, paths } = project('# R\n\n- [ ] T01 — Do it\n');
+  writeFileSync(join(dir, 'fixtures', 'judge-T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 'j' }), judgeBlock('pass', 0.9, 'matches scope')].join('\n') + '\n');
+  const config = cfg({ enabled: true, provider: 'fake', model: 'fake-model' });
+  const refs: Array<{ status?: string; jsonl: string; provider?: string }> = [];
+  try {
+    const v = await runJudge(config, { taskId: 'T01', taskTitle: 'Do it', taskPhase: 'P', status: 'done', attempts: 1 }, { paths, log: silent, onLog: (r) => refs.push(r) });
+    assert.equal(v?.verdict, 'pass');
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].status, 'pass 90%');
+    assert.match(refs[0].jsonl, /judge-T01/);
+    assert.equal(refs[0].provider, 'fake');
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
@@ -151,6 +173,30 @@ test('a confident failing judge demotes the done to failed and records an enforc
     assert.equal(ctx.state.tasks.T01.judge?.verdict, 'fail');
     assert.equal(ctx.state.tasks.T01.judge?.enforced, true);
     assert.match(ctx.state.tasks.T01.summary ?? '', /judge rejected the completion/);
+    // The judge run is recorded as a step with the enforced marker for the rerun.
+    const judgeLog = ctx.state.tasks.T01.logs.find((l) => l.kind === 'judge');
+    assert.ok(judgeLog, 'the judge session is recorded as a step');
+    assert.match(judgeLog!.status ?? '', /^fail 90% enforced$/);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('an escalated re-do after a judge rejection is judged again (maxPerTask is per terminal done)', async () => {
+  const { dir, paths } = project('# R\n\n- [ ] T01 — Do it → [tasks/01-thing.md](tasks/01-thing.md)\n', { 'docs/tasks/01-thing.md': '# T01\n\n## Goal\nShip it.\n' });
+  writeFileSync(join(dir, 'fixtures', 'T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }), JSON.stringify({ type: 'fake_write', path: 'work.txt', content: 'done' }), claudeResult('done', 'shipped it')].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'judge-T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 'j' }), judgeBlock('fail', 0.9, 'still missing', 'no audit trail')].join('\n') + '\n');
+  const config: Config = {
+    ...DEFAULTS, provider: 'fake', nudge: false, watch: { ...DEFAULTS.watch, enabled: false },
+    judge: { ...DEFAULTS.judge, enabled: true, provider: 'fake', model: 'm', maxPerTask: 1 },
+    escalation: { ...DEFAULTS.escalation, enabled: true, provider: 'fake', model: 'm', maxAttempts: 1, onCategories: ['judge'] },
+  };
+  const ctx = runnerCtx(dir, paths, config);
+  try {
+    const out = await runTask(ctx, ctx.tasks[0]);
+    assert.equal(out.status, 'failed');
+    assert.equal(ctx.judgeCounts?.size, 2, 'both terminal done attempts were judged');
+    assert.equal(ctx.state.tasks.T01.logs.filter((l) => l.kind === 'judge').length, 2, 'each judge run is recorded');
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
@@ -194,7 +240,8 @@ test('judge.maxPerTask bounds judge sessions and clears a stale verdict when the
   writeFileSync(join(dir, 'fixtures', 'judge-T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 'j' }), judgeBlock('fail', 0.9, 'nope')].join('\n') + '\n');
   const config: Config = { ...DEFAULTS, provider: 'fake', nudge: false, watch: { ...DEFAULTS.watch, enabled: false }, judge: { ...DEFAULTS.judge, enabled: true, provider: 'fake', model: 'm', maxPerTask: 1 } };
   const ctx = runnerCtx(dir, paths, config);
-  ctx.judgeCounts!.set('T01', 1); // pretend a judge already ran this task this run
+  // The cap is keyed by task id + attempt; this done runs as attempt 2, so its budget was spent.
+  ctx.judgeCounts!.set('T01#2', 1);
   // A prior attempt left a demoted verdict behind; the done must not inherit it.
   ctx.state.tasks.T01 = { ...newTaskState('Do it'), status: 'running', attempts: 1, judge: { verdict: 'fail', ok: false, summary: 'from a prior attempt', enforced: true, at: '2026-01-01T00:00:00Z' } };
   try {
@@ -268,4 +315,20 @@ test('collectChanges caps the diff by bytes without splitting code points', () =
   const changes = collectChanges(dir, 500);
   assert.equal(changes.truncated, true);
   assert.ok(Buffer.byteLength(changes.diff, 'utf8') <= 500, `diff is ${Buffer.byteLength(changes.diff, 'utf8')} bytes`);
+});
+
+test('collectChanges keeps whole files and marks the rest omitted rather than cutting a hunk', () => {
+  const { dir } = project('# R\n');
+  for (const name of ['a.txt', 'b.txt']) {
+    writeFileSync(join(dir, name), 'x\n');
+    execFileSync('git', ['-C', dir, 'add', name]);
+  }
+  execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+  writeFileSync(join(dir, 'a.txt'), 'x\ny\n');
+  writeFileSync(join(dir, 'b.txt'), `x\n${'y'.repeat(4000)}\n`);
+  const changes = collectChanges(dir, 800);
+  assert.equal(changes.truncated, true);
+  assert.ok(Buffer.byteLength(changes.diff, 'utf8') <= 800, `diff is ${Buffer.byteLength(changes.diff, 'utf8')} bytes`);
+  assert.match(changes.diff, /omitted \(diff exceeded judge\.maxDiffBytes\)/);
+  assert.match(changes.diff, /a\.txt/);
 });

@@ -107,6 +107,8 @@ export class TuiApp {
   /** Anchor column of an in-progress middle-button drag, for horizontal panning. */
   private mouseDrag?: { x: number };
   private lastStatuses = new Map<string, string>();
+  /** Last judge verdict stamp seen per task, so a new judge run (or an enforced rerun) can be toasted. */
+  private lastJudges = new Map<string, string>();
   private lastHalted = false;
   /** The task the pipeline was last on, so the status panel can follow it when it changes. */
   private lastCurrentTaskId?: string;
@@ -258,6 +260,17 @@ export class TuiApp {
       if (prev !== undefined && prev !== status) this.toast(`${t.id} → ${status}`);
       this.lastStatuses.set(t.id, status);
     }
+    // Surface each judge run (and the rerun a rejected done triggers) as it lands, independent of the
+    // task's own status transition, so the judge step is visible as it happens.
+    for (const t of this.model.tasks) {
+      const j = this.model.state.tasks[t.id]?.judge;
+      if (!j) continue;
+      const sig = `${j.at}|${j.enforced ? 'enforced' : ''}`;
+      if (this.lastJudges.get(t.id) === sig) continue;
+      this.lastJudges.set(t.id, sig);
+      const pct = j.confidence !== undefined ? ` ${Math.round(j.confidence * 100)}%` : '';
+      this.toast(`${t.id} judge ${j.verdict.toUpperCase()}${pct}${j.enforced ? ' → rerun' : ''}`);
+    }
     const halted = !!this.model.state.halted;
     if (halted && !this.lastHalted) this.toast(`halted: ${this.model.state.halted!.category}`);
     this.lastHalted = halted;
@@ -269,6 +282,11 @@ export class TuiApp {
 
   private snapshotStatuses(): void {
     for (const t of this.model.tasks) this.lastStatuses.set(t.id, this.model.state.tasks[t.id]?.status ?? 'pending');
+    // Seed the judge stamps so pre-existing verdicts are not toasted on attach/start.
+    for (const t of this.model.tasks) {
+      const j = this.model.state.tasks[t.id]?.judge;
+      if (j) this.lastJudges.set(t.id, `${j.at}|${j.enforced ? 'enforced' : ''}`);
+    }
     this.lastHalted = !!this.model.state.halted;
     this.lastCurrentTaskId = this.currentTaskId();
   }

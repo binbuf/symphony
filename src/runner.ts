@@ -6,7 +6,7 @@ import { resolveEscalation, resolveFallback, resolveJudge, resolveSession, resol
 import { writeProgressIndex } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { commitAll, currentBranch, describeCommit } from './git.js';
-import { contractsFor, dependencyClosure, isLandedSubset, summarizeAcceptance, topoOrder, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
+import { contractsFor, dependencyClosure, isLandedSubset, parseAcceptance, summarizeAcceptance, topoOrder, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
 import { fireHook } from './hooks.js';
 import { classifyError, classifyEscalation, classifySessionResult, jevProblem } from './jev.js';
 import { collectChanges, runJudge, type JudgeEvidence, type JudgeVerdict } from './judge.js';
@@ -120,7 +120,7 @@ export interface RunContext {
   contracts?: Map<string, TaskContract>;
   /** Automatic breakdowns attempted per task id in this run; bounds a task that keeps failing. */
   autoSplits?: Map<string, number>;
-  /** Judge sessions run per task id in this run; bounds a demote/re-run loop. */
+  /** Judge sessions run per terminal `done` attempt (keyed by task id + attempt); bounds re-judging. */
   judgeCounts?: Map<string, number>;
   /** Slack thread roots per task id (task id → root message `ts`), so later events reply in-thread. */
   slackThreads?: Map<string, string>;
@@ -201,28 +201,39 @@ function addDecisionCost(ctx: RunContext, task: Task, costUsd: number | undefine
 
 /**
  * Run the independent completion judge for a task about to be finalized `done`, if the judge is
- * enabled and has not already hit `judge.maxPerTask` this run. Gathers the evidence (task intent,
- * acceptance items, the verify result, the worktree diff and the session's own summary), runs one
- * read-only session, charges its cost, and records the verdict on the task state. Returns undefined
- * when the judge is off, over budget, or produced no usable verdict — in every such case the caller
- * accepts the `done` as reported rather than failing a task on the judge's own infrastructure.
+ * enabled and has not already hit `judge.maxPerTask` for this terminal `done` attempt. Gathers the
+ * evidence (task intent, acceptance items, the verify result, the worktree diff and the session's own
+ * summary), runs one read-only session, charges its cost, records the verdict and the session on the
+ * task state, and refreshes the ROADMAP status so the judge run is tracked as it happens. Returns
+ * undefined when the judge is off, over budget, or produced no usable verdict — in every such case the
+ * caller accepts the `done` as reported rather than failing a task on the judge's own infrastructure;
+ * a run that produced no verdict is still recorded in the task's logs for tracking.
  */
 async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, sessionSummary: string | undefined): Promise<JudgeVerdict | undefined> {
-  const { config, log, paths } = ctx;
+  const { config, log, paths, state } = ctx;
   // A judge-eligible `done` supersedes any earlier verdict: clear a stale fail/enforced record from a
-  // previous attempt so a task that now ends done can never carry a demoted verdict in its log.
+  // previous attempt so a task that now ends done can never carry a demoted verdict in its log. The
+  // prior run stays visible via the judge log rows added below and in ROADMAP.md.
   delete st.judge;
-  saveState(paths, ctx.state);
+  saveState(paths, state);
   const max = config.judge.maxPerTask;
   const counts = (ctx.judgeCounts ??= new Map());
-  const used = counts.get(task.id) ?? 0;
+  // The cap is per terminal `done` attempt: keying by the attempt number gives each completion the
+  // task reaches its own budget, so an escalated re-do after a rejected `done` is judged too.
+  const key = `${task.id}#${st.attempts}`;
+  const used = counts.get(key) ?? 0;
   if (max > 0 && used >= max) {
-    log.warn(`${task.id}: judge already ran ${used} time(s) this run (judge.maxPerTask ${max}); accepting the done as reported`);
+    log.warn(`${task.id}: judge already ran ${used} time(s) for this done (judge.maxPerTask ${max}); accepting the done as reported`);
     return undefined;
   }
-  counts.set(task.id, used + 1);
+  counts.set(key, used + 1);
 
   const contract = contractsOf(ctx).get(task.id);
+  // Re-read the task file for acceptance so a session's own checkbox edits are seen: the cached
+  // contract is parsed once per run and would otherwise report a stale checked/unchecked state.
+  const body = taskFileBody(task, config.maxTaskBytes);
+  const parsedAcceptance = parseAcceptance(body);
+  const acceptance = parsedAcceptance.length ? parsedAcceptance : contract?.acceptance;
   const changes = config.judge.includeDiff
     ? collectChanges(paths.root, config.judge.maxDiffBytes)
     : { files: [], diff: '', truncated: false };
@@ -234,8 +245,8 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
     taskPhase: task.phase,
     status: 'done',
     attempts: st.attempts,
-    taskBody: taskFileBody(task, config.maxTaskBytes),
-    acceptance: contract?.acceptance,
+    taskBody: body,
+    acceptance,
     verifyCommand: st.verify?.command,
     verifyOk: st.verify?.ok,
     verifyOutput: st.verify?.output,
@@ -246,8 +257,28 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
     progressNote,
   };
 
-  const verdict = await runJudge(config, ev, { paths, log, abort: ctx.abort.signal });
-  if (!verdict) return undefined;
+  let judgeRow: LogRef | undefined;
+  const verdict = await runJudge(config, ev, {
+    paths,
+    log,
+    abort: ctx.abort.signal,
+    // Record every judge session as a row on the task, so the TUI table and the task log show each
+    // run as its own step — from the moment it starts (`running`) through its verdict.
+    onStart: (ref) => {
+      judgeRow = { kind: 'judge', ...ref };
+      st.logs.push(judgeRow);
+      saveState(paths, state);
+      updatePipelineStatus(paths, ctx.tasks, state, log);
+    },
+    onLog: (ref) => {
+      if (judgeRow) Object.assign(judgeRow, ref);
+      saveState(paths, state);
+    },
+  });
+  if (!verdict) {
+    updatePipelineStatus(paths, ctx.tasks, state, log);
+    return undefined;
+  }
   addDecisionCost(ctx, task, verdict.costUsd);
   st.judge = {
     verdict: verdict.verdict,
@@ -260,9 +291,23 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
     model: verdict.model,
     costUsd: verdict.costUsd,
   };
-  saveState(paths, ctx.state);
+  saveState(paths, state);
+  // Reflect the verdict in ROADMAP.md immediately, not only at the next task boundary, so the judge
+  // run is tracked as it happens.
+  updatePipelineStatus(paths, ctx.tasks, state, log);
   const pct = verdict.confidence !== undefined ? ` ${Math.round(verdict.confidence * 100)}%` : '';
   log.info(`${task.id}: judge ${verdict.ok ? 'passed' : 'failed'}${pct} — ${verdict.summary}${verdict.gaps ? ` (gaps: ${verdict.gaps})` : ''}`);
+  const confident = verdict.confidence !== undefined && verdict.confidence >= config.judge.minConfidence;
+  const rejects = !verdict.ok && confident && config.judge.onFail === 'fail';
+  await slackNotify(ctx, 'taskJudge', {
+    title: `${task.id} judge ${verdict.ok ? 'PASS' : 'FAIL'}${pct} — ${task.title}`,
+    lines: [
+      `${verdict.verdict.toUpperCase()}${pct} · ${verdict.provider ?? '?'}${verdict.model ? ` · ${verdict.model}` : ''}`,
+      verdict.summary,
+      verdict.gaps ? `gaps: ${verdict.gaps}` : '',
+      verdict.ok ? '' : rejects ? 'rejected the done; the task re-enters recovery (retry/escalation/breakdown)' : 'advisory only; the done stands',
+    ],
+  }, task.id);
   return verdict;
 }
 
@@ -1316,7 +1361,14 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
             const msg = `judge rejected the completion${pct}: ${verdict.summary}${verdict.gaps ? ` — gaps: ${verdict.gaps}` : ''}`;
             if (confident && config.judge.onFail === 'fail') {
               st.judge!.enforced = true;
+              // Mark the judge run that triggered this rerun in the task's judge log row, so the TUI
+              // and ROADMAP.md both show the rejection that sent the task back through recovery.
+              const lastJudgeLog = [...st.logs].reverse().find((l) => l.kind === 'judge');
+              if (lastJudgeLog && !/enforced/.test(lastJudgeLog.status ?? '')) {
+                lastJudgeLog.status = `${lastJudgeLog.status ?? verdict.verdict} enforced`;
+              }
               saveState(paths, state);
+              updatePipelineStatus(paths, ctx.tasks, state, log);
               log.error(`${task.id}: ${msg}`);
               const rec = await recover('judge', msg);
               if (rec === 'split') return { status: st.status, split: true };
@@ -1649,7 +1701,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       }
       if (config.judge.enabled) {
         const jp = resolveJudge(config, variantSupported);
-        log.plain(`judge: ${jp.spec.providerName}${jp.spec.model ? ` · ${jp.spec.model}` : ''} checks every done (onFail ${config.judge.onFail}, min confidence ${config.judge.minConfidence}, max ${config.judge.maxPerTask || '∞'} per task)`);
+        log.plain(`judge: ${jp.spec.providerName}${jp.spec.model ? ` · ${jp.spec.model}` : ''} checks every done (onFail ${config.judge.onFail}, min confidence ${config.judge.minConfidence}, max ${config.judge.maxPerTask || '∞'} per done)`);
       }
       log.plain(`command: ${describeCmd(cmd)}`);
       log.plain(`--- prompt for ${t.id} (${Buffer.byteLength(prompt, 'utf8')} bytes) ---\n${prompt}--- end prompt ---`);

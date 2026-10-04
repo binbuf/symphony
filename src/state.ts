@@ -13,7 +13,7 @@ export const SKIP_STATES: TaskStatus[] = ['done', 'accepted', 'blocked'];
 export const HELD_STATES: TaskStatus[] = ['done', 'accepted', 'blocked'];
 
 export interface LogRef {
-  kind: 'task' | 'retry' | 'nudge' | 'wrapup';
+  kind: 'task' | 'retry' | 'nudge' | 'wrapup' | 'judge';
   jsonl: string;
   log: string;
   prompt: string;
