@@ -51,12 +51,12 @@ Usage
   symphony brief                         print a paste-ready prompt that makes any LLM client emit the docs package in this format
   symphony --version                     print the version
 
-Providers: claude (Claude Code) · cursor (Cursor agent) · opencode (1.x) · codex (Codex CLI) · gemini (Gemini CLI) · antigravity (Google Antigravity) · fake (fixture replay)
+Providers: claude (Claude Code) · cursor (Cursor agent) · opencode (2.x) · codex (Codex CLI) · gemini (Gemini CLI) · antigravity (Google Antigravity) · fake (fixture replay)
 Provider/model precedence: --provider/--model/--model-provider/--variant > SYMPHONY_PROVIDER/SYMPHONY_MODEL/SYMPHONY_MODEL_PROVIDER/SYMPHONY_VARIANT
 > task front matter (provider, model, modelProvider, variant) > .symphony/symphony.config.json > defaults. All providers run with
 permissions bypassed unless --safe. Reasoning effort ("variant") defaults to "high" for providers that support it
-(claude --effort, opencode --variant, codex model_reasoning_effort, antigravity --effort) and is only sent when the
-model supports it; override or clear it per run with --variant (empty string = provider default).
+(claude --effort, opencode provider/model#variant, codex model_reasoning_effort, antigravity --effort) and is only sent
+when the model advertises it; override or clear it per run with --variant (empty string = provider default).
 OpenCode addresses a model as "provider/model"; set "modelProvider" (e.g. "openrouter") next to a bare "model"
 instead of writing the prefix yourself. A model that already starts with "modelProvider/" is passed through.
 Every location (docs, tasks, progress, design, adr, logs, stop, state, runs, log) is overridable via the
@@ -66,7 +66,7 @@ Task sets: declare extra, independent task sets in the "taskSets" array of .symp
 lives under .symphony/sets/NAME/. Every command accepts --set NAME.
 MCP: with "mcp": {"enabled": true, …} in the config, each session is spawned with only the servers its
 selection names (task front matter "mcp:"/"capabilities:", then mcp.sessions.<kind>, then mcp.defaultServers;
---mcp a,b / --no-mcp override). Claude, Codex, OpenCode 1.x and Gemini are scoped per session; cursor and
+--mcp a,b / --no-mcp override). Claude, Codex, OpenCode 2.x and Gemini are scoped per session; cursor and
 antigravity keep their own MCP config. Servers the registry defines can be disabled for a client; others
 are excluded only where the client supports an allowlist.
 

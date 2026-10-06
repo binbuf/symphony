@@ -154,7 +154,7 @@ export interface JevConfig {
  * diagram) with a dedicated vision model and get a text description back. Off by default. The session
  * invokes it through the harness CLI (`symphony vision <image>`), so it works for every provider
  * without the agent needing its own image support. When enabled, every task prompt tells the session
- * the command exists.
+ * the command exists, while still preferring the model's native image reading where available.
  */
 export interface VisionConfig {
   /** Master switch; off by default so an existing run behaves exactly as before until you opt in. */

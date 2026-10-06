@@ -146,9 +146,10 @@ function mcpLabel(profile: McpProfile): string {
  *   a definition.
  * - `codex`: `-c mcp_servers.<name>…` overrides. A server can only be disabled when the registry
  *   defines it, because Codex rejects an entry with no transport.
- * - `opencode` (1.x): `OPENCODE_CONFIG_CONTENT`, an inline config merged above project and global
- *   config. Entries carry the 1.x shape (`type: "local" | "remote"`, `command`, `environment`,
- *   `enabled`); names without a definition fall back to the CLI's own configuration.
+ * - `opencode` (2.x): `OPENCODE_CONFIG_CONTENT`, an inline config merged above project and global
+ *   config. Entries carry the 2.x shape (`mcp.servers.<name>` with `type: "local" | "remote"`,
+ *   `command`, `environment`, and the inverse `disabled`); names without a definition fall back to
+ *   the CLI's own configuration.
  * - `gemini`: `--allowed-mcp-server-names`, which is a complete allowlist, so a name alone is
  *   enough to include or exclude a configured server.
  * - `cursor` / `antigravity`: no per-invocation MCP configuration; the CLI's own config is used.
@@ -194,28 +195,29 @@ export function applyMcp(providerName: ProviderName, profile: McpProfile, outFil
       return { args, notes, selected: profile.selected, label };
     }
     case 'opencode': {
-      // OpenCode 1.x: `mcp.<name>` is `{ type: "local", command: string[], environment?, enabled? }`
-      // or `{ type: "remote", url, enabled? }`. Emitted inline via OPENCODE_CONFIG_CONTENT, which
-      // merges above global and project config, so an `enabled: false` entry overrides the user's.
-      const mcp: Record<string, unknown> = {};
+      // OpenCode 2.x: servers live under `mcp.servers.<name>`, each `{ type: "local", command:
+      // string[], environment?, disabled? }` or `{ type: "remote", url, disabled? }`. `disabled` is
+      // the inverse of the old `enabled`. Emitted inline via OPENCODE_CONFIG_CONTENT, which merges
+      // above global and project config, so a `disabled: true` entry overrides the user's server.
+      const servers: Record<string, unknown> = {};
       for (const [name, s] of Object.entries(profile.servers)) {
         const on = selected.has(name);
         if (s.command?.length) {
-          mcp[name] = { type: 'local', command: s.command, ...(s.env ? { environment: s.env } : {}), enabled: on };
+          servers[name] = { type: 'local', command: s.command, ...(s.env ? { environment: s.env } : {}), disabled: !on };
         } else if (s.url) {
-          mcp[name] = { type: 'remote', url: s.url, enabled: on };
+          servers[name] = { type: 'remote', url: s.url, disabled: !on };
         } else if (!on) {
           notes.push(`cannot disable "${name}" for opencode: add mcp.servers.${name}.command or .url`);
         }
       }
       for (const name of profile.selected) {
         const s = profile.servers[name];
-        if (!mcp[name] && !s?.command?.length && !s?.url) {
+        if (!servers[name] && !s?.command?.length && !s?.url) {
           notes.push(`"${name}" has no command/url in mcp.servers; opencode will only expose it if its own config defines it`);
         }
       }
-      if (!Object.keys(mcp).length) return { args: [], notes, selected: profile.selected, label };
-      return { args: [], env: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp }) }, notes, selected: profile.selected, label };
+      if (!Object.keys(servers).length) return { args: [], notes, selected: profile.selected, label };
+      return { args: [], env: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp: { servers } }) }, notes, selected: profile.selected, label };
     }
     case 'gemini': {
       // Repeated values form the allowlist; no values is an empty allowlist (no servers).

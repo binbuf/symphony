@@ -48,7 +48,7 @@ The installer builds symphony in the clone (`npm install && npm run build`) and 
 - appends `.symphony/` to your project's `.gitignore`;
 - seeds `<project>/.symphony/symphony.config.json` from the example if it does not exist.
 
-Re-run the installer any time to upgrade: build output is replaced, your config is left alone. Requirements: **Node ≥ 20.11**, **git**, and the agent CLI you use. **OpenCode must be 1.x** — 2.x is beta and not yet supported (see [Providers](#providers)). The installed copy has no runtime dependencies.
+Re-run the installer any time to upgrade: build output is replaced, your config is left alone. Requirements: **Node ≥ 20.11**, **git**, and the agent CLI you use. **OpenCode must be 2.x** — 1.x is no longer supported (see [Providers](#providers)). The installed copy has no runtime dependencies.
 
 ### 2. (Optional) Pick a provider and configure it
 
@@ -545,7 +545,7 @@ selected clients can enforce.
 |---|---|---|
 | `claude` | `--mcp-config <file> --strict-mcp-config` | the session sees exactly the selection; each selected server needs a `command`/`url` definition |
 | `codex` | `-c mcp_servers.<name>…` | defined servers are enabled/disabled inline (`enabled`, `enabled_tools`, `disabled_tools`); a name-only server cannot be disabled |
-| `opencode` (1.x) | `OPENCODE_CONFIG_CONTENT` | the 1.x `mcp` schema (`type: local\|remote`, `command`/`environment`/`url`, `enabled`) merged above global and project config |
+| `opencode` (2.x) | `OPENCODE_CONFIG_CONTENT` | the 2.x `mcp.servers` schema (`type: local\|remote`, `command`/`environment`/`url`, and the inverse `disabled`) merged above global and project config |
 | `gemini` | `--allowed-mcp-server-names` | a complete allowlist, so a name alone is enough to include or exclude a configured server |
 | `cursor`, `antigravity` | — | no per-invocation MCP config; they keep their own configuration |
 
@@ -558,7 +558,7 @@ token usage next to cost, so the saving stays measurable per task.
 |---|---|---|---|---|
 | `claude` | `claude` | `-p <prompt> --output-format stream-json --verbose` (prompt inline on argv) | `--dangerously-skip-permissions` | `--permission-mode acceptEdits --permission-prompts none` |
 | `cursor` | `agent` | `-p --output-format stream-json --workspace <root> --trust` + `<prompt>` positional | `--force` | no `--force` |
-| `opencode` | `opencode` | `run --format json --thinking <prompt>` (prompt inline as the trailing positional) | `--auto` | no `--auto` |
+| `opencode` | `opencode` | `run --standalone --format json --thinking <prompt>` (prompt inline as the trailing positional) | `--auto` | no `--auto` |
 | `codex` | `codex` | `exec --json --color never --skip-git-repo-check --cd <root> <prompt>` (prompt inline on argv) | `--dangerously-bypass-approvals-and-sandbox` | `--sandbox workspace-write --ask-for-approval never` |
 | `gemini` | `gemini` | `--output-format json --prompt <prompt>` (prompt inline on argv) | `--yolo` | no `--yolo` |
 | `antigravity` | `agy` | `-p --output-format json --workspace <root>` + `<prompt>` positional | `--dangerously-skip-permissions` | no bypass flag |
@@ -566,10 +566,10 @@ token usage next to cost, so the saving stays measurable per task.
 
 - **Read-only sessions:** the pipeline watcher runs pinned to `autoApprove: false` and `readOnly: true`, so it can read the log file the prompt names but not edit the tree. Where the CLI supports it the adapter maps that to a read-only mode: `claude` gets `--allowedTools Read` with the write/shell tools listed on `--disallowedTools`, and `codex` runs `--sandbox read-only`. The others rely on their default, where reads are permitted and writes are not auto-approved.
 - **Models:** pass `--model` (and `--model-provider` for OpenCode), or set `providers.<name>.model` (+ `.modelProvider`). Current ids per provider are listed in [Models.md](Models.md); OpenCode addresses models as `provider/model`, and symphony composes that from `modelProvider` + `model` (browse <https://openrouter.ai/models>). Ids churn, so confirm against each CLI's own listing.
-- **OpenCode 1.x required:** the OpenCode adapter targets the 1.x CLI (`opencode run --format json --thinking --variant …`). OpenCode 2.x is beta and not supported yet — it moves the variant into the model reference (`provider/model#variant`), regroups the model catalog, and adds server flags (`--standalone`) the adapter does not pass. `doctor` warns when it detects a non-1.x version. Pin 1.x with `npm i -g opencode-ai@1` until 2.x is stable.
-- **Running alongside OpenCode 2.x:** the harness launches whatever `providers.opencode.bin` names (default `opencode`) and reports the version it finds — it does not detect or pin a version itself. A 2.x **desktop/GUI** app does not put `opencode` on your shell `PATH`, so it leaves a 1.x CLI install alone. Two **CLI** installs, however, share the `opencode` command name (the V2 CLI is `@opencode/cli` / the `opencode-v2` tap / `opencode-beta`; the V2 curl installer replaces the V1 binary), so whichever is first on `PATH` wins. Pin 1.x explicitly by setting `providers.opencode.bin` to a path (see below), then confirm with `doctor`.
+- **OpenCode 2.x required:** the OpenCode adapter targets the 2.x CLI (`opencode run --standalone --format json --thinking …`, with the reasoning variant carried in the model reference as `provider/model#variant`). OpenCode 1.x is no longer supported — it uses a different CLI surface (a `--variant` run flag, `opencode models --verbose`, no background service). `doctor` warns when it detects a version below 2. Upgrade a 1.x install with `opencode upgrade`.
+- **Standalone sessions and versions:** each session runs with `--standalone`, so it gets a private server rather than the shared background service. That keeps the process the harness spawned in charge of the session (a timeout or Ctrl-C stops the work instead of leaving it running server-side) and makes per-session config such as `OPENCODE_CONFIG_CONTENT` authoritative even when a shared server is already up. The harness launches whatever `providers.opencode.bin` names (default `opencode`) and reports the version it finds; point it at a specific install by path when more than one is on `PATH`.
 - **Choosing the binary:** `providers.<name>.bin` may be a command name looked up on `PATH` (the default), or a path — absolute, `~`, or relative to the project root — which always wins over `PATH`. Point it at a chosen install, e.g. `/usr/local/bin/opencode` or `~/.opencode/bin/opencode`. The harness reports the resolved path and version in `doctor`. On Windows an npm `.cmd`/`.bat` shim is launched through `cmd.exe` automatically (argv escaped), so a normal npm install works with no config; a native `.exe` is spawned directly.
-- **Reasoning effort ("variant"):** defaults to `high` and is sent only to providers that expose an effort knob and models that support it — `--effort` for Claude, `--variant` for OpenCode, `model_reasoning_effort` for Codex, `--effort` for Antigravity. Override with `--variant`, task front matter `variant:`, or `providers.<name>.variant`. OpenCode's per-model support is read from its own catalog (`opencode models --verbose`), so a model without variants simply runs at its default instead of erroring.
+- **Reasoning effort ("variant"):** defaults to `high` and is sent only to providers that expose an effort knob and models that support it — `--effort` for Claude, `provider/model#variant` for OpenCode, `model_reasoning_effort` for Codex, `--effort` for Antigravity. Override with `--variant`, task front matter `variant:`, or `providers.<name>.variant`. OpenCode's per-model support is read from its own catalog (`opencode api GET /api/model`), so a model without variants, or a catalog that cannot be read, simply runs at its default instead of erroring.
 - **Session resume** for retries and nudges uses `--resume` (Claude, Cursor), `--session` (OpenCode) and `exec resume <id>` (Codex); Gemini and Antigravity do not advertise resume, so retries start fresh.
 - **Cost** is surfaced for Claude (per session) and OpenCode (cumulative); `--budget` is Claude-only. Codex reports token usage instead.
 - **Correcting an adapter:** each provider's argv can be adjusted for your install with `providers.<name>.extraArgs`; unknown stream shapes are parsed best-effort.
@@ -691,7 +691,7 @@ When the [`breakdown` block](#automatic-breakdowns) is enabled and one of its ga
 
 ## Vision tool
 
-Sometimes a task only makes sense if you can *look* at something — a screenshot of a failing UI, a photo of a whiteboard, a diagram, a chart, a mockup. A coding session's model may not accept images at all, so symphony can run a separate **vision model** on the session's behalf. When enabled, task, continuation, nudge, and resume prompts include a short image-analysis section with the command and when to use it. From the project root, the session can run:
+Sometimes a task only makes sense if you can *look* at something — a screenshot of a failing UI, a photo of a whiteboard, a diagram, a chart, a mockup. When the session's model accepts image input, the session sees the image **natively** — OpenCode 2.x advertises which models do, reads images through its file tools, and resizes oversized ones — and the prompt tells it to look first. For a model that cannot accept images, or when an independent text-only description is wanted, symphony can also run a separate **vision model** on the session's behalf. When enabled, task, continuation, nudge, and resume prompts include a short image-analysis section naming both routes. From the project root, the session can run:
 
 ```bash
 ./.symphony/symphony vision shot.png                 # general description when there is no specific question
@@ -700,7 +700,7 @@ Sometimes a task only makes sense if you can *look* at something — a screensho
 ./.symphony/symphony vision https://example.com/diagram.png --context "Which service consumes the queue?"
 ```
 
-On Windows, use `.\.symphony\symphony.cmd vision ...`. The command encodes a local file (or passes an `http(s)` URL straight through), sends it to the configured router/model, and prints the model's description to stdout. Task agents are encouraged to add a focused `--context` when they have a specific question; the CLI labels that context in the request. Without context, the default prompt asks for a standalone description adapted to the image: subjects and setting for photos, or controls, labels, values, and connections for screenshots and diagrams. In either case it asks the model to flag unclear details and separate observation from inference. `--prompt` replaces the base instruction when needed. The shell command works across task providers without a separate provider-specific tool registration.
+On Windows, use `.\.symphony\symphony.cmd vision ...`. The command encodes a local file (or passes an `http(s)` URL straight through), sends it to the configured router/model, and prints the model's description to stdout. Task agents are encouraged to add a focused `--context` when they have a specific question; the CLI labels that context in the request. Without context, the default prompt asks for a standalone description adapted to the image: subjects and setting for photos, or controls, labels, values, and connections for screenshots and diagrams. In either case it asks the model to flag unclear details and separate observation from inference. `--prompt` replaces the base instruction when needed. The shell command works across task providers without a separate provider-specific tool registration; it is the fallback when the session's own model cannot see the image, while native reading is preferred when it can.
 
 It is **off by default**. Turn it on with the `vision` block:
 

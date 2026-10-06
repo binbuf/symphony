@@ -110,6 +110,13 @@ test('opencode parser: init once, reasoning, tool dedupe, error', () => {
   assert.ok(p.hints().errorTexts[0].includes('invalid api key'));
 });
 
+test('opencode parser: a 2.x typed error exposes its type and top-level message', () => {
+  const p = new OpenCodeParser();
+  const e = p.parse(j({ type: 'error', sessionID: 'o1', error: { type: 'provider.no-route', message: 'Variant unavailable for lithosai/deepseek-v4.1-flash: bogus' } }));
+  assert.deepEqual(e.filter((x) => x.kind === 'error'), [{ kind: 'error', text: 'provider.no-route: Variant unavailable for lithosai/deepseek-v4.1-flash: bogus' }]);
+  assert.ok(p.hints().errorTexts[0].includes('Variant unavailable'));
+});
+
 test('opencode parser: an error event exposes HTTP status, retryable, and Retry-After', () => {
   const p = new OpenCodeParser();
   const e = p.parse(j({ type: 'error', sessionID: 'o1', error: { name: 'AI_APICallError', data: { message: 'Provider returned an error', statusCode: 429, isRetryable: true, retryAfter: 30 } } }));
@@ -141,19 +148,20 @@ test('opencode parser: step_finish tokens accumulate, cache read/write folds int
   assert.equal(q.hints().usage, undefined);
 });
 
-test('opencode buildCommand: prompt inline as the trailing positional, --auto by default, --session on resume', () => {
+test('opencode buildCommand: prompt inline as the trailing positional, --auto by default, --session on resume, --standalone', () => {
   const c = opencodeProvider.buildCommand(opts({ model: 'anthropic/x', resumeId: 'sess' }));
   assert.equal(c.args[0], 'run');
   assert.ok(c.args.includes('--auto'));
+  // 2.x: a private server per invocation, so a kill stops the session and OPENCODE_CONFIG_CONTENT stays authoritative.
+  assert.ok(c.args.includes('--standalone'));
   assert.ok(c.args.join(' ').includes('--session sess'));
+  assert.ok(c.args.join(' ').includes('--model anthropic/x'));
   // The prompt is the trailing positional: no `--file`, no read-the-file bootstrap.
   assert.equal(c.args[c.args.length - 1], 'do it');
   assert.equal(c.args[c.args.length - 2], '--x');
   assert.equal(c.stdinPayload, undefined);
   assert.ok(!c.args.includes('--file'));
   assert.ok(!c.args.includes('--dir'));
-  // OpenCode 1.x flags only: `--standalone` is a 2.x server flag the 1.x CLI rejects.
-  assert.ok(!c.args.includes('--standalone'));
   assert.ok(c.args.join(' ').includes('--format json'));
   assert.ok(c.args.includes('--thinking'));
 });
@@ -275,34 +283,43 @@ test('generic parser: gemini-style stats models fold into hints usage', () => {
   assert.equal(q.hints().usage, undefined);
 });
 
-test('variant args: every provider with an effort knob gets its own flag, and only when set', () => {
+test('variant args: every provider with an effort knob gets its own flag or reference, and only when set', () => {
   assert.ok(claudeProvider.buildCommand(opts({ model: 'm', variant: 'high' })).args.join(' ').includes('--effort high'));
-  assert.ok(opencodeProvider.buildCommand(opts({ model: 'anthropic/x', variant: 'high' })).args.join(' ').includes('--variant high'));
+  // OpenCode 2.x carries the variant in the model reference, not a `--variant` flag.
+  const oc = opencodeProvider.buildCommand(opts({ model: 'anthropic/x', variant: 'high' }));
+  assert.ok(oc.args.join(' ').includes('--model anthropic/x#high'));
+  assert.ok(!oc.args.includes('--variant'));
   assert.ok(codexProvider.buildCommand(opts({ model: 'o3', variant: 'high' })).args.join(' ').includes('-c model_reasoning_effort=high'));
   assert.ok(antigravityProvider.buildCommand(opts({ model: 'g', variant: 'high' })).args.join(' ').includes('--effort high'));
   assert.ok(!claudeProvider.buildCommand(opts({ model: 'm' })).args.includes('--effort'));
-  assert.ok(!opencodeProvider.buildCommand(opts({ model: 'anthropic/x' })).args.includes('--variant'));
+  assert.ok(!opencodeProvider.buildCommand(opts({ model: 'anthropic/x', variant: 'high' })).args.includes('--variant'));
+  // A variant with no model to ride on is dropped rather than emitted as a stray flag.
+  assert.ok(!opencodeProvider.buildCommand(opts({ variant: 'high' })).args.join(' ').includes('high'));
 });
 
-test('opencode model variant catalog: refs map to their advertised variants', () => {
-  const out = [
-    'deepinfra/deepseek-ai/X',
-    JSON.stringify({ providerID: 'deepinfra', id: 'deepseek-ai/X', variants: { low: {}, high: {} } }, null, 2),
-    '',
-    'other/plain',
-    JSON.stringify({ providerID: 'other', id: 'plain' }, null, 2),
-    '',
-  ].join('\n');
+test('opencode model variant catalog: the 2.x /api/model document maps refs to their variants', () => {
+  const out = JSON.stringify({
+    location: { directory: '/p' },
+    data: [
+      { providerID: 'deepinfra', id: 'deepseek-ai/X', variants: [{ id: 'low' }, { id: 'high' }] },
+      { providerID: 'other', id: 'plain', variants: [] },
+      { providerID: 'openrouter', id: 'anthropic/claude-sonnet-4-5', variants: [{ id: 'thinking' }] },
+    ],
+  });
   const map = parseModelVariants(out);
   assert.deepEqual([...map.get('deepinfra/deepseek-ai/X')!].sort(), ['high', 'low']);
   assert.deepEqual([...map.get('other/plain')!], []);
+  assert.deepEqual([...map.get('openrouter/anthropic/claude-sonnet-4-5')!], ['thinking']);
+  // Garbage, and the retired interleaved `models --verbose` shape, yield an empty map rather than a throw.
+  assert.equal(parseModelVariants('not json').size, 0);
+  assert.equal(parseModelVariants('deepinfra/x\n{"providerID":"deepinfra","id":"x"}').size, 0);
 });
 
-test('opencode version gate: 1.x is accepted, 2.x warns, unknown shapes do not block', () => {
-  assert.equal(opencodeVersionWarning('1.18.29'), undefined);
-  assert.equal(opencodeVersionWarning('1.0.0\n'), undefined);
-  assert.match(opencodeVersionWarning('2.0.0-beta.3') ?? '', /requires OpenCode 1\.x/);
-  assert.match(opencodeVersionWarning('2.1.0') ?? '', /2\.1\.0/);
+test('opencode version gate: 2.x is accepted, 1.x warns, unknown shapes do not block', () => {
+  assert.equal(opencodeVersionWarning('2.0.23'), undefined);
+  assert.equal(opencodeVersionWarning('2.1.0\n'), undefined);
+  assert.match(opencodeVersionWarning('1.18.29') ?? '', /requires OpenCode 2\.x/);
+  assert.match(opencodeVersionWarning('1.0.0') ?? '', /1\.0\.0/);
   assert.equal(opencodeVersionWarning('not a version'), undefined);
 });
 

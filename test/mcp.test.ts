@@ -108,7 +108,7 @@ test('codex plan: -c overrides enable the selection and disable every defined se
   assert.ok(plan.notes.some((n) => /cannot disable "ghost"/.test(n)));
 });
 
-test('opencode plan: 1.x LOCAL/REMOTE entries ride in OPENCODE_CONFIG_CONTENT', () => {
+test('opencode plan: 2.x servers under mcp.servers ride in OPENCODE_CONFIG_CONTENT with the inverse disabled', () => {
   const cfg = configWith({
     servers: {
       alpha: { command: ['alpha-mcp'], env: { ALPHA_HOME: 'C:/alpha' } },
@@ -119,10 +119,10 @@ test('opencode plan: 1.x LOCAL/REMOTE entries ride in OPENCODE_CONFIG_CONTENT', 
   });
   const plan = planMcp(cfg, 'task', undefined, {}, 'opencode', outFile())!;
   assert.deepEqual(plan.args, []);
-  const content = JSON.parse(plan.env!.OPENCODE_CONFIG_CONTENT) as { mcp: Record<string, unknown> };
-  assert.deepEqual(content.mcp.alpha, { type: 'local', command: ['alpha-mcp'], environment: { ALPHA_HOME: 'C:/alpha' }, enabled: true });
-  assert.deepEqual(content.mcp.delta, { type: 'remote', url: 'http://127.0.0.1:8080/mcp', enabled: true });
-  assert.deepEqual(content.mcp.gamma, { type: 'local', command: ['gamma-mcp'], enabled: false });
+  const content = JSON.parse(plan.env!.OPENCODE_CONFIG_CONTENT) as { mcp: { servers: Record<string, unknown> } };
+  assert.deepEqual(content.mcp.servers.alpha, { type: 'local', command: ['alpha-mcp'], environment: { ALPHA_HOME: 'C:/alpha' }, disabled: false });
+  assert.deepEqual(content.mcp.servers.delta, { type: 'remote', url: 'http://127.0.0.1:8080/mcp', disabled: false });
+  assert.deepEqual(content.mcp.servers.gamma, { type: 'local', command: ['gamma-mcp'], disabled: true });
 });
 
 test('gemini plan is a complete allowlist; cursor/antigravity keep their own config', () => {

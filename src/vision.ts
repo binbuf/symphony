@@ -153,10 +153,13 @@ export function visionCommand(): string {
 }
 
 /**
- * A task-facing capability note. The CLI command works with every provider and returns its answer
- * through stdout, so the agent does not need provider-specific image or tool integration.
+ * A task-facing capability note. Native multimodal input is preferred where the model and its CLI
+ * support it (OpenCode 2.x advertises per-model image input and reads attachments/`read` images
+ * natively), so the note tells the session to look at images itself first. The CLI command is the
+ * fallback for a model that cannot accept images or a caller that wants an independent description,
+ * and it returns its answer through stdout, so the agent needs no provider-specific integration.
  */
 export function visionPromptNote(): string {
   return `## Image analysis tool (enabled)
-For relevant images, run \`${visionCommand()} "path/to/image.png" --context "Your question"\` from the project root. Accepts local paths or http(s) URLs; prints analysis to stdout. Omit \`--context\` for a general description; \`--prompt\` overrides the base instruction. Distinguish visible evidence from inference. Skip when no image is relevant.`;
+When a task references an image, prefer your own multimodal reading first: open or read the image file directly so you see it natively (your model may accept image input). Use this tool when your model cannot accept images, when you want an independent text-only description, or when the image is not reachable by your file tools: run \`${visionCommand()} "path/to/image.png" --context "Your question"\` from the project root. Accepts local paths or http(s) URLs; prints analysis to stdout. Omit \`--context\` for a general description; \`--prompt\` overrides the base instruction. Distinguish visible evidence from inference. Skip when no image is relevant.`;
 }

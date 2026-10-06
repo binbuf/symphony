@@ -13,14 +13,14 @@ an allowlist, and anything outside it is ignored in favour of the configured def
 
 Reasoning effort is set separately from the model id and defaults to `high` for every provider that
 has the knob. It is only sent when the model supports it: OpenCode's per-model variants are read
-from its own catalog (`opencode models --verbose`), so a model without variants runs at its default.
+from its own catalog (`opencode api GET /api/model`), so a model without variants runs at its default.
 Override per run with `--variant`, per task with `variant:` front matter, or per provider with
 `providers.<name>.variant`. An empty value (`--variant ""`) falls back to the provider default.
 
 | provider | flag | accepted values |
 |---|---|---|
 | claude | `--effort` | `low`, `medium`, `high`, `xhigh`, `max` |
-| opencode | `--variant` | whatever the model advertises (commonly `low`, `medium`, `high`, `max`) |
+| opencode | `provider/model#variant` | whatever the model advertises (commonly `low`, `medium`, `high`, `max`) |
 | codex | `-c model_reasoning_effort=` | `minimal`, `low`, `medium`, `high` (`xhigh` on some models) |
 | antigravity | `--effort` | `low`, `medium`, `high` |
 
@@ -63,10 +63,9 @@ the bare id and `modelProvider` to the routing provider — for example
 `provider/model` reference OpenCode expects. Every other CLI takes the bare `model` and ignores
 `modelProvider`.
 
-symphony requires **OpenCode 1.x** (`opencode-ai@1`); 2.x is beta and not yet supported. Reasoning
-effort uses the 1.x `--variant` run flag (e.g. `high`), gated on the model's `variants` from
-`opencode models --verbose`. OpenCode 2.x replaces the flag with a `provider/model#variant` model
-reference and regroups the catalog, which this harness does not yet read.
+symphony requires **OpenCode 2.x**. Reasoning effort is carried in the model reference itself
+(`provider/model#variant`, e.g. `openrouter/z-ai/glm-5.3#high`), gated on the model's `variants` read
+from the 2.x catalog (`opencode api GET /api/model`). Upgrade a 1.x install with `opencode upgrade`.
 
 ## codex — Codex CLI (`codex`)
 

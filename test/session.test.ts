@@ -66,7 +66,7 @@ test('provider-reported token usage lands on the outcome and the rendered result
   assert.match(readFileSync(sinks.logPath, 'utf8'), /\[result\] ok \(100 in · 25 cached · 30 out\)/);
 });
 
-test('SpawnSpec.env reaches the child (the OpenCode 1.x MCP content channel)', async () => {
+test('SpawnSpec.env reaches the child (the OpenCode MCP content channel)', async () => {
   const js = `
     process.stdin.resume(); process.stdin.on('data', () => {});
     process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: process.env.OPENCODE_CONFIG_CONTENT ?? 'MISSING' }) + '\\n');

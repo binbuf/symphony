@@ -5,8 +5,9 @@ import { ATTACHED_PROMPT, addUsage, compactUsage, hintFromInput, newHints, promp
 import type { ClassifyHints, LineParser, NormalizedEvent, Provider } from './types.js';
 
 /**
- * OpenCode `opencode run --format json`. Events: text | reasoning | tool_use | step_start | step_finish | error,
+ * OpenCode 2.x `opencode run --format json`. Events: text | reasoning | tool_use | step_start | step_finish | error,
  * each carrying `sessionID` and a `part`. There is no terminal `result` event; session.ts synthesizes one.
+ * The event shapes are unchanged from 1.x.
  */
 export class OpenCodeParser implements LineParser {
   private readonly h: ClassifyHints = newHints();
@@ -43,7 +44,8 @@ export class OpenCodeParser implements LineParser {
       case 'step_finish': {
         const cost = num(part.cost);
         if (cost !== undefined) this.h.costUsd = (this.h.costUsd ?? 0) + cost;
-        // OpenCode 1.x `step-finish` part tokens: { total?, input, output, reasoning, cache: { read, write } }.
+        // `step-finish` part tokens (the same shape in 1.x and 2.x):
+        // { total?, input, output, reasoning, cache: { read, write } }.
         // `input` is already net of cache reads/writes (packages/opencode/src/session/session.ts getUsage),
         // `output` excludes reasoning, and this part is emitted once per step, so the session sums them.
         const tokens = isRecord(part.tokens) ? part.tokens : undefined;
@@ -68,14 +70,18 @@ export class OpenCodeParser implements LineParser {
         if (status !== undefined) this.h.httpStatus = status;
         if (retryable !== undefined) this.h.retryable = retryable;
         if (retryAfter !== undefined && this.h.retryAfterSec === undefined) this.h.retryAfterSec = retryAfter;
+        // 1.x nests the message under `error.data.message`; 2.x often puts `error.message` and a
+        // typed `error.type` (e.g. `provider.no-route`) at the top level. Read both spellings.
+        const message = str(data.message) ?? str(err.message) ?? toText(err);
+        const label = str(err.name) ?? str(err.type) ?? 'error';
         // Keep the HTTP status and any Retry-After in the text too, so wording the classifier does not
         // know (new providers phrase throttling many ways) is still recognised from the status alone.
         const detail = [
-          str(data.message) ?? toText(err),
+          message,
           status !== undefined ? `(HTTP ${status})` : '',
           retryAfter !== undefined ? `(retry after ${retryAfter}s)` : '',
         ].filter(Boolean).join(' ');
-        const text = `${str(err.name) ?? 'error'}: ${detail}`;
+        const text = `${label}: ${detail}`;
         this.h.errorTexts.push(text);
         out.push({ kind: 'error', text });
         break;
@@ -125,48 +131,29 @@ function retryAfterSecOf(x: unknown): number | undefined {
 }
 
 /**
- * Extract the top-level JSON objects from a stream, ignoring the plain model-id header lines that
- * `opencode models --verbose` prints before each object. Brace counting is string-aware so a `}` in
- * a description does not end the object early.
+ * Parse `opencode api GET /api/model` output into a map of `providerID/modelID` → advertised
+ * variants. 2.x returns a single `{ location, data: Model[] }` document (each model carries a
+ * `variants` array of `{ id, … }`), unlike 1.x's `opencode models --verbose`, which interleaved
+ * plain model-id lines with JSON objects and no longer exists.
  */
-function extractJsonObjects(s: string): Record<string, unknown>[] {
-  const out: Record<string, unknown>[] = [];
-  let depth = 0;
-  let start = -1;
-  let inStr = false;
-  let esc = false;
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === '\\') esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') { inStr = true; continue; }
-    if (c === '{') { if (depth === 0) start = i; depth++; }
-    else if (c === '}') {
-      depth--;
-      if (depth === 0 && start >= 0) {
-        try {
-          const parsed: unknown = JSON.parse(s.slice(start, i + 1));
-          if (isRecord(parsed)) out.push(parsed);
-        } catch { /* not an object we can use */ }
-        start = -1;
-      }
-    }
-  }
-  return out;
-}
-
-/** Parse `opencode models --verbose` output into a map of `providerID/modelID` → advertised variants. */
 export function parseModelVariants(out: string): Map<string, Set<string>> {
   const map = new Map<string, Set<string>>();
-  for (const o of extractJsonObjects(out)) {
-    const providerID = str(o.providerID);
-    const id = str(o.id);
+  let root: unknown;
+  try { root = JSON.parse(out); } catch { return map; }
+  const data = isRecord(root) && Array.isArray(root.data) ? root.data : Array.isArray(root) ? root : [];
+  for (const entry of data) {
+    if (!isRecord(entry)) continue;
+    const providerID = str(entry.providerID);
+    const id = str(entry.id);
     if (!providerID || !id) continue;
-    map.set(`${providerID}/${id}`, new Set(isRecord(o.variants) ? Object.keys(o.variants) : []));
+    const variants = new Set<string>();
+    if (Array.isArray(entry.variants)) {
+      for (const v of entry.variants) {
+        const vid = isRecord(v) ? str(v.id) : undefined;
+        if (vid) variants.add(vid);
+      }
+    }
+    map.set(`${providerID}/${id}`, variants);
   }
   return map;
 }
@@ -189,12 +176,12 @@ export function opencodeModelVariants(bin: string, model: string | undefined): S
   return catalog.get(model) ?? new Set<string>();
 }
 
-/** Run `opencode models --verbose` and parse it, or null when the catalog cannot be read. */
+/** Run `opencode api GET /api/model` and parse it, or null when the catalog cannot be read. */
 function readCatalog(bin: string): Map<string, Set<string>> | null {
-  const launch = resolveSpawn(bin, ['models', '--verbose']);
+  const launch = resolveSpawn(bin, ['api', 'GET', '/api/model']);
   const r = spawnSync(launch.command, launch.args, {
     encoding: 'utf8',
-    timeout: 20_000,
+    timeout: 30_000,
     env: process.env,
     windowsVerbatimArguments: launch.windowsVerbatimArguments,
   });
@@ -202,16 +189,22 @@ function readCatalog(bin: string): Map<string, Set<string>> | null {
 }
 
 /**
- * OpenCode 2.x is in beta and symphony targets the OpenCode 1.x CLI: 2.x moves the variant into the
- * model reference (`provider/model#variant`), regroups the model catalog, and adds server flags
- * (`--standalone`) this adapter does not pass. Returns a warning when `--version` output names a
- * non-1.x major, and `undefined` when it is 1.x or unparseable (so an unknown shape never blocks).
+ * symphony targets OpenCode 2.x. 1.x carries a different CLI surface (`--variant` as a run flag,
+ * `opencode models --verbose`, no background service) and is no longer supported. Returns a warning
+ * when `--version` output names a major below 2, and `undefined` when it is 2.x or unparseable (so
+ * an unknown shape never blocks).
  */
 export function opencodeVersionWarning(versionOutput: string): string | undefined {
   const m = /(\d+)\.\d+/.exec(versionOutput.trim());
   if (!m) return undefined;
-  if (Number(m[1]) === 1) return undefined;
-  return `opencode ${versionOutput.trim()} detected; symphony requires OpenCode 1.x (2.x is beta and not yet supported)`;
+  if (Number(m[1]) >= 2) return undefined;
+  return `opencode ${versionOutput.trim()} detected; symphony requires OpenCode 2.x (1.x is no longer supported — upgrade with "opencode upgrade")`;
+}
+
+/** `provider/model#variant` (2.x); a model that already carries a variant is left alone. */
+function modelRef(model: string, variant: string | undefined): string {
+  if (!variant || model.includes('#')) return model;
+  return `${model}#${variant}`;
 }
 
 export const opencodeProvider: Provider = {
@@ -223,15 +216,18 @@ export const opencodeProvider: Provider = {
   modelVariants: opencodeModelVariants,
   authCheckArgs: ['auth', 'list'],
   buildCommand(o) {
-    // OpenCode 1.x only: `--standalone` is a 2.x server flag and is not passed. The working
-    // directory is set via the spawn cwd; opencode has no `--dir` flag (the directory is
-    // positional for the top-level command). Pass only flags this CLI understands.
-    const args = ['run', '--format', 'json', '--thinking'];
+    // OpenCode 2.x. `--standalone` gives this invocation a private server instead of the shared
+    // background service, so the spawned process owns the session: a kill (timeout, Ctrl-C, stop)
+    // stops the work rather than leaving it running server-side, and per-invocation env config
+    // (OPENCODE_CONFIG_CONTENT, used for MCP scoping) is honoured even when a background service is
+    // already running. The working directory is set via the spawn cwd; opencode's directory
+    // positional is for the top-level TUI command, not `run`.
+    const args = ['run', '--standalone', '--format', 'json', '--thinking'];
     if (o.resumeId) args.push('--session', o.resumeId);
-    if (o.model) args.push('--model', o.model);
-    // A model variant is the provider-specific reasoning effort (e.g. "high"); `--variant` is the
-    // OpenCode 1.x run flag. (2.x moves it into the model reference as `provider/model#variant`.)
-    if (o.variant) args.push('--variant', o.variant);
+    // 2.x carries the reasoning variant in the model reference (`provider/model#variant`); there is
+    // no `--variant` run flag. A variant needs a model reference to ride on, so it is dropped when
+    // no model is resolved (the run then uses the configured default with no variant).
+    if (o.model) args.push('--model', modelRef(o.model, o.variant));
     if (o.autoApprove) args.push('--auto');
     // A read-only session (the watcher) is the default here: without `--auto`, reads are permitted
     // and edits/shell commands need approval nobody can give, so it can read the named log only.

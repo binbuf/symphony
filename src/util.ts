@@ -226,7 +226,7 @@ export function fileExists(p: string): boolean {
 
 /**
  * Resolve a command to the absolute path that PATH lookup would use, so preflight can show which
- * binary actually runs when several are installed (e.g. OpenCode 1.x and 2.x). Only bare command
+ * binary actually runs when several are installed (e.g. two OpenCode installs). Only bare command
  * names are searched (use `resolveBinary` for paths, which also expands `~` and relative paths); a
  * value that looks like a path is returned as-is when it exists. Returns undefined when nothing
  * matches; this is best-effort only and never decides whether a command can run.
