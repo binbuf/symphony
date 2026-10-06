@@ -52,6 +52,19 @@
       "idleTimeoutMin": 45
     }
   },
+  "_modelTiers": "Ordered capability registry, spanning providers. Higher `tier` = more capable; models sharing a tier are ranked by array order (earlier = higher priority). The harness uses it to refuse to switch a task to a less capable model during escalation/fallback. Every model the harness may run should have an entry; fill in your own ids. `model_tier`/`modelTier` are accepted aliases for `tier`.",
+  "modelTiers": [
+    { "provider": "opencode", "model": "deepseek/deepseek-v4.1-flash", "modelProvider": "openrouter", "tier": 3 },
+    { "provider": "opencode", "model": "morph-dsv41flash", "modelProvider": "morphllm", "tier": 3 },
+    { "provider": "opencode", "model": "z-ai/glm-5.3", "modelProvider": "openrouter", "tier": 5 },
+    { "provider": "codex", "model": "gpt-6-luna", "tier": 2 },
+    { "provider": "codex", "model": "gpt-6-sol", "tier": 6 },
+    { "provider": "codex", "model": "gpt-6-astra", "tier": 7 }
+  ],
+  "_modelTierPolicy": "What to do when a configured escalation/fallback target is a lower tier than the model running the task: downgrade (switch anyway), wait (keep retrying the current model with backoff), or block (stop the run for a human).",
+  "modelTierPolicy": {
+    "onDowngrade": "downgrade"
+  },
   "paths": {},
   "taskSets": [],
   "autoApprove": true,

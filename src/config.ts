@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { PathOverrides, Paths } from './paths.js';
 import type { ProviderName } from './providers/types.js';
 import type { ReportedStatus } from './result.js';
-import type { Task } from './tasks.js';
+import { metaBool, type Task } from './tasks.js';
 import { UsageError, fileExists, isRecord, parseTimeZone, type TimeZone } from './util.js';
 
 export const PROVIDER_NAMES: ProviderName[] = ['claude', 'cursor', 'opencode', 'codex', 'gemini', 'antigravity', 'fake'];
@@ -40,6 +40,40 @@ export interface ProviderConfig {
   extraArgs: string[];
   budgetUsd?: number;
   idleTimeoutMin?: number;
+}
+
+/**
+ * One model in the capability registry (`modelTiers`), ordered by its position in that array.
+ * `tier` is the capability score: a higher number is more capable. Models that share a tier are
+ * ranked by array order (earlier = higher priority), so the registry is also the tie-breaker.
+ *
+ * The registry spans providers so the harness can compare, say, a Codex task override against an
+ * OpenCode escalation target. Every model the harness may run should have an entry; when a lookup
+ * misses (or the registry is empty) tier comparisons are skipped and behaviour is unchanged.
+ */
+export interface ModelTierEntry {
+  provider: ProviderName;
+  /** Model id as written for the provider (bare for OpenCode, whose `modelProvider` completes it). */
+  model: string;
+  /** OpenCode only: upstream provider for a bare `model`, as in `providers.<name>.modelProvider`. */
+  modelProvider?: string;
+  /** Capability tier; the higher the number, the more capable the model. */
+  tier: number;
+  /** Resolved id matched against a `SessionSpec.model` (`modelProvider/model` for OpenCode). */
+  id: string;
+  /** Position in the `modelTiers` array; the tie-breaker within a tier (lower = higher priority). */
+  order: number;
+}
+
+export interface ModelTierPolicyConfig {
+  /**
+   * What to do when a configured escalation or fallback target is a lower tier than the model
+   * currently running the task (or the same tier but ranked lower in `modelTiers`):
+   *  - `downgrade` switches anyway (the default, preserving the pre-tier behaviour);
+   *  - `wait` keeps the current model and lets its ordinary exponential-backoff retry continue;
+   *  - `block` parks the task and stops the run for a human.
+   */
+  onDowngrade: 'downgrade' | 'wait' | 'block';
 }
 
 export interface HooksConfig {
@@ -472,6 +506,10 @@ export interface CeilingConfig {
 export interface Config {
   provider: ProviderName;
   providers: Record<ProviderName, ProviderConfig>;
+  /** Ordered capability registry for every model the harness may run. See ModelTierEntry. */
+  modelTiers: ModelTierEntry[];
+  /** How to react when an escalation/fallback target is a lower tier than the running model. */
+  modelTierPolicy: ModelTierPolicyConfig;
   /** Overrides for every user-facing location (docs, tasks, progress, design, adr, logs, stop, state, runs, log). */
   paths: PathOverrides;
   /** Additional, independent task sets selected with `--set <name>`. The base docs package is the default. */
@@ -625,6 +663,8 @@ export const DEFAULTS: Config = {
     antigravity: { bin: 'agy', model: 'gemini-3.1-pro-high', variant: 'high', extraArgs: [], idleTimeoutMin: 45 },
     fake: { bin: process.execPath, extraArgs: [] },
   },
+  modelTiers: [],
+  modelTierPolicy: { onDowngrade: 'downgrade' },
   paths: {},
   taskSets: [],
   autoApprove: true,
@@ -873,6 +913,39 @@ function providerModels(x: unknown, where: string, warnings: string[]): Provider
   return out.length ? out : undefined;
 }
 
+/**
+ * Parse the ordered `modelTiers` registry. Each entry is `{ provider, model, modelProvider?, tier }`
+ * (`tier` also accepts `model_tier`/`modelTier`). A malformed entry is dropped with a warning; a
+ * duplicate provider+model is dropped with a warning; array order is preserved as the tie-breaker.
+ */
+function modelTierList(x: unknown, warnings: string[]): ModelTierEntry[] {
+  if (x === undefined || x === null) return [];
+  if (!Array.isArray(x)) { warnings.push('modelTiers: expected an array; ignoring'); return []; }
+  const out: ModelTierEntry[] = [];
+  const seen = new Set<string>();
+  x.forEach((raw, i) => {
+    const where = `modelTiers[${i}]`;
+    if (!isRecord(raw)) { warnings.push(`${where}: expected an object; ignored`); return; }
+    let provider: ProviderName;
+    try { provider = asProviderName(raw.provider, where); } catch (e) { warnings.push((e as Error).message); return; }
+    const model = typeof raw.model === 'string' ? raw.model.trim() : '';
+    if (!model) { warnings.push(`${where}: missing a non-empty "model"; ignored`); return; }
+    const tier = raw.tier ?? raw.model_tier ?? raw.modelTier;
+    if (typeof tier !== 'number' || !Number.isFinite(tier)) { warnings.push(`${where}: missing a numeric "tier"; ignored`); return; }
+    let modelProvider = typeof raw.modelProvider === 'string' && raw.modelProvider.trim() ? raw.modelProvider.trim() : undefined;
+    if (provider !== 'opencode' && modelProvider) {
+      warnings.push(`${where}.modelProvider is only used by opencode; ignored`);
+      modelProvider = undefined;
+    }
+    const id = composeModel(provider, modelProvider, model) ?? model;
+    const key = `${provider}\u0000${id}`;
+    if (seen.has(key)) { warnings.push(`${where}: duplicate model "${id}" for ${provider}; ignored`); return; }
+    seen.add(key);
+    out.push({ provider, model, modelProvider, tier, id, order: out.length });
+  });
+  return out;
+}
+
 /** Like boolOr, but the value must be one of `allowed`; anything else falls back with a warning. */
 function enumOr<T extends string>(x: unknown, allowed: readonly T[], fallback: T, where: string, warnings: string[]): T {
   if (x === undefined || x === null) return fallback;
@@ -1080,10 +1153,15 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const progressRaw = isRecord(raw.progress) ? raw.progress : {};
   const metricRaw = isRecord(raw.metric) ? raw.metric : {};
   const ceilingRaw = isRecord(raw.ceiling) ? raw.ceiling : {};
+  const tierPolicyRaw = isRecord(raw.modelTierPolicy) ? raw.modelTierPolicy : {};
 
   const config: Config = {
     provider: raw.provider === undefined ? DEFAULTS.provider : asProviderName(raw.provider, 'symphony.config.json provider'),
     providers,
+    modelTiers: modelTierList(raw.modelTiers, warnings),
+    modelTierPolicy: {
+      onDowngrade: enumOr(tierPolicyRaw.onDowngrade, ['downgrade', 'wait', 'block'] as const, DEFAULTS.modelTierPolicy.onDowngrade, 'modelTierPolicy.onDowngrade', warnings),
+    },
     paths: pathOverrides(raw.paths, warnings),
     taskSets: taskSetList(raw.taskSets, warnings),
     autoApprove: boolOr(raw.autoApprove, DEFAULTS.autoApprove, 'autoApprove', warnings),
@@ -1473,6 +1551,32 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   if (cli.maxCostUsd !== undefined) config.maxCostUsdPerRun = Math.max(0, cli.maxCostUsd);
   if (cli.safe) config.autoApprove = false;
   if (cli.noNudge) config.nudge = false;
+
+  // Nudge, don't gate: when a registry is configured, flag the configured models that have no tier
+  // so the operator can fill them in. A lookup that misses simply skips the tier comparison.
+  if (config.modelTiers.length) {
+    const composed = (p: ProviderName, mp: string | undefined, m: string | undefined) => composeModel(p, p === 'opencode' ? mp : undefined, m);
+    const targets: Array<[ProviderName, string | undefined, string | undefined]> = [];
+    const active = config.providers[config.provider];
+    targets.push([config.provider, active.modelProvider, active.model]);
+    for (const m of active.models ?? []) targets.push([config.provider, active.modelProvider, m.id]);
+    const escP = config.escalation.provider ?? config.provider;
+    if (config.escalation.enabled && config.escalation.model) targets.push([escP, config.escalation.modelProvider ?? config.providers[escP].modelProvider, config.escalation.model]);
+    const fbP = config.fallback.provider ?? config.provider;
+    if (config.fallback.enabled && config.fallback.model) targets.push([fbP, config.fallback.modelProvider ?? config.providers[fbP].modelProvider, config.fallback.model]);
+    if (config.watch.enabled && config.watch.model) targets.push([config.watch.provider, config.watch.modelProvider ?? config.providers[config.watch.provider].modelProvider, config.watch.model]);
+    const judgeP = config.judge.provider ?? config.watch.provider;
+    if (config.judge.enabled && config.judge.model) targets.push([judgeP, config.judge.modelProvider ?? config.watch.modelProvider ?? config.providers[judgeP].modelProvider, config.judge.model]);
+    const bdP = config.breakdown.provider ?? config.watch.provider;
+    if (config.breakdown.enabled && config.breakdown.model) targets.push([bdP, config.breakdown.modelProvider ?? config.watch.modelProvider ?? config.providers[bdP].modelProvider, config.breakdown.model]);
+    const missing = new Set<string>();
+    for (const [p, mp, m] of targets) {
+      const id = composed(p, mp, m);
+      if (id && !lookupModelTier(config, p, id)) missing.add(`${p}:${id}`);
+    }
+    if (missing.size) warnings.push(`modelTiers: no tier for ${[...missing].join(', ')}; tier comparisons involving these models are skipped`);
+  }
+
   return { config, fileExists: exists, warnings };
 }
 
@@ -1505,6 +1609,23 @@ export function composeModel(providerName: ProviderName, modelProvider: string |
   if (providerName !== 'opencode' || !model || !modelProvider) return model;
   const prefix = `${modelProvider}/`;
   return model.startsWith(prefix) ? model : `${prefix}${model}`;
+}
+
+/** The registry entry for a composed model id (`SessionSpec.model`), or undefined when untiered. */
+export function lookupModelTier(config: Config, providerName: ProviderName, model: string | undefined): ModelTierEntry | undefined {
+  if (!model) return undefined;
+  return config.modelTiers.find((e) => e.provider === providerName && e.id === model);
+}
+
+/**
+ * True when `candidate` is a strictly lower capability than `current`: a lower tier, or the same
+ * tier but ranked later in `modelTiers`. Either side being untiered returns false, so an unknown
+ * model never blocks a switch (the registry is advisory, not a gate, until you populate it).
+ */
+export function isModelDowngrade(current: ModelTierEntry | undefined, candidate: ModelTierEntry | undefined): boolean {
+  if (!current || !candidate) return false;
+  if (candidate.tier !== current.tier) return candidate.tier < current.tier;
+  return candidate.order > current.order;
 }
 
 /**
@@ -1714,25 +1835,38 @@ export function resolveEscalation(
   primary: SessionSpec,
   supportsBudget: (p: ProviderName) => boolean = () => true,
   variantSupport: (p: ProviderName, bin: string, model: string | undefined, variant: string) => boolean = () => false,
+  task?: Task,
 ): { spec: SessionSpec; warnings: string[] } | undefined {
-  if (!config.escalation.enabled) return undefined;
   const warnings: string[] = [];
-  const providerName = config.escalation.provider ?? primary.providerName;
-  const rawModel = config.escalation.model.trim();
+  const meta = task?.meta ?? {};
+  // Per-task escalation: front-matter `escalation:` turns it on (or off) for this task alone, and the
+  // `escalationProvider`/`escalationModel`/`escalationModelProvider`/`escalationVariant` keys override
+  // the configured target. This lets a task that runs above the workhorse name its own peer-or-better
+  // escalation model instead of dropping to the global target.
+  const taskEnabled = metaBool(meta, 'escalation');
+  const enabled = taskEnabled ?? config.escalation.enabled;
+  if (!enabled) return undefined;
+  const providerName = meta.escalationProvider
+    ? asProviderName(meta.escalationProvider, `${task?.taskFileRel ?? 'task'} front matter escalationProvider`)
+    : config.escalation.provider ?? primary.providerName;
+  const rawModel = (meta.escalationModel ?? '').trim() || config.escalation.model.trim();
   if (!rawModel) {
-    warnings.push('escalation.model is empty; escalation stays off');
+    warnings.push(taskEnabled && !config.escalation.enabled
+      ? 'escalation is on for this task but neither escalationModel nor escalation.model names a model; escalation stays off'
+      : 'escalation.model is empty; escalation stays off');
     return undefined;
   }
   const pc = config.providers[providerName];
-  const modelProvider = config.escalation.modelProvider ?? pc.modelProvider;
-  if (config.escalation.modelProvider && providerName !== 'opencode') warnings.push('escalation.modelProvider is only used by opencode; ignored');
+  const configuredModelProvider = (meta.escalationModelProvider ?? '').trim() || config.escalation.modelProvider;
+  const modelProvider = configuredModelProvider ?? pc.modelProvider;
+  if (configuredModelProvider && providerName !== 'opencode') warnings.push('escalation modelProvider is only used by opencode; ignored');
   const model = composeModel(providerName, modelProvider, rawModel)!;
   let budgetUsd = pc.budgetUsd;
   if (budgetUsd !== undefined && !supportsBudget(providerName)) {
     warnings.push(`escalation budget ${budgetUsd} USD ignored: provider ${providerName} has no budget flag`);
     budgetUsd = undefined;
   }
-  let variant = pc.variant;
+  let variant = (meta.escalationVariant ?? '').trim() || pc.variant;
   if (variant && !variantSupport(providerName, pc.bin, model, variant)) variant = undefined;
   if (providerName === 'opencode' && !model.includes('/')) {
     warnings.push(`opencode addresses a model as "provider/model"; set escalation.modelProvider (or use a "provider/model" model); got "${model}"`);
@@ -1748,7 +1882,12 @@ export function resolveEscalation(
       timeoutMin: config.timeoutMin,
       idleTimeoutMin: pc.idleTimeoutMin ?? config.idleTimeoutMin,
       autoApprove: config.autoApprove,
-      sources: { provider: 'escalation', model: 'escalation', modelProvider: config.escalation.modelProvider ? 'escalation' : pc.modelProvider ? 'config' : 'provider default', variant: variant ? 'config' : 'provider default' },
+      sources: {
+        provider: meta.escalationProvider ? 'task front matter' : 'escalation',
+        model: meta.escalationModel ? 'task front matter' : 'escalation',
+        modelProvider: meta.escalationModelProvider ? 'task front matter' : config.escalation.modelProvider ? 'escalation' : pc.modelProvider ? 'config' : 'provider default',
+        variant: meta.escalationVariant ? 'task front matter' : variant ? 'config' : 'provider default',
+      },
     },
     warnings,
   };

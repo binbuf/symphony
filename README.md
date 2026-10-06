@@ -10,7 +10,7 @@ A reasonably thin LLM task harness. Chain complex task sets together, use multip
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output. An optional [`mcp` block](#mcp-selection) can scope each session to a chosen subset of servers, so unrelated toolchains cost nothing.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [MCP selection](#mcp-selection) · [Providers](#providers) · [Escalation](#escalation) · [Fallback](#fallback) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Judge](#judge) · [Slack notifications](#slack-notifications) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [MCP selection](#mcp-selection) · [Providers](#providers) · [Escalation](#escalation) · [Fallback](#fallback) · [Model tiers](#model-tiers) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Judge](#judge) · [Slack notifications](#slack-notifications) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -441,8 +441,18 @@ modelProvider: openrouter
 variant: high
 timeoutMin: 90
 verify: npm test -- --runInBand
+hitl: true
+escalation: true
+escalationProvider: codex
+escalationModel: gpt-6-astra
+escalationVariant: high
 ---
 ```
+
+Two optional flags go beyond per-task model selection:
+
+- **`hitl: true`** marks a human checkpoint. The task runs normally, then the harness pauses the run when it finishes (`done`) by placing the `.stop` sentinel, so a person can review before the next task starts. Remove the sentinel and re-run to continue. It accepts `true`/`yes`/`on`/`1` and `false`/`no`/`off`/`0`.
+- **`escalation:`** is a per-task escalation override. `escalation: true` turns escalation on for this task even when `escalation.enabled` is false (and `escalation: false` turns it off for this task), while `escalationProvider`/`escalationModel`/`escalationModelProvider`/`escalationVariant` replace the configured target — so a task already running above the workhorse can name a peer-or-better escalation model instead of dropping to the global one. When combined with [`modelTiers`](#model-tiers), the harness refuses a downgrade according to `modelTierPolicy`.
 
 When a provider declares `providers.<name>.models`, those front-matter `model:`/`variant:` values are checked against that allowlist (each model names the `variants` it supports) and an unknown one falls back to the provider's configured default; `symphony lint` reports it as an error instead. `--model`/`--model-provider`/`--variant` and their `SYMPHONY_*` env vars are not constrained.
 
@@ -603,6 +613,8 @@ It is off by default, and the shipped default target is OpenCode running **GLM-5
 
 Escalation is bounded: `maxAttempts` caps it, and `maxIterationsPerTask` still caps the task as a whole, so a task can never ping-pong between models forever. Every session records the provider and model that ran it in `docs/logs/TNN.md`, so an escalated task is visible in the committed log. The escalation provider is also checked during preflight, so a missing binary is reported before the run starts rather than mid-task.
 
+A task can turn escalation on for itself and replace the target with front matter — `escalation: true`, `escalationProvider`, `escalationModel`, `escalationModelProvider`, `escalationVariant` — so a task already running above the workhorse is not dropped to a weaker global target. With a [model tier registry](#model-tiers) configured, the harness also compares tiers and refuses to escalate downwards unless `modelTierPolicy.onDowngrade` allows it.
+
 ## Fallback
 
 Escalation reacts to the *task* failing. Its opposite number, **fallback**, reacts to the *provider* failing: when the primary provider keeps dying on a transient infrastructure fault — a dropped connection, a `500`/`503`, "model not available", "resource busy" — the task is switched to a second provider/model for the rest of its retries. This is the case where a flaky upstream (or a routing provider having a bad day) would otherwise fail work that a different route — say a second OpenCode routed through another gateway — could still do.
@@ -635,6 +647,29 @@ A category that is normally fatal (the shipped defaults halt on `model`, so a re
 | `onCategories` | `[rate_limit, overloaded, server, network, stall, crash]` | transient categories that trigger a switch |
 
 Every session records the provider and model that ran it in `docs/logs/TNN.md`, so a switched task is visible in the committed log, and the fallback provider is checked during preflight like any other.
+
+## Model tiers
+
+Escalation and fallback exist to *raise* a task's odds, so neither should silently hand it to a weaker model. **`modelTiers`** is an ordered capability registry spanning every provider: each entry names a `provider`, a `model` (with `modelProvider` for OpenCode), and an integer `tier` where a higher number is more capable. Entries that share a tier are ranked by array order — the earlier entry has priority.
+
+```json
+"modelTiers": [
+  { "provider": "opencode", "model": "deepseek/deepseek-v4.1-flash", "modelProvider": "openrouter", "tier": 3 },
+  { "provider": "opencode", "model": "z-ai/glm-5.3", "modelProvider": "openrouter", "tier": 5 },
+  { "provider": "codex", "model": "gpt-6-sol", "tier": 6 },
+  { "provider": "codex", "model": "gpt-6-astra", "tier": 7 }
+]
+```
+
+Every model the harness may run should have an entry — the active provider's default and its `models` allowlist, plus any enabled escalation/fallback/watch/judge target. When a task is about to escalate (config or per-task front matter) or switch to the fallback, the harness compares the target's tier against the model *currently* running the task; `modelTierPolicy.onDowngrade` decides what happens when the target is lower:
+
+| value | meaning |
+|---|---|
+| `downgrade` | switch anyway (the default; the pre-tier behaviour) |
+| `wait` | keep the current model and let its exponential-backoff retry continue |
+| `block` | keep the current model, park the task and halt the run for a human |
+
+An unmapped model (or an empty registry) is never treated as a downgrade, so this is purely opt-in: with no `modelTiers`, behaviour is exactly as before. `loadConfig` warns when a registry is present but a configured model has no tier, so gaps surface early rather than mid-run.
 
 ## Jev
 
@@ -910,6 +945,8 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 |---|---|---|
 | `provider` | `claude` | `claude` · `cursor` · `opencode` · `codex` · `gemini` · `antigravity` |
 | `providers.<name>.bin` `.model` `.modelProvider` `.variant` `.models` `.extraArgs` `.budgetUsd` `.idleTimeoutMin` | see `symphony.config.example.json` | binary (a `PATH` name, or an absolute/`~`/project-relative path that overrides `PATH`), default model, upstream provider for OpenCode's `provider/model` form, reasoning-effort default (`high`), allowed models for task front-matter overrides (each `{ id, variants }`; absent = any), extra CLI args, per-task budget (Claude), stall timeout override |
+| `modelTiers` | `[]` | ordered capability registry spanning providers: `[{ provider, model, modelProvider?, tier }]`. Higher `tier` = more capable, array order breaks ties. Used to refuse an escalation/fallback that would lower a task's model capability (see [Model tiers](#model-tiers)); `tier` also accepts `model_tier`/`modelTier` |
+| `modelTierPolicy.onDowngrade` | `downgrade` | what to do when an escalation/fallback target is a lower tier than the running model: `downgrade` (switch anyway), `wait` (retry the current model), or `block` (park the task and halt) |
 | `paths.docs` | `docs` (legacy `.docs` honoured) | planning package directory |
 | `paths.roadmap` `.progress` `.tasks` `.design` `.adr` `.logs` `.index` | derived from `paths.docs` | individual overrides, absolute or root-relative |
 | `paths.stop` | `.stop` | graceful-pause sentinel (absolute or root-relative) |

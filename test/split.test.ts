@@ -13,7 +13,7 @@ import { parseRoadmap } from '../src/roadmap.js';
 import type { RunContext, RunFlags } from '../src/runner.js';
 import { applySplitState, buildSplitPrompt, checkSplit, childIdSequence, childIdsFor, splitCommand, splitTask } from '../src/split.js';
 import { loadState, newTaskState, type State } from '../src/state.js';
-import { discoverTasks, parseFrontMatter, type Task } from '../src/tasks.js';
+import { discoverTasks, metaBool, parseFrontMatter, type Task } from '../src/tasks.js';
 import { UsageError } from '../src/util.js';
 
 const silent: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner() {} };
@@ -271,6 +271,39 @@ test('parseFrontMatter strips only matching surrounding quotes, keeping inner qu
   assert.equal(meta.quoted, 'make check');
   assert.equal(meta.single, 'make check');
   assert.equal(meta.shell, "grep -q 'm7=GREEN'");
+});
+
+test('metaBool reads yes/no spellings and leaves an absent or unparseable key undefined', () => {
+  assert.equal(metaBool({ hitl: 'true' }, 'hitl'), true);
+  assert.equal(metaBool({ hitl: 'YES' }, 'hitl'), true);
+  assert.equal(metaBool({ hitl: 'on' }, 'hitl'), true);
+  assert.equal(metaBool({ hitl: '1' }, 'hitl'), true);
+  assert.equal(metaBool({ hitl: 'false' }, 'hitl'), false);
+  assert.equal(metaBool({ hitl: 'Off' }, 'hitl'), false);
+  assert.equal(metaBool({ hitl: '0' }, 'hitl'), false);
+  assert.equal(metaBool({}, 'hitl'), undefined);
+  assert.equal(metaBool({ hitl: 'maybe' }, 'hitl'), undefined);
+  assert.equal(metaBool(undefined, 'hitl'), undefined);
+});
+
+test('discoverTasks surfaces front-matter hitl as a typed flag', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-hitl-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  mkdirSync(paths.tasksDir, { recursive: true });
+  writeFileSync(join(paths.tasksDir, '01-review.md'), '---\nhitl: true\nmodel: m\n---\n\n# T01\n\nbody\n');
+  writeFileSync(join(paths.tasksDir, '02-normal.md'), '---\nmodel: m\n---\n\n# T02\n\nbody\n');
+  const roadmap = parseRoadmap([
+    '# Roadmap',
+    '',
+    '## Phase 1',
+    '',
+    '- [ ] T01 — Review → [tasks/01-review.md](tasks/01-review.md)',
+    '- [ ] T02 — Normal → [tasks/02-normal.md](tasks/02-normal.md)',
+  ].join('\n'));
+  const { tasks } = discoverTasks(paths, roadmap);
+  assert.equal(tasks.find((t) => t.id === 'T01')?.hitl, true);
+  assert.equal(tasks.find((t) => t.id === 'T02')?.hitl, undefined);
 });
 
 test('splitCommand --dry-run prints the prompt for the subtasks and touches nothing', async () => {

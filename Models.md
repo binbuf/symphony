@@ -9,6 +9,16 @@ the harness passes straight through. To constrain what a task file may pick, lis
 an allowlist, and anything outside it is ignored in favour of the configured default. `--model` and
 `SYMPHONY_MODEL` remain escape hatches.
 
+Give each model a capability **tier** in `modelTiers` so the harness never escalates or falls back to
+a weaker model by accident. A higher `tier` is more capable; models sharing a tier are ranked by
+their order in the array (earlier = higher priority). Entries are `{ provider, model, modelProvider?,
+tier }` and span providers. With a registry configured, `modelTierPolicy.onDowngrade` chooses what
+happens when an escalation/fallback target is lower: `downgrade` (switch anyway, the default), `wait`
+(retry the current model), or `block` (park the task and halt). See the [Model tiers](README.md#model-tiers)
+section of the README. Rough capability ordering for the models below: Flash/lite models ~2–3,
+Sonnet/Pro/workhorse ~4–5, top reasoning (Opus, Sol, GLM-5.3, Gemini 3.1 Pro) ~5–6, and the most
+capable (Fable, Astra) ~7–8. Confirm against your own benchmarks before relying on it.
+
 ## Reasoning effort
 
 Reasoning effort is set separately from the model id and defaults to `high` for every provider that

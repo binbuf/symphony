@@ -126,6 +126,52 @@ test('a pause-now request closes the task out, commits the slice, and pauses for
   }
 });
 
+test('a hitl task pauses the run once it completes', async () => {
+  const { paths, task } = project();
+  task.hitl = true;
+  const state: State = loadState(paths);
+  const config = { ...DEFAULTS, provider: 'fake' as const, maxContinuations: 3, watch: { ...DEFAULTS.watch, enabled: false } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    assert.equal(state.tasks.T01.status, 'done');
+    assert.ok(stopPresent(paths), 'the harness pauses after the hitl task completes');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('modelTierPolicy block stops a downgrading escalation instead of switching', async () => {
+  const { dir, paths, task } = project();
+  task.meta = { provider: 'fake', model: 'big' };
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    claudeResult('failed', 'nope'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    watch: { ...DEFAULTS.watch, enabled: false },
+    escalation: { ...DEFAULTS.escalation, enabled: true, provider: 'fake' as const, model: 'small', modelProvider: undefined },
+    modelTiers: [
+      { provider: 'fake' as const, model: 'big', id: 'big', tier: 5, order: 0 },
+      { provider: 'fake' as const, model: 'small', id: 'small', tier: 1, order: 1 },
+    ],
+    modelTierPolicy: { onDowngrade: 'block' as const },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'blocked', 'the task is parked, not failed, for a tier block');
+    assert.equal(out.halt?.category, 'model_tier');
+    assert.equal(state.tasks.T01.status, 'blocked');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
 test('an mcp selection reaches the task prompt and the run log', async () => {
   const { paths, task } = project();
   const state: State = loadState(paths);

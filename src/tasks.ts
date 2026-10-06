@@ -16,6 +16,28 @@ export interface Task {
   taskFileRel?: string;
   /** Front matter from the task file (provider, model, timeoutMin). */
   meta: Record<string, string>;
+  /**
+   * Front-matter `hitl: true`: this task is a human checkpoint. The harness runs it normally, then
+   * pauses the run once it finishes so a person can review before the next task starts.
+   */
+  hitl?: boolean;
+}
+
+const META_TRUE = new Set(['true', 'yes', '1', 'on']);
+const META_FALSE = new Set(['false', 'no', '0', 'off']);
+
+/**
+ * Read a boolean-ish front-matter value. Front matter is parsed as strings, so `hitl: true`
+ * arrives as `"true"`; this accepts the usual spellings and returns undefined for an absent or
+ * unparseable value (so the caller's default wins rather than a silent `false`).
+ */
+export function metaBool(meta: Record<string, string> | undefined, key: string): boolean | undefined {
+  const raw = meta?.[key];
+  if (raw === undefined) return undefined;
+  const v = raw.trim().toLowerCase();
+  if (META_TRUE.has(v)) return true;
+  if (META_FALSE.has(v)) return false;
+  return undefined;
 }
 
 /** `01-slug.md`, `10a-slug.md`, `T10a1-slug.md` — the id's numeric base plus optional split suffix. */
@@ -92,6 +114,7 @@ export function discoverTasks(paths: Paths, roadmap: Roadmap): { tasks: Task[]; 
       taskFile: file,
       taskFileRel: file ? rel(paths.root, file) : undefined,
       meta,
+      hitl: metaBool(meta, 'hitl'),
     };
   });
 

@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from
 import { join, relative } from 'node:path';
 import { decideBreakdown, type BreakdownEvidence, type BreakdownStage, type BreakdownVerdict } from './breakdown.js';
 import { classifyFailure, type Classified, type FailureEvidence } from './classify.js';
-import { resolveEscalation, resolveFallback, resolveJudge, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
+import { isModelDowngrade, lookupModelTier, resolveEscalation, resolveFallback, resolveJudge, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
 import { writeProgressIndex } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { commitAll, currentBranch, describeCommit, headSha } from './git.js';
@@ -29,7 +29,7 @@ import { startSession, type Session, type SessionOutcome } from './session.js';
 import type { SplitResult } from './split.js';
 import { pidAlive, updatePipelineStatus } from './status.js';
 import { DONE_STATES, SKIP_STATES, acquireLock, haltResumeHint, liveLock, newTaskState, readLock, releaseLock, saveState, startLockHeartbeat, type Halted, type LastError, type LogRef, type State, type TaskState, type TaskStatus } from './state.js';
-import { parseFrontMatter, type Task } from './tasks.js';
+import { metaBool, parseFrontMatter, type Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, squash, stamp } from './util.js';
 import { runVerify, type VerifyResult } from './verify.js';
 import { visionPromptNote } from './vision.js';
@@ -936,8 +936,11 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   let spec = resolved.spec;
   warnings.forEach((w) => log.warn(`${task.id}: ${w}`));
   let provider = getProvider(spec.providerName);
-  const escalation = resolveEscalation(config, spec, (p) => getProvider(p).supportsBudget, variantSupported);
+  const escalation = resolveEscalation(config, spec, (p) => getProvider(p).supportsBudget, variantSupported, task);
   escalation?.warnings.forEach((w) => log.warn(`${task.id}: ${w}`));
+  if (!escalation && metaBool(task.meta, 'escalation')) {
+    log.warn(`${task.id}: front matter requests escalation but no usable escalation target is configured; escalation is off for this task`);
+  }
   const maxEscalations = escalation ? Math.max(0, config.escalation.maxAttempts) : 0;
   const escalationCategories = new Set(config.escalation.onCategories);
   let escalations = 0;
@@ -979,6 +982,25 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   const tryEscalate = async (category: string, reason: string, opts: { skipDecision?: boolean } = {}): Promise<boolean> => {
     if (!escalation || escalations >= maxEscalations) return false;
     if (!escalationCategories.has(category)) return false;
+    // Never drop a task to a less capable model. A front-matter `model:` override may have raised the
+    // task above the configured workhorse, so compare the escalation target with the model now running
+    // the task (which a fallback may also have changed). `wait` skips the escalation and takes the
+    // ordinary failure path; `block` stops the run for a human; `downgrade` proceeds as configured.
+    const currentTier = lookupModelTier(config, spec.providerName, spec.model);
+    const escTier = lookupModelTier(config, escalation.spec.providerName, escalation.spec.model);
+    if (isModelDowngrade(currentTier, escTier)) {
+      const detail = `escalation target ${sessionLabel(escalation.spec)} is a lower model tier than ${sessionLabel(spec)}`;
+      if (config.modelTierPolicy.onDowngrade === 'wait') {
+        log.warn(`${task.id}: ${detail}; not escalating (modelTierPolicy.onDowngrade: wait).`);
+        return false;
+      }
+      if (config.modelTierPolicy.onDowngrade === 'block') {
+        log.error(`${task.id}: ${detail}; stopping for a human (modelTierPolicy.onDowngrade: block).`);
+        halt = { at: nowIso(), taskId: task.id, category: 'model_tier', reason: `${detail}. Add an escalation target at or above that tier, or set modelTierPolicy.onDowngrade.` };
+        return false;
+      }
+      log.warn(`${task.id}: ${detail}; escalating anyway (modelTierPolicy.onDowngrade: downgrade).`);
+    }
     if (!opts.skipDecision && config.jev.enabled && config.jev.escalationDecision) {
       const problem = jevProblem(config.jev, process.env);
       if (problem) {
@@ -1034,6 +1056,8 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
    * reload; `escalated` means a fresh attempt is starting; `failed` means give up on this task.
    */
   const recover = async (category: string, reason: string): Promise<'split' | 'replan' | 'escalated' | 'failed'> => {
+    // A tier-policy `block` already stopped the run; do not spend a breakdown decision or escalate.
+    if (halt) return 'failed';
     const attempt = await autoBreakdown(ctx, task, breakdownEvidence(ctx, task, 'failure', { category, reason, continuations: continuation }));
     if (attempt.split) return 'split';
     if (attempt.replan) return 'replan';
@@ -1054,6 +1078,25 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
    */
   const switchToFallback = (c: Classified): boolean => {
     if (!fallback || onFallback || !fallbackCategories.has(c.category)) return false;
+    // The fallback exists to keep a flaky route from failing work, not to silently halve capability.
+    // Compare it with the model currently running (a task override may sit above the workhorse). The
+    // policy decides: `downgrade` switches anyway, `wait` keeps retrying the same model with backoff,
+    // `block` stops the run for a human.
+    const currentTier = lookupModelTier(config, spec.providerName, spec.model);
+    const fbTier = lookupModelTier(config, fallback.spec.providerName, fallback.spec.model);
+    if (isModelDowngrade(currentTier, fbTier)) {
+      const detail = `fallback target ${sessionLabel(fallback.spec)} is a lower model tier than ${sessionLabel(spec)}`;
+      if (config.modelTierPolicy.onDowngrade === 'wait') {
+        log.warn(`${task.id}: ${detail}; staying on the current model and retrying (modelTierPolicy.onDowngrade: wait).`);
+        return false;
+      }
+      if (config.modelTierPolicy.onDowngrade === 'block') {
+        log.error(`${task.id}: ${detail}; stopping for a human (modelTierPolicy.onDowngrade: block).`);
+        halt = { at: nowIso(), taskId: task.id, category: 'model_tier', reason: `${detail}. Add a fallback at or above that tier, or set modelTierPolicy.onDowngrade.` };
+        return false;
+      }
+      log.warn(`${task.id}: ${detail}; switching anyway (modelTierPolicy.onDowngrade: downgrade).`);
+    }
     const from = spec;
     onFallback = true;
     spec = fallback.spec;
@@ -1077,7 +1120,11 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     // of this task's attempts to the fallback provider, so a flaky upstream never fails work a
     // different route could still do. Gated by category, and switched at most once per task; the
     // fallback gets its own fresh retry budget so the primary's exhaustion does not carry over.
-    if (retryCount >= fallbackAfter) switchToFallback(c);
+    if (retryCount >= fallbackAfter) {
+      switchToFallback(c);
+      // A tier-policy `block` set a halt: surface the failure so the run stops instead of retrying.
+      if (halt) return false;
+    }
     if (retryCount >= maxAttempts) return false;
     retryCount += 1;
     // A transient infra fault (rate limit, 5xx, dropped socket) is not a task attempt: give the
@@ -1471,11 +1518,17 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     break;
   }
 
-  await finalizeTask(ctx, task, st, final ?? { status: 'failed', summary: 'no attempt ran' }, halt);
+  // A `modelTierPolicy.onDowngrade: block` stops the run for a human rather than failing the task on
+  // an infrastructure rule: record it as blocked, not failed, so the operator sees what to fix.
+  let outcomeFinal = final ?? { status: 'failed', summary: 'no attempt ran' };
+  if (halt?.category === 'model_tier' && outcomeFinal.status === 'failed') {
+    outcomeFinal = { status: 'blocked', summary: halt.reason, lastError: { category: 'model_tier', message: halt.reason, transient: false, fatal: false, at: nowIso() } };
+  }
+  await finalizeTask(ctx, task, st, outcomeFinal, halt);
   // A session stopped by the run view (TUI quit/split) marks the outcome interrupted without
   // necessarily setting ctx.interrupted; report that too, so the run loop never counts a manual stop
   // as a failure against halt.maxConsecutiveFailures.
-  return { status: final?.status ?? 'failed', halt, interrupted: ctx.interrupted || final?.lastError?.category === 'interrupted' };
+  return { status: outcomeFinal.status, halt, interrupted: ctx.interrupted || outcomeFinal.lastError?.category === 'interrupted' };
 }
 
 function selectTasks(ctx: RunContext): Task[] {
@@ -1650,20 +1703,30 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   // Tasks may override the provider in front matter: preflight every provider this run will use.
   const extraProviders: ExtraProvider[] = [];
   const seenProviders = new Set([spec.providerName]);
+  const addExtra = (s: SessionSpec, label: string): void => {
+    if (seenProviders.has(s.providerName)) return;
+    seenProviders.add(s.providerName);
+    extraProviders.push({ spec: s, provider: getProvider(s.providerName), label });
+  };
   for (const t of todo) {
     const rs = resolveSession(config, t, ctx.cli, process.env, (p) => getProvider(p).supportsBudget, variantSupported);
-    if (seenProviders.has(rs.spec.providerName)) continue;
-    seenProviders.add(rs.spec.providerName);
-    rs.warnings.forEach((w) => log.warn(`${t.id}: ${w}`));
-    extraProviders.push({ spec: rs.spec, provider: getProvider(rs.spec.providerName), label: t.id });
+    if (!seenProviders.has(rs.spec.providerName)) {
+      rs.warnings.forEach((w) => log.warn(`${t.id}: ${w}`));
+      addExtra(rs.spec, t.id);
+    }
+    // A task may name its own escalation target (and enable escalation for itself): preflight that
+    // provider too, so a missing binary is found now rather than mid-task.
+    const esc = resolveEscalation(config, rs.spec, (p) => getProvider(p).supportsBudget, variantSupported, t);
+    if (esc && !seenProviders.has(esc.spec.providerName)) {
+      esc.warnings.forEach((w) => log.warn(`${t.id}: ${w}`));
+      addExtra(esc.spec, `${t.id} escalation`);
+    }
   }
   // The escalation target only launches when a task fails, but its provider still has to pass
   // preflight now: discovering a missing binary mid-run is exactly what preflight exists to avoid.
-  const escPreflight = resolveEscalation(config, spec, (p) => getProvider(p).supportsBudget, variantSupported);
+  const escPreflight = resolveEscalation(config, spec, (p) => getProvider(p).supportsBudget, variantSupported, first);
   escPreflight?.warnings.forEach((w) => log.warn(w));
-  if (escPreflight && !seenProviders.has(escPreflight.spec.providerName)) {
-    extraProviders.push({ spec: escPreflight.spec, provider: getProvider(escPreflight.spec.providerName), label: 'escalation' });
-  }
+  if (escPreflight) addExtra(escPreflight.spec, 'escalation');
   // Likewise the fallback target, which only launches after repeated transient faults.
   const fbPreflight = resolveFallback(config, spec, (p) => getProvider(p).supportsBudget, variantSupported);
   fbPreflight?.warnings.forEach((w) => log.warn(w));
@@ -1726,7 +1789,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       log.plain(`\n=== ${t.id} — ${t.title}`);
       log.plain(`provider: ${rs.spec.providerName} [${rs.spec.sources.provider}] · model: ${rs.spec.model ?? 'provider default'} [${rs.spec.sources.model}]${rs.spec.variant ? ` · variant: ${rs.spec.variant} [${rs.spec.sources.variant}]` : ''} · timeout ${rs.spec.timeoutMin} min · idle ${rs.spec.idleTimeoutMin} min · auto-approve ${rs.spec.autoApprove}`);
       if (mcp) log.plain(mcp.label);
-      const esc = resolveEscalation(config, rs.spec, (p) => getProvider(p).supportsBudget, variantSupported);
+      const esc = resolveEscalation(config, rs.spec, (p) => getProvider(p).supportsBudget, variantSupported, t);
       if (esc) log.plain(`escalation: ${esc.spec.providerName} · ${esc.spec.model}${esc.spec.variant ? ` · variant ${esc.spec.variant}` : ''} if the task fails (${config.escalation.onCategories.join(', ')}; max ${config.escalation.maxAttempts} session${config.escalation.maxAttempts === 1 ? '' : 's'})`);
       const bd = config.breakdown;
       if (bd.enabled) {
@@ -1923,7 +1986,21 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       const overBudget = await budgetHalt();
       if (overBudget !== undefined) return overBudget;
 
-      if (out.status === 'done') { consecutiveFailures = 0; continue; }
+      if (out.status === 'done') {
+        consecutiveFailures = 0;
+        // A `hitl: true` task is a human checkpoint: run it to completion, then pause the run so a
+        // person can review before the next task starts.
+        if (task.hitl) {
+          try {
+            placeStop(paths);
+          } catch (e) {
+            log.warn(`${task.id}: hitl: could not place ${relative(paths.root, paths.stop)} (${(e as Error).message}); pausing anyway`);
+          }
+          log.warn(`${task.id}: human-in-the-loop (hitl) — task done; pausing. Remove ${relative(paths.root, paths.stop)} and re-run to continue.`);
+          return 0;
+        }
+        continue;
+      }
       if (out.status === 'blocked') {
         fireHook(config, 'onBlocked', {
           SYMPHONY_ROOT: paths.root,
