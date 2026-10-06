@@ -169,6 +169,32 @@ test('escalation inherits the provider default variant and is gated the same way
   assert.equal(resolveEscalation(cfg, primary, () => true, () => false)?.spec.variant, undefined);
 });
 
+test('escalation.variant overrides the provider default and yields to front matter', () => {
+  const cfg = { ...DEFAULTS, escalation: { ...DEFAULTS.escalation, enabled: true, variant: 'flex-high' } };
+  const primary = resolveSession(cfg, task(), {}, {}, () => true, () => true).spec;
+  const esc = resolveEscalation(cfg, primary, () => true, () => true);
+  assert.equal(esc?.spec.variant, 'flex-high');
+  assert.equal(esc?.spec.sources.variant, 'escalation');
+  // Per-task front matter wins over the configured escalation variant.
+  const perTask = resolveEscalation(cfg, primary, () => true, () => true, task({ escalationVariant: 'xhigh' }));
+  assert.equal(perTask?.spec.variant, 'xhigh');
+  assert.equal(perTask?.spec.sources.variant, 'task front matter');
+  // A variant the target model does not support is dropped, as for any resolved variant.
+  assert.equal(resolveEscalation(cfg, primary, () => true, () => false)?.spec.variant, undefined);
+});
+
+test('escalation.variant parses from the config file; a non-string warns and is ignored', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-esc-var-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({ escalation: { variant: 'flex-high' } }));
+  assert.equal(loadConfig(paths, {}).config.escalation.variant, 'flex-high');
+  writeFileSync(paths.config, JSON.stringify({ escalation: { variant: 3 } }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.escalation.variant, undefined);
+  assert.ok(warnings.some((w) => /escalation\.variant/.test(w)));
+});
+
 test('paths section is parsed and drives every location; unknown keys warn', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-cfg-'));
   const paths = resolvePaths(dir);

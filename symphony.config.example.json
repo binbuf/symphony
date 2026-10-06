@@ -97,10 +97,12 @@
     "extraIgnore": []
   },
   "escalation": {
+    "_escalation": "When a task fails (or a review reports `rework`), hand it to this provider/model. `variant` sets the reasoning effort for escalated sessions only; unset inherits the escalation provider's default. A task may override any of these with `escalation*` front matter, which wins.",
     "enabled": false,
     "provider": "opencode",
     "model": "z-ai/glm-5.3",
     "modelProvider": "openrouter",
+    "variant": "high",
     "maxAttempts": 1,
     "onCategories": [
       "task",

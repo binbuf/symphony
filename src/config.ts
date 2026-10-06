@@ -112,6 +112,8 @@ export interface EscalationConfig {
   model: string;
   /** OpenCode only: upstream provider for a bare `model` (e.g. "openrouter"); defaults to the provider's own. */
   modelProvider?: string;
+  /** Optional reasoning-effort override for the escalation; inherited from the provider config when unset. */
+  variant?: string;
   /** How many escalation sessions a single task may take before it is failed for good. */
   maxAttempts: number;
   /** Failure categories that hand the task to the escalation model. */
@@ -1268,6 +1270,13 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         provider,
         model,
         modelProvider,
+        variant: (() => {
+          const v = escRaw.variant;
+          if (v === undefined || v === null) return undefined;
+          if (typeof v === 'string') return v.trim() || undefined;
+          warnings.push(`escalation.variant: expected a string, got ${JSON.stringify(v)}; using provider default`);
+          return undefined;
+        })(),
         maxAttempts: Math.max(0, numberOr(escRaw.maxAttempts, DEFAULTS.escalation.maxAttempts, 'escalation.maxAttempts', warnings)),
         onCategories: stringArray(escRaw.onCategories, DEFAULTS.escalation.onCategories, 'escalation.onCategories', warnings),
       };
@@ -1828,7 +1837,7 @@ export function resolveBreakdown(
 /**
  * The escalation target, when one is configured and enabled. Returns undefined when escalation is
  * off or has no usable model (so the caller falls back to failing the task as before). The spec is
- * built from config alone: escalation is its own provider/model, not a per-task front-matter knob.
+ * built from the `escalation` block, with optional per-task front-matter overrides.
  */
 export function resolveEscalation(
   config: Config,
@@ -1866,7 +1875,7 @@ export function resolveEscalation(
     warnings.push(`escalation budget ${budgetUsd} USD ignored: provider ${providerName} has no budget flag`);
     budgetUsd = undefined;
   }
-  let variant = (meta.escalationVariant ?? '').trim() || pc.variant;
+  let variant = (meta.escalationVariant ?? '').trim() || config.escalation.variant || pc.variant;
   if (variant && !variantSupport(providerName, pc.bin, model, variant)) variant = undefined;
   if (providerName === 'opencode' && !model.includes('/')) {
     warnings.push(`opencode addresses a model as "provider/model"; set escalation.modelProvider (or use a "provider/model" model); got "${model}"`);
@@ -1886,7 +1895,7 @@ export function resolveEscalation(
         provider: meta.escalationProvider ? 'task front matter' : 'escalation',
         model: meta.escalationModel ? 'task front matter' : 'escalation',
         modelProvider: meta.escalationModelProvider ? 'task front matter' : config.escalation.modelProvider ? 'escalation' : pc.modelProvider ? 'config' : 'provider default',
-        variant: meta.escalationVariant ? 'task front matter' : variant ? 'config' : 'provider default',
+        variant: meta.escalationVariant ? 'task front matter' : variant ? (config.escalation.variant ? 'escalation' : 'config') : 'provider default',
       },
     },
     warnings,

@@ -597,6 +597,7 @@ It is off by default, and the shipped default target is OpenCode running **GLM-5
   "provider": "opencode",
   "model": "z-ai/glm-5.3",
   "modelProvider": "openrouter",
+  "variant": "high",
   "maxAttempts": 1,
   "onCategories": ["task", "verify"]
 }
@@ -608,12 +609,13 @@ It is off by default, and the shipped default target is OpenCode running **GLM-5
 | `provider` | `opencode` | provider the escalated sessions run on; set it to your own provider for a same-provider model bump |
 | `model` | `z-ai/glm-5.3` | model the escalation provider runs |
 | `modelProvider` | `openrouter` | OpenCode only: the upstream provider `model` belongs to (composed as `modelProvider/model`) |
+| `variant` | – | optional reasoning-effort override for escalated sessions; defaults to the provider's own |
 | `maxAttempts` | `1` | escalation sessions a single task may take before it is failed for good |
 | `onCategories` | `[task, verify]` | the give-up reasons that escalate: `task` covers a reported `failed` and the continuation limit, `verify` a rejected `done` |
 
 Escalation is bounded: `maxAttempts` caps it, and `maxIterationsPerTask` still caps the task as a whole, so a task can never ping-pong between models forever. Every session records the provider and model that ran it in `docs/logs/TNN.md`, so an escalated task is visible in the committed log. The escalation provider is also checked during preflight, so a missing binary is reported before the run starts rather than mid-task.
 
-A task can turn escalation on for itself and replace the target with front matter — `escalation: true`, `escalationProvider`, `escalationModel`, `escalationModelProvider`, `escalationVariant` — so a task already running above the workhorse is not dropped to a weaker global target. With a [model tier registry](#model-tiers) configured, the harness also compares tiers and refuses to escalate downwards unless `modelTierPolicy.onDowngrade` allows it.
+A task can turn escalation on for itself and replace the target with front matter — `escalation: true`, `escalationProvider`, `escalationModel`, `escalationModelProvider`, `escalationVariant` — so a task already running above the workhorse is not dropped to a weaker global target. Otherwise the configured target applies, including its `escalation.variant` reasoning-effort override. With a [model tier registry](#model-tiers) configured, the harness also compares tiers and refuses to escalate downwards unless `modelTierPolicy.onDowngrade` allows it.
 
 ## Fallback
 
