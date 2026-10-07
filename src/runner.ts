@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from
 import { join, relative } from 'node:path';
 import { decideBreakdown, type BreakdownEvidence, type BreakdownStage, type BreakdownVerdict } from './breakdown.js';
 import { classifyFailure, type Classified, type FailureEvidence } from './classify.js';
-import { isModelDowngrade, lookupModelTier, resolveEscalation, resolveFallback, resolveJudge, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
+import { isFlexVariant, isModelDowngrade, lookupModelTier, resolveEscalation, resolveFallback, resolveJudge, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
 import { writeProgressIndex } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { commitAll, currentBranch, describeCommit, headSha } from './git.js';
@@ -952,6 +952,13 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   const fallbackCategories = new Set(config.fallback.onCategories);
   const fallbackAfter = Math.max(0, config.fallback.afterAttempts);
   let onFallback = false;
+  // Flex service-tier handling: a capacity fault while running a flex variant is not a task failure.
+  // The default policy waits (polls) until capacity returns so an unattended run resumes on its own.
+  let flexWaitPending = false;
+  let flexWaitSec = 0;
+  let flexWaits = 0;
+  let flexWaitedMs = 0;
+  let warnedNoFlexFallback = false;
   const maxAttempts = Math.max(1, config.retry.maxAttempts);
   const maxContinuations = Math.max(0, config.maxContinuations);
   const maxIterations = Math.max(0, config.maxIterationsPerTask);
@@ -1076,8 +1083,11 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
    * fallback is a fresh route) and drops resume state (the new provider never saw the old session).
    * Returns true when the switch happened.
    */
-  const switchToFallback = (c: Classified): boolean => {
-    if (!fallback || onFallback || !fallbackCategories.has(c.category)) return false;
+  const switchToFallback = (c: Classified, force = false): boolean => {
+    if (!fallback || onFallback) return false;
+    // `force` is the flex path: the failure category is a flex-capacity event, not necessarily one in
+    // `fallback.onCategories`, and the switch is immediate rather than after `fallbackAfter` retries.
+    if (!force && !fallbackCategories.has(c.category)) return false;
     // The fallback exists to keep a flaky route from failing work, not to silently halve capability.
     // Compare it with the model currently running (a task override may sit above the workhorse). The
     // policy decides: `downgrade` switches anyway, `wait` keeps retrying the same model with backoff,
@@ -1103,8 +1113,68 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     provider = getProvider(spec.providerName);
     resumeId = undefined;
     retryCount = 0;
-    log.warn(`${task.id}: ${c.category} — ${c.message}. Switching from ${sessionLabel(from)} to fallback ${sessionLabel(spec)}${c.transient ? ` after ${fallbackAfter} transient retr${fallbackAfter === 1 ? 'y' : 'ies'}` : ''}.`);
+    log.warn(`${task.id}: ${c.category} — ${c.message}. Switching from ${sessionLabel(from)} to fallback ${sessionLabel(spec)}${!force && c.transient ? ` after ${fallbackAfter} transient retr${fallbackAfter === 1 ? 'y' : 'ies'}` : ''}.`);
     return true;
+  };
+
+  /**
+   * Handle a capacity fault while running a flex service-tier variant, per `flex.onUnavailable`.
+   * Returns `'continue'` when the caller should retry (a wait was armed, or the task switched to the
+   * fallback), `'stop'` when the run must stop for a human, and `undefined` when this is not a
+   * flex-capacity event (so the ordinary fatal/transient path applies). A wait is bounded only by
+   * `flex.maxWaitMin` (0 = wait indefinitely) and, like a transient retry, never consumes the
+   * transient retry budget, the attempts halt budget or `maxIterationsPerTask`.
+   */
+  const handleFlexCapacity = (c: Classified, sessionId: string | undefined): 'continue' | 'stop' | undefined => {
+    if (!isFlexVariant(config, spec.variant)) return undefined;
+    const flex = config.flex;
+    // A configured capacity category, or a fatal `model`/`config` failure whose wording names the
+    // flex pool/endpoints — the shape a strict `provider.only: [openai/flex]` config reports when no
+    // flex endpoint is free. A task failure is never treated as a capacity event.
+    const capacity = flex.onCategories.includes(c.category)
+      || ((c.category === 'model' || c.category === 'config') && /flex|capacity|no (?:available |matching )?endpoints?|unavailable|overloaded/i.test(c.message));
+    if (!capacity) return undefined;
+    if (flex.onUnavailable === 'block') {
+      log.error(`${task.id}: flex capacity unavailable (${c.category}: ${c.message}); stopping for a human (flex.onUnavailable: block).`);
+      halt = { at: nowIso(), taskId: task.id, category: 'flex', reason: `flex capacity unavailable: ${c.message}. Retry when capacity returns, or set flex.onUnavailable to wait/fallback.` };
+      return 'stop';
+    }
+    if (flex.onUnavailable === 'fallback') {
+      const from = spec;
+      if (switchToFallback(c, true)) {
+        st.attempts = Math.max(0, st.attempts - 1);
+        iterations = Math.max(0, iterations - 1);
+        lastTransient = undefined;
+        log.warn(`${task.id}: flex capacity unavailable on ${sessionLabel(from)}; switched to the fallback route.`);
+        return 'continue';
+      }
+      if (!warnedNoFlexFallback) {
+        warnedNoFlexFallback = true;
+        log.warn(`${task.id}: flex.onUnavailable is "fallback" but no fallback provider/model is configured; waiting for flex capacity instead`);
+      }
+    }
+    const wait = Math.max(flex.pollSec, config.retry.honorRetryAfter ? c.retryAfterSec ?? 0 : 0);
+    if (flex.maxWaitMin > 0 && flexWaitedMs + wait * 1000 > flex.maxWaitMin * 60_000) {
+      log.warn(`${task.id}: flex capacity still unavailable after ${Math.round(flexWaitedMs / 60_000)}min (flex.maxWaitMin ${flex.maxWaitMin}); failing the task.`);
+      return undefined;
+    }
+    flexWaits += 1;
+    flexWaitedMs += wait * 1000;
+    flexWaitSec = wait;
+    flexWaitPending = true;
+    // Give back the attempt and the iteration: capacity waiting must not exhaust the budgets.
+    st.attempts = Math.max(0, st.attempts - 1);
+    iterations = Math.max(0, iterations - 1);
+    st.transientRetries = (st.transientRetries ?? 0) + 1;
+    lastTransient = c;
+    st.status = 'failed';
+    st.lastError = mkError(c);
+    st.summary = `${c.category}: ${c.message} (waiting for flex capacity)`;
+    st.finished = nowIso();
+    saveState(paths, state);
+    patchRoadmap(ctx, task.id, 'failed');
+    if (!provider.supportsResume || !sessionId) resumeId = undefined;
+    return 'continue';
   };
 
   /**
@@ -1157,7 +1227,9 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     }
     // Hard autonomy ceiling: a task that has burned its cost or wall-clock budget is parked as a scope
     // question rather than retried indefinitely. At least one session always runs (iterations > 0).
-    if (iterations > 0 && (config.ceiling.maxCostUsdPerTask > 0 || config.ceiling.maxMinutesPerTask > 0)) {
+    // A flex wait is not progress against the task's own ceiling: it is the harness waiting for
+    // capacity to return, which can legitimately outlast `ceiling.maxMinutesPerTask`.
+    if (!flexWaitPending && iterations > 0 && (config.ceiling.maxCostUsdPerTask > 0 || config.ceiling.maxMinutesPerTask > 0)) {
       const cost = st.costUsd ?? 0;
       const firstLog = st.logs?.[0]?.started;
       const startMs = firstLog ? Date.parse(firstLog) : Date.parse(st.started ?? '');
@@ -1174,8 +1246,14 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       }
     }
     if (lastTransient) {
-      const wait = retryDelaySec(config.retry, retryCount, lastTransient.retryAfterSec);
-      log.warn(`${task.id}: ${lastTransient.category}: ${lastTransient.message}. Retry ${retryCount}/${maxAttempts} in ${wait}s ${resumeId ? `resuming session ${resumeId}` : 'with a fresh session'}.`);
+      const wait = flexWaitPending ? flexWaitSec : retryDelaySec(config.retry, retryCount, lastTransient.retryAfterSec);
+      if (flexWaitPending) {
+        const cap = config.flex.maxWaitMin > 0 ? `max ${config.flex.maxWaitMin}min` : 'indefinitely';
+        log.warn(`${task.id}: flex capacity unavailable (${lastTransient.category}: ${lastTransient.message}). Waiting ${wait}s (poll ${flexWaits}, ${cap}) ${resumeId ? `resuming session ${resumeId}` : 'with a fresh session'}.`);
+      } else {
+        log.warn(`${task.id}: ${lastTransient.category}: ${lastTransient.message}. Retry ${retryCount}/${maxAttempts} in ${wait}s ${resumeId ? `resuming session ${resumeId}` : 'with a fresh session'}.`);
+      }
+      flexWaitPending = false;
       const stopped = await backoff(ctx, wait * 1000);
       if (ctx.splitRequest) { log.warn(`${task.id}: split of ${ctx.splitRequest.id} requested; not retrying.`); return { status: st.status, stopped: true }; }
       if (ctx.interrupted) { final = { status: 'failed', summary: 'interrupted during retry backoff', lastError: { category: 'interrupted', message: 'interrupted during retry backoff', transient: true, fatal: false, at: nowIso() } }; break; }
@@ -1195,7 +1273,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     delete st.finished;
     saveState(paths, state);
     patchRoadmap(ctx, task.id, 'running');
-    log.info(`=== ${task.id} ${task.title} (session ${st.attempts}${retryCount > 0 ? `, retry ${retryCount}/${maxAttempts}` : ''}${continuation > 0 ? `, continuation ${continuation}/${maxContinuations}` : ''}) provider=${spec.providerName} model=${spec.model ?? 'default'} variant=${spec.variant ?? 'default'} timeout=${spec.timeoutMin}min`);
+    log.info(`=== ${task.id} ${task.title} (session ${st.attempts}${retryCount > 0 ? `, retry ${retryCount}/${maxAttempts}` : ''}${flexWaits > 0 ? `, flex poll ${flexWaits}` : ''}${continuation > 0 ? `, continuation ${continuation}/${maxContinuations}` : ''}) provider=${spec.providerName} model=${spec.model ?? 'default'} variant=${spec.variant ?? 'default'} timeout=${spec.timeoutMin}min`);
 
     const pc = promptCtx(ctx, task, st, spec, lastTransient ? lastTransient.message : st.lastError?.message, continuation, undefined, pendingGap);
     const prompt = lastTransient && resumeId
@@ -1474,6 +1552,9 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           config.halt.onCategories,
         );
         const summary = block.summary ? `${block.summary} | ${c.category}: ${c.message}` : `${c.category}: ${c.message}`;
+        const flexAction = handleFlexCapacity(c, outcome.sessionId);
+        if (flexAction === 'continue') continue;
+        if (flexAction === 'stop') { final = { status: 'failed', summary, lastError: mkError(c) }; break; }
         if (scheduleTransientRetry(c, summary, outcome.sessionId)) continue;
         const rec = await recover('task', block.summary || 'model reported failed');
         if (rec === 'split') return { status: st.status, split: true };
@@ -1501,6 +1582,11 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     const classified = classifyOutcome(outcomeEvidence(outcome), config);
     const summary = block ? `${block.summary} | ${classified.category}: ${classified.message}` : `${classified.category}: ${classified.message}`;
     const lastError = mkError(classified);
+    // Flex capacity is not a task failure and may be a fatal category (a strict flex route reports an
+    // unavailable endpoint as a model/config error): handle it before the fatal branch.
+    const flexAction = handleFlexCapacity(classified, outcome.sessionId);
+    if (flexAction === 'continue') continue;
+    if (flexAction === 'stop') { final = { status: 'failed', summary, lastError }; break; }
     if (classified.fatal) {
       // A fatal category the user listed for fallback (e.g. a model that went unavailable) still gets
       // one fresh session on the fallback route instead of halting the run.
@@ -1518,11 +1604,12 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     break;
   }
 
-  // A `modelTierPolicy.onDowngrade: block` stops the run for a human rather than failing the task on
-  // an infrastructure rule: record it as blocked, not failed, so the operator sees what to fix.
+  // A `modelTierPolicy.onDowngrade: block` or `flex.onUnavailable: block` stops the run for a human
+  // rather than failing the task on an infrastructure rule: record it as blocked, not failed, so the
+  // operator sees what to fix.
   let outcomeFinal = final ?? { status: 'failed', summary: 'no attempt ran' };
-  if (halt?.category === 'model_tier' && outcomeFinal.status === 'failed') {
-    outcomeFinal = { status: 'blocked', summary: halt.reason, lastError: { category: 'model_tier', message: halt.reason, transient: false, fatal: false, at: nowIso() } };
+  if ((halt?.category === 'model_tier' || halt?.category === 'flex') && outcomeFinal.status === 'failed') {
+    outcomeFinal = { status: 'blocked', summary: halt.reason, lastError: { category: halt.category, message: halt.reason, transient: false, fatal: false, at: nowIso() } };
   }
   await finalizeTask(ctx, task, st, outcomeFinal, halt);
   // A session stopped by the run view (TUI quit/split) marks the outcome interrupted without

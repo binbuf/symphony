@@ -1166,6 +1166,98 @@ test('the fallback is not used when the failure is fatal (an auth error still ha
   }
 });
 
+test('a flex capacity fault waits (polls) and then runs, without spending the retry or attempt budget', async () => {
+  const { dir, paths, task } = project();
+  task.meta = { provider: 'fake', variant: 'flex-high' };
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', result: 'API error 503: flex capacity exceeded, try again.' }),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.resume.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    claudeResult('done', 'flex capacity returned'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  // maxAttempts 1 / maxAttemptsPerTask 1 make the regression sharp: if the capacity wait consumed
+  // either budget the task could not finish.
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    nudge: false,
+    halt: { ...DEFAULTS.halt, maxAttemptsPerTask: 1 },
+    retry: { ...DEFAULTS.retry, maxAttempts: 1, backoffSec: [0], exponential: false },
+    flex: { ...DEFAULTS.flex, pollSec: 0 },
+  };
+  const warns: string[] = [];
+  const log: Logger = { ...silent, warn: (m: string) => { warns.push(m); } };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.attempts, 1);
+    assert.equal(state.tasks.T01.transientRetries, 1);
+    assert.ok(warns.some((w) => /flex capacity unavailable.*Waiting 0s/.test(w)), `expected a flex wait notice, got: ${warns.join(' | ')}`);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('flex.onUnavailable block parks the task and halts for a human instead of retrying', async () => {
+  const { dir, paths, task } = project();
+  task.meta = { provider: 'fake', variant: 'flex-high' };
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', result: 'API error 503: flex capacity exceeded' }),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    nudge: false,
+    flex: { ...DEFAULTS.flex, onUnavailable: 'block' as const, pollSec: 0 },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'blocked');
+    assert.equal(out.halt?.category, 'flex');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('flex.onUnavailable fallback switches to the fallback route immediately', async () => {
+  const { dir, paths, task } = project();
+  task.meta = { provider: 'fake', variant: 'flex-high' };
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's1', result: 'API error 503: flex capacity exceeded' }),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T01.fallback.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    JSON.stringify({ type: 'fake_write', path: 'by-fallback.txt', content: 'done by the fallback' }),
+    claudeResult('done', 'finished on the fallback route'),
+  ].join('\n') + '\n');
+  const state: State = loadState(paths);
+  // afterAttempts 5 proves the switch is the flex path, not the ordinary transient fallback.
+  const config = {
+    ...DEFAULTS,
+    provider: 'fake' as const,
+    nudge: false,
+    retry: { ...DEFAULTS.retry, maxAttempts: 3, backoffSec: [0], exponential: false },
+    fallback: { ...DEFAULTS.fallback, enabled: true, provider: 'fake' as const, model: 'fallback-model', afterAttempts: 5 },
+    flex: { ...DEFAULTS.flex, onUnavailable: 'fallback' as const },
+  };
+  const ctx: RunContext = { paths, config, cli: {}, flags, log: silent, roadmap: { bullets: [], lines: [], eol: '\n' }, tasks: [task], state, interrupted: false, abort: new AbortController() };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.model, 'fallback-model');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
 test('a normally-fatal model-unavailable failure falls back instead of halting when listed', async () => {
   const { dir, paths, task } = project();
   writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [

@@ -19,12 +19,15 @@ import type { Provider } from './types.js';
  *   {"type":"fake_stderr","text":"..."}                        print to stderr
  *   {"type":"fake_sleep","ms":1500}                            pause
  *   {"type":"fake_exit","code":1}                              exit code at the end
+ *
+ * It reports `supportsVariant: true` (the variant is accepted and ignored) so tests can exercise
+ * variant-gated harness behaviour — flex capacity handling, variant allowlists — without an LLM.
  */
 export const fakeProvider: Provider = {
   name: 'fake',
   supportsBudget: true,
   supportsResume: true,
-  supportsVariant: false,
+  supportsVariant: true,
   supportsMcp: false,
   buildCommand(o) {
     const dir = process.env.SYMPHONY_FAKE_FIXTURES ?? join(o.cwd, '.symphony', 'fixtures');

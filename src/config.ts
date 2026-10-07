@@ -145,6 +145,34 @@ export interface FallbackConfig {
   onCategories: string[];
 }
 
+/**
+ * Flex service-tier handling. OpenCode/OpenRouter flex variants — a variant named with
+ * `variantPrefix` (default `flex-`, e.g. `flex-high`) or listed explicitly in `variants` — run at a
+ * discounted rate but only while the upstream flex pool has capacity. A capacity fault is not a task
+ * failure, so the harness reacts per `onUnavailable`:
+ *  - `wait` (default): poll the flex endpoint every `pollSec` until it frees up, then run, bounded
+ *    only by `maxWaitMin` (0 = wait indefinitely), so an unattended run can wait out a capacity dip.
+ *  - `block`: stop the run for a human.
+ *  - `fallback`: switch to the configured `fallback` provider/model, immediately rather than after
+ *    `fallback.afterAttempts` transient retries.
+ * Only failures whose category is in `onCategories`, plus a fatal `model`/`config` failure whose
+ * message names flex/capacity/endpoints, are treated as flex-capacity events.
+ */
+export interface FlexConfig {
+  /** Variant-name prefix that marks a flex variant. Default "flex-" (`flex-high`). Empty disables prefix matching. */
+  variantPrefix: string;
+  /** Extra variant names treated as flex in addition to the prefix, for names that do not follow it. */
+  variants: string[];
+  /** What to do when flex capacity is unavailable. See the interface docs. */
+  onUnavailable: 'wait' | 'block' | 'fallback';
+  /** Seconds between capacity polls while `wait`ing (0 = poll again immediately). */
+  pollSec: number;
+  /** Give up `wait`ing after this many minutes (0 = wait indefinitely). */
+  maxWaitMin: number;
+  /** Failure categories treated as flex-capacity events. */
+  onCategories: string[];
+}
+
 /** Where a System One (Jev) decision call or a vision request is routed. Only OpenRouter is built in. */
 export const JEV_PROVIDERS = ['openrouter'] as const;
 export type JevProviderName = (typeof JEV_PROVIDERS)[number];
@@ -599,6 +627,8 @@ export interface Config {
   escalation: EscalationConfig;
   /** Provider/model a task is switched to after repeated transient faults. See FallbackConfig. */
   fallback: FallbackConfig;
+  /** How to react when a flex service-tier variant loses capacity. See FlexConfig. */
+  flex: FlexConfig;
   /** Optional Jev decision calls as a nudge fallback. See JevConfig. */
   jev: JevConfig;
   /** Optional image-analysis tool a task session can invoke. See VisionConfig. */
@@ -718,6 +748,14 @@ export const DEFAULTS: Config = {
     modelProvider: 'openrouter',
     afterAttempts: 2,
     onCategories: ['rate_limit', 'overloaded', 'server', 'network', 'stall', 'crash'],
+  },
+  flex: {
+    variantPrefix: 'flex-',
+    variants: [],
+    onUnavailable: 'wait',
+    pollSec: 60,
+    maxWaitMin: 0,
+    onCategories: ['rate_limit', 'overloaded', 'server'],
   },
   jev: {
     enabled: false,
@@ -1143,6 +1181,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const gitRaw = isRecord(raw.git) ? raw.git : {};
   const escRaw = isRecord(raw.escalation) ? raw.escalation : {};
   const fallbackRaw = isRecord(raw.fallback) ? raw.fallback : {};
+  const flexRaw = isRecord(raw.flex) ? raw.flex : {};
   const jevRaw = isRecord(raw.jev) ? raw.jev : {};
   const visionRaw = isRecord(raw.vision) ? raw.vision : {};
   const slackRaw = isRecord(raw.slack) ? raw.slack : {};
@@ -1310,6 +1349,21 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
         })(),
         afterAttempts: Math.max(0, numberOr(fallbackRaw.afterAttempts, DEFAULTS.fallback.afterAttempts, 'fallback.afterAttempts', warnings)),
         onCategories: stringArray(fallbackRaw.onCategories, DEFAULTS.fallback.onCategories, 'fallback.onCategories', warnings),
+      };
+    })(),
+    flex: (() => {
+      let variantPrefix = DEFAULTS.flex.variantPrefix;
+      if (flexRaw.variantPrefix !== undefined && flexRaw.variantPrefix !== null) {
+        if (typeof flexRaw.variantPrefix === 'string') variantPrefix = flexRaw.variantPrefix.trim();
+        else warnings.push(`flex.variantPrefix: expected a string, got ${JSON.stringify(flexRaw.variantPrefix)}; using ${JSON.stringify(DEFAULTS.flex.variantPrefix)}`);
+      }
+      return {
+        variantPrefix,
+        variants: stringArray(flexRaw.variants, DEFAULTS.flex.variants, 'flex.variants', warnings).map((v) => v.trim()).filter(Boolean),
+        onUnavailable: enumOr(flexRaw.onUnavailable, ['wait', 'block', 'fallback'] as const, DEFAULTS.flex.onUnavailable, 'flex.onUnavailable', warnings),
+        pollSec: atLeastOr(flexRaw.pollSec, DEFAULTS.flex.pollSec, 0, 'flex.pollSec', warnings),
+        maxWaitMin: atLeastOr(flexRaw.maxWaitMin, DEFAULTS.flex.maxWaitMin, 0, 'flex.maxWaitMin', warnings),
+        onCategories: stringArray(flexRaw.onCategories, DEFAULTS.flex.onCategories, 'flex.onCategories', warnings),
       };
     })(),
     jev: (() => {
@@ -1635,6 +1689,18 @@ export function isModelDowngrade(current: ModelTierEntry | undefined, candidate:
   if (!current || !candidate) return false;
   if (candidate.tier !== current.tier) return candidate.tier < current.tier;
   return candidate.order > current.order;
+}
+
+/**
+ * True when `variant` selects a flex service-tier variant: either it starts with
+ * `flex.variantPrefix` (default `flex-`) or it is named explicitly in `flex.variants`, for names that
+ * do not follow the prefix convention.
+ */
+export function isFlexVariant(config: Config, variant: string | undefined): boolean {
+  const v = variant?.trim();
+  if (!v) return false;
+  if (config.flex.variantPrefix && v.startsWith(config.flex.variantPrefix)) return true;
+  return config.flex.variants.includes(v);
 }
 
 /**

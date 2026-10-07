@@ -34,7 +34,13 @@ Override per run with `--variant`, per task with `variant:` front matter, or per
 | codex | `-c model_reasoning_effort=` | `minimal`, `low`, `medium`, `high` (`xhigh` on some models) |
 | antigravity | `--effort` | `low`, `medium`, `high` |
 
-Cursor, Gemini and `fake` have no effort knob, so the variant is ignored for them.
+Cursor and Gemini have no effort knob, so the variant is ignored for them.
+
+Discounted **flex** endpoints are addressed as variants too (for example an OpenCode variant named
+`flex-high` whose body pins `service_tier: "flex"`). The harness recognises those by name and reacts
+to a capacity fault per the [`flex` block](README.md#flex-service-tier) instead of failing the task:
+by default it waits and polls until flex capacity returns, or it can block the run or switch to the
+`fallback` route.
 
 ## claude — Claude Code (`claude`)
 

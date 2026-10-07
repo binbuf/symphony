@@ -126,6 +126,19 @@
       "model"
     ]
   },
+  "flex": {
+    "_flex": "When a flex service-tier variant (a variant named with `variantPrefix`, default `flex-`, or listed in `variants`) loses upstream capacity, a capacity fault is a routing event, not a task failure. `onUnavailable` decides: `wait` (default) polls every `pollSec` until flex frees up and then runs — bounded only by `maxWaitMin` (0 = indefinitely) so an unattended run rides out a capacity dip — `block` parks the task and halts for a human, and `fallback` switches to the configured `fallback` provider/model immediately. A wait never spends the retry, attempts or iteration budgets. `onCategories` names the failure categories treated as capacity faults; a normally-fatal `model`/`config` failure whose message names the flex pool/endpoints also counts.",
+    "variantPrefix": "flex-",
+    "variants": [],
+    "onUnavailable": "wait",
+    "pollSec": 60,
+    "maxWaitMin": 0,
+    "onCategories": [
+      "rate_limit",
+      "overloaded",
+      "server"
+    ]
+  },
   "jev": {
     "enabled": false,
     "resultFallback": true,

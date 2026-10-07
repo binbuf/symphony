@@ -10,7 +10,7 @@ A reasonably thin LLM task harness. Chain complex task sets together, use multip
 
 Providers: **Claude Code · Cursor · OpenCode · Codex CLI · Gemini CLI · Google Antigravity** — all launched with permission prompts bypassed so nothing ever waits on a human (`--safe` turns that off for one run). Connectors/MCP configured inside each agent keep working: symphony only launches the CLI and reads its output. An optional [`mcp` block](#mcp-selection) can scope each session to a chosen subset of servers, so unrelated toolchains cost nothing.
 
-**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [MCP selection](#mcp-selection) · [Providers](#providers) · [Escalation](#escalation) · [Fallback](#fallback) · [Model tiers](#model-tiers) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Judge](#judge) · [Slack notifications](#slack-notifications) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
+**Contents** — [Why symphony](#why-symphony) · [Quick start](#quick-start) · [The lifecycle](#the-lifecycle) · [Run scenarios](#run-scenarios) · [Pivoting mid-run](#pivoting-mid-run) · [Splitting a task](#splitting-a-task) · [Automatic breakdowns](#automatic-breakdowns) · [Multiple task sets](#multiple-task-sets) · [The docs contract](#the-docs-contract) · [CLI reference](#cli-reference) · [MCP selection](#mcp-selection) · [Providers](#providers) · [Escalation](#escalation) · [Fallback](#fallback) · [Flex service tier](#flex-service-tier) · [Model tiers](#model-tiers) · [Jev](#jev) · [Vision tool](#vision-tool) · [Pipeline watch](#pipeline-watch) · [Judge](#judge) · [Slack notifications](#slack-notifications) · [Config](#config) · [Hooks](#hooks) · [Logs and state](#logs-and-state) · [Platform support](#platform-support) · [Exit codes](#exit-codes) · [Developing the harness](#developing-the-harness)
 
 ## Why symphony
 
@@ -650,6 +650,40 @@ A category that is normally fatal (the shipped defaults halt on `model`, so a re
 
 Every session records the provider and model that ran it in `docs/logs/TNN.md`, so a switched task is visible in the committed log, and the fallback provider is checked during preflight like any other.
 
+## Flex service tier
+
+Some routers (OpenRouter, through OpenCode) offer discounted **flex** endpoints that accept a request only while their pool has spare capacity. A flex endpoint is selected entirely inside the provider config — an OpenCode variant body that sets `service_tier: "flex"` and pins the provider — so the harness only ever sees the variant name (e.g. `--model openrouter/openai/gpt-6.1-sol#flex-high`). Symphony recognises a flex variant by name — the `flex.variantPrefix` (`flex-` by default) or an entry in `flex.variants` — and treats a capacity fault while one runs as a routing event rather than a task failure.
+
+`onUnavailable` is what happens when flex capacity is gone:
+
+| value | meaning |
+|---|---|
+| `wait` | poll every `pollSec` until flex frees up, then run; only `maxWaitMin` (0 = forever) bounds it. The default, so an unattended run rides out a capacity dip. |
+| `block` | park the task and halt the run for a human |
+| `fallback` | switch to the configured [`fallback`](#fallback) provider/model immediately, rather than after `afterAttempts` |
+
+A wait is not a task attempt: it never spends the transient retry budget, `halt.maxAttemptsPerTask` or `maxIterationsPerTask`, and a long wait does not trip `ceiling.maxMinutesPerTask`. A capacity fault is recognised when its category is in `onCategories` (default `rate_limit`, `overloaded`, `server`), or when a normally-fatal `model`/`config` failure names the flex pool or endpoints — the shape a strict `provider.only: ["openai/flex"]`, `allow_fallbacks: false` route reports when nothing is free. `fallback` needs a configured `fallback` target; without one it warns and waits instead.
+
+```json
+"flex": {
+  "variantPrefix": "flex-",
+  "variants": [],
+  "onUnavailable": "wait",
+  "pollSec": 60,
+  "maxWaitMin": 0,
+  "onCategories": ["rate_limit", "overloaded", "server"]
+}
+```
+
+| key | default | meaning |
+|---|---|---|
+| `variantPrefix` | `flex-` | variant-name prefix that marks a flex variant (`flex-high`); empty disables prefix matching |
+| `variants` | `[]` | extra flex variant names for names that do not follow the prefix |
+| `onUnavailable` | `wait` | `wait`, `block`, or `fallback` when flex capacity is unavailable |
+| `pollSec` | `60` | seconds between capacity polls while waiting (0 = poll immediately) |
+| `maxWaitMin` | `0` | give up waiting after this many minutes (0 = wait indefinitely) |
+| `onCategories` | `[rate_limit, overloaded, server]` | failure categories treated as flex-capacity events |
+
 ## Model tiers
 
 Escalation and fallback exist to *raise* a task's odds, so neither should silently hand it to a weaker model. **`modelTiers`** is an ordered capability registry spanning every provider: each entry names a `provider`, a `model` (with `modelProvider` for OpenCode), and an integer `tier` where a higher number is more capable. Entries that share a tier are ranked by array order — the earlier entry has priority.
@@ -980,6 +1014,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `halt.maxConsecutiveFailures`, `halt.maxAttemptsPerTask`, `halt.onCategories` | `2`, `3`, `[auth, billing, usage_limit, model, config]` | when to halt instead of continuing |
 | `escalation.enabled`, `.provider`, `.model`, `.modelProvider`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `fallback.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.afterAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, –, `2`, `[rate_limit, overloaded, server, network, stall, crash]` | switch a task to a second provider/model after repeated transient infrastructure faults (see [Fallback](#fallback)) |
+| `flex.variantPrefix`, `.variants`, `.onUnavailable`, `.pollSec`, `.maxWaitMin`, `.onCategories` | `flex-`, `[]`, `wait`, `60`, `0`, `[rate_limit, overloaded, server]` | how to react when a flex service-tier variant loses capacity: wait/poll (default), block, or fallback (see [Flex service tier](#flex-service-tier)) |
 | `jev.enabled`, `.resultFallback`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `openrouter`, `typesafe/jev-1.13`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, adaptive image description, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt explains it (see [Vision tool](#vision-tool)) |
 | `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true` except `watch`, `10000` | post lifecycle events to a Slack channel or DM a user, threading a task's later events under its start (see [Slack notifications](#slack-notifications)) |
