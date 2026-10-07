@@ -1,7 +1,7 @@
 import { applyPlan, loadProject, retargetFlags } from '../project.js';
 import type { RunContext, SplitRequest } from '../runner.js';
 import { childIdSequence, splitCommand } from '../split.js';
-import { releaseLock, saveState, type Halted } from '../state.js';
+import { activeLock, releaseLock, saveState, type Halted } from '../state.js';
 import { TuiApp } from './app.js';
 import { AnsiTerminal } from './terminal.js';
 import { UsageError } from '../util.js';
@@ -207,6 +207,15 @@ export async function runWithTui(ctx: RunContext, run: () => Promise<number>, op
     leaveTerminal();
     const tail = app.tail(10);
     if (tail.length && !app.fatalError) realWrite(`${tail.join('\n')}\n`);
+    if (app.quitRequested) {
+      // The run loop releases the lock last, in its own finally, so a lock still held here means the
+      // session did not stop cleanly. Report the outcome on stdout, now that the alternate screen is
+      // gone, so the user can tell the quit actually tore everything down (or that it did not).
+      const lockHeld = activeLock(ctx.paths) !== undefined;
+      realWrite(lockHeld
+        ? 'symphony: quit now — warning: the run lock is still held; the session may not have stopped cleanly.\n'
+        : 'symphony: quit now — the session was stopped and the run lock released; exiting now.\n');
+    }
     realWrite(`symphony run finished (exit ${code}).\n`);
   }
   return code;

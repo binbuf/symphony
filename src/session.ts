@@ -6,7 +6,7 @@ import { renderEvent } from './render.js';
 import { resolveSpawn } from './spawn.js';
 import { fmtTime } from './util.js';
 
-export type KillReason = 'timeout' | 'stall' | 'interrupt' | 'force';
+export type KillReason = 'timeout' | 'stall' | 'interrupt' | 'quit' | 'force';
 
 export interface SessionOpts {
   spec: SpawnSpec;
@@ -53,6 +53,12 @@ export interface Session {
 
 const STDERR_RING_BYTES = 2048;
 const KILL_GRACE_MS = 10_000;
+/**
+ * A deliberate "quit now" waits only briefly for the provider to flush before the whole tree is
+ * forced down, so choosing to quit tears the session down right away instead of lingering for the
+ * full interrupt grace.
+ */
+const QUIT_GRACE_MS = 1_500;
 
 /**
  * Spawn one agent process and stream its NDJSON. stdout and stderr are read on separate pipes so the
@@ -123,8 +129,9 @@ export function startSession(o: SessionOpts): Session {
   let killTimer: NodeJS.Timeout | undefined;
   const kill = (reason: KillReason) => {
     if (reason === 'force') {
-      // Second Ctrl-C: kill the whole tree immediately, no grace period.
-      signalTree('SIGKILL');
+      // Second Ctrl-C: kill the whole tree immediately, no grace period. Guard the pid so a late
+      // force after the child already exited cannot signal a reused pid.
+      if (child.exitCode === null && child.signalCode === null) signalTree('SIGKILL');
       return;
     }
     if (reason === 'timeout') flags.timedOut = true;
@@ -132,7 +139,8 @@ export function startSession(o: SessionOpts): Session {
     else flags.interrupted = true;
     signalTree('SIGTERM');
     if (!killTimer) {
-      killTimer = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) signalTree('SIGKILL'); }, KILL_GRACE_MS);
+      const grace = reason === 'quit' ? QUIT_GRACE_MS : KILL_GRACE_MS;
+      killTimer = setTimeout(() => { if (child.exitCode === null && child.signalCode === null) signalTree('SIGKILL'); }, grace);
     }
   };
 

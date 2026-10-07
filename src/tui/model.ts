@@ -118,7 +118,9 @@ export class LocalTuiModel implements TuiModel {
   quit(): void {
     this.ctx.interrupted = true;
     this.ctx.abort.abort();
-    this.ctx.active?.kill('interrupt');
+    // A deliberate quit stops the provider promptly: a short grace, then the whole tree is forced
+    // down, rather than the full interrupt window a Ctrl-C allows.
+    this.ctx.active?.kill('quit');
   }
   stopHarness(): void { this.quit(); }
 }

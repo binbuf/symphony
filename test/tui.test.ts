@@ -9,7 +9,7 @@ import type { Logger } from '../src/logger.js';
 import { resolvePaths, stopPresent } from '../src/paths.js';
 import { loadProject } from '../src/project.js';
 import type { RunContext, RunFlags } from '../src/runner.js';
-import { newTaskState, type State } from '../src/state.js';
+import { acquireLock, newTaskState, type State } from '../src/state.js';
 import { buildStatusTable } from '../src/status.js';
 import type { Task } from '../src/tasks.js';
 import { LOG_TYPES, TuiApp } from '../src/tui/app.js';
@@ -522,6 +522,53 @@ test('runWithTui enters the alternate screen, captures the run stream, and resto
     assert.ok(all.includes('\x1b[?1049l'), 'leaves the alternate screen');
     assert.ok(all.includes('hello from the run'), 'replays captured output on exit');
     assert.equal(process.stdout.write, spy, 'stdout is restored to what it was before the call');
+  } finally {
+    process.stdout.write = realWrite;
+    if (stdoutDesc) Object.defineProperty(process.stdout, 'isTTY', stdoutDesc); else delete (process.stdout as { isTTY?: unknown }).isTTY;
+    if (stdinDesc) Object.defineProperty(process.stdin, 'isTTY', stdinDesc); else delete (process.stdin as { isTTY?: unknown }).isTTY;
+    if (setRawMode === undefined) delete (process.stdin as { setRawMode?: unknown }).setRawMode;
+    else (process.stdin as { setRawMode?: unknown }).setRawMode = setRawMode;
+  }
+});
+
+test('runWithTui stops the session and reports a clean quit on stdout (warning when the lock is held)', async () => {
+  const written: string[] = [];
+  const realWrite = process.stdout.write;
+  const spy = ((chunk: unknown) => { written.push(String(chunk)); return true; }) as typeof process.stdout.write;
+  const stdoutDesc = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+  const stdinDesc = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  const setRawMode = (process.stdin as { setRawMode?: unknown }).setRawMode;
+
+  process.stdout.write = spy;
+  Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+  Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+  (process.stdin as { setRawMode?: unknown }).setRawMode = () => {};
+
+  try {
+    // The run callback plays the user: `q` opens the quit dialog, `y` confirms quitting now.
+    const quitDuringRun = async (ctx: RunContext): Promise<number> => {
+      process.stdin.emit('data', 'q');
+      process.stdin.emit('data', 'y');
+      return 130;
+    };
+
+    const clean = makeCtx([task('T01', 1)], { version: 1, tasks: {} });
+    let killed = '';
+    clean.active = { kill: (reason: string) => { killed = reason; } } as unknown as RunContext['active'];
+    assert.equal(await runWithTui(clean, () => quitDuringRun(clean), { enabled: true }), 130);
+    assert.equal(killed, 'quit', 'the session is stopped with the prompt quit reason');
+    assert.equal(clean.interrupted, true);
+    const cleanOut = written.join('');
+    assert.match(cleanOut, /quit now — the session was stopped and the run lock released; exiting now\./);
+    assert.doesNotMatch(cleanOut, /the run lock is still held/);
+
+    // A lock that is still held after the run returns means teardown did not complete: report it.
+    written.length = 0;
+    const held = makeCtx([task('T01', 1)], { version: 1, tasks: {} });
+    held.active = { kill: () => {} } as unknown as RunContext['active'];
+    acquireLock(held.paths);
+    assert.equal(await runWithTui(held, () => quitDuringRun(held), { enabled: true }), 130);
+    assert.match(written.join(''), /quit now — warning: the run lock is still held; the session may not have stopped cleanly\./);
   } finally {
     process.stdout.write = realWrite;
     if (stdoutDesc) Object.defineProperty(process.stdout, 'isTTY', stdoutDesc); else delete (process.stdout as { isTTY?: unknown }).isTTY;

@@ -1118,3 +1118,32 @@ The `fake` provider replays Claude-format NDJSON fixtures from `SYMPHONY_FAKE_FI
 - `--safe` on Claude denies every shell command outright (nobody can answer the prompt), so expect `blocked` results.
 - The Gemini and Antigravity adapters follow their documented CLI shapes but were not exercised against a live binary here; adjust `providers.<name>.bin`/`extraArgs` for your install. Claude Code is launched with its normal configuration, so MCP servers/connectors configured there keep working.
 - The whole `.symphony/` directory is gitignored: the installer writes `*` into `.symphony/.gitignore` and adds `.symphony/` to the project's `.gitignore`. To track the harness in a repo instead, delete `.symphony/.gitignore`, drop the root entry, and ignore `runs/`, `state.json`, `symphony.log`, `lock`, and your stop file.
+
+## Killing harnesses
+
+`symphony stop` asks a daemon to stop **gracefully**; sometimes you want every harness gone *now* — a wedged run, a stale lock, several sets running at once. The harness is a `node` process running the CLI (`dist/cli.js`, or `src/cli.ts` under tsx), so both commands below match it by **command line** instead of killing every `node` on the machine.
+
+Windows (PowerShell):
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+  Where-Object { $_.CommandLine -match 'symphony[\\/](?:dist[\\/]cli\.js|src[\\/]cli\.ts)' } |
+  ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>$null }
+```
+
+Linux / macOS (bash):
+
+```bash
+pkill -9 -f 'symphony/(dist/cli\.js|src/cli\.ts)'
+```
+
+Portable fallback when `pkill` is unavailable:
+
+```bash
+ps -eo pid=,args= | grep -E 'symphony/(dist/cli\.js|src/cli\.ts)' | grep -v grep \
+  | awk '{print $1}' | while read -r pid; do kill -9 "$pid"; done
+```
+
+- On Windows `/T` kills the whole tree, so the provider session (`claude`, `codex`, `opencode`, …) goes with the harness. On POSIX the harness spawns provider sessions **detached** in their own process group, so a `SIGKILL` on the harness can leave an agent CLI running — kill the group instead (`kill -9 -<pid>` rather than `<pid>`) if one lingers.
+- A run started with `npm run dev` from inside the repo can have a **relative** `src/cli.ts` and no `symphony/` path, so the pattern will not match it; target that process by PID.
+- This is a hard kill. Prefer `symphony stop` whenever the run can be allowed to finish its slice cleanly.

@@ -464,8 +464,9 @@ export class TuiApp {
     this.dialog = {
       title: 'Quit symphony run?',
       lines: [
-        'The current session is stopped and recorded unfinished,',
-        'exactly like pressing Ctrl-C. The task is retried next run.',
+        'The running session is stopped now and the task is recorded',
+        'unfinished; it is retried next run. The shutdown result is',
+        'printed on stdout as the view closes.',
         '',
         'y / Enter  quit now        n / Esc  keep running',
       ],

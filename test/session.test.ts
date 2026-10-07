@@ -118,3 +118,13 @@ test('synchronous spawn throw (ENAMETOOLONG) is contained as a spawnError, not a
   assert.equal(out.result.ok, false);
   assert.equal(out.result.errorSubtype, 'spawn_error');
 });
+
+test('a deliberate quit kill interrupts the session and ends it promptly', async () => {
+  const { s, sinks } = run(script([{ type: 'system', subtype: 'init', session_id: 'x' }], 0, undefined, 60_000));
+  s.kill('quit');
+  const out = await s.done;
+  await sinks.close();
+  assert.equal(out.interrupted, true);
+  assert.equal(out.result.ok, false);
+  assert.equal(out.result.errorSubtype, 'interrupted');
+});

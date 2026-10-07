@@ -125,7 +125,7 @@ export async function runWithDaemon(ctx: RunContext, run: () => Promise<number>)
         ctx.interrupted = true;
         ctx.signalName = 'SIGTERM';
         ctx.abort.abort();
-        ctx.active?.kill('interrupt');
+        ctx.active?.kill('quit');
         ctx.log.warn('control: stop requested; stopping the run');
         return ok('stopping');
       default:
