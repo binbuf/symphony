@@ -260,6 +260,23 @@
     "direction": "increase",
     "timeoutMin": 5
   },
+  "tierRouting": {
+    "_tierRouting": "Off by default. When on, a task that keeps producing observable progress but has not finished is promoted one step up the modelTiers registry; flat/regressing work is left to stall recovery. No wall-clock promotion. respectTaskOverride leaves an explicit front-matter/CLI/env model choice alone.",
+    "enabled": false,
+    "promoteAfterProgress": 2,
+    "maxPromotions": 1,
+    "respectTaskOverride": true
+  },
+  "scheduling": {
+    "_scheduling": "Off by default (strict roadmap order). When on, ready tasks are ordered deterministically by front-matter priority or critical path; dependsOn edges always win. strategy: roadmap|priority|critical-path. No LLM planner.",
+    "enabled": false,
+    "strategy": "priority"
+  },
+  "decomposition": {
+    "_decomposition": "Bounds for the explicit `symphony decompose T05 [--apply]` command, which turns a task's Scope bullets (or unchecked acceptance items) into child tickets without an LLM.",
+    "maxChildren": 6,
+    "minItems": 2
+  },
   "ceiling": {
     "_ceiling": "Hard autonomy bounds. maxCostUsdPerTask / maxMinutesPerTask park a task (blocked) instead of retrying once reached; maxSplitDepth bounds a split chain. 0 disables a bound.",
     "maxCostUsdPerTask": 0,

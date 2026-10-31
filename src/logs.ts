@@ -72,6 +72,15 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
     if (st.checkpointSha) lines.push(`- commit: ${st.checkpointSha}`);
     if (st.checkpointAt) lines.push(`- at: ${st.checkpointAt}`);
   }
+  if (st.tierRoute) {
+    lines.push('');
+    lines.push('## Model routing');
+    lines.push('');
+    lines.push(`- at: ${st.tierRoute.at}`);
+    lines.push(`- from: ${st.tierRoute.from}`);
+    lines.push(`- to: ${st.tierRoute.to}`);
+    lines.push(`- reason: ${st.tierRoute.reason}`);
+  }
   if (st.judge) {
     const j = st.judge;
     lines.push('');

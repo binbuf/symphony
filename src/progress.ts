@@ -76,6 +76,28 @@ export function metricPlateau(
   return true;
 }
 
+/** How the observable state has moved across recent attempts. */
+export type ProgressTrend = 'unknown' | 'improving' | 'flat' | 'regressing';
+
+/**
+ * Classify the last two attempts using the objective metric when both readings exist, otherwise the
+ * fingerprint (a changed fingerprint is observable progress). This is deliberately signal-driven:
+ * callers use it for model routing and stall policy instead of wall-clock timers.
+ */
+export function progressTrend(deltas: readonly AttemptDelta[], direction: 'increase' | 'decrease' | 'nonzero'): ProgressTrend {
+  if (deltas.length < 2) return 'unknown';
+  const prev = deltas[deltas.length - 2];
+  const curr = deltas[deltas.length - 1];
+  if (prev.metric !== undefined || curr.metric !== undefined) {
+    if (curr.metric === undefined) return 'flat';
+    if (prev.metric === undefined) return 'improving';
+    if (metricImproved(prev.metric, curr.metric, direction)) return 'improving';
+    if (prev.metric === curr.metric) return 'flat';
+    return direction === 'nonzero' ? 'flat' : 'regressing';
+  }
+  return prev.fingerprint === curr.fingerprint ? 'flat' : 'improving';
+}
+
 /** Extract the `[ ]`/`[x]` acceptance state of a task body, in document order, as a compact string. */
 export function checkboxSignature(body: string): string {
   const out: string[] = [];

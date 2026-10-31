@@ -95,6 +95,10 @@ export interface TaskState {
   checkpointAt?: string;
   /** Focused verify-repair sessions used on this task. */
   repairAttempts?: number;
+  /** Signal-driven model promotions used by `tierRouting` on this task. */
+  tierPromotions?: number;
+  /** The last routing decision, for the task log. */
+  tierRoute?: { at: string; from: string; to: string; reason: string };
   /** The latest v2 acceptance decision, for status/logs. Gate results themselves are append-only. */
   acceptance?: AcceptanceSummary;
   durationS: number;

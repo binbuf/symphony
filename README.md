@@ -561,6 +561,8 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `approve T05 [criterion] [--by "…"] [--note "…"]` | record a v2 `human` gate approval; with no criterion, list the human criteria and their status; the approval is bound to the current revision and evidence |
 | `attention [--json]` | show every task/run waiting for a human (halt, human approval, inconclusive evidence, required judge unavailable, blocked, failed) with the command that resolves it; also refreshes `.symphony/attention.json` |
 | `steer T05 "note" [--by "…"]` | queue operator guidance for the task's next session; a running task receives it at its next session boundary (hot steering, no restart); with no note, list what is queued |
+| `schedule [--strategy roadmap\|priority\|critical-path] [--json]` | preview the deterministic ready-task order; dependency edges always win, then the configured tie-breaker |
+| `decompose T05 [--apply]` | show (or apply) a deterministic split based on the task's `## Scope` bullets or unchecked acceptance items; no agent session |
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also undoes its `T05:` commits (newest first) |
 | `reset --all` | clear every task's state and the halt, and reset every roadmap marker to `[ ]` |
 | `nudge T05 [--note "…"]` | resume a task's last session and ask it to close out with a result block |
@@ -776,6 +778,47 @@ Every model the harness may run should have an entry — the active provider's d
 | `block` | keep the current model, park the task and halt the run for a human |
 
 An unmapped model (or an empty registry) is never treated as a downgrade, so this is purely opt-in: with no `modelTiers`, behaviour is exactly as before. `loadConfig` warns when a registry is present but a configured model has no tier, so gaps surface early rather than mid-run.
+
+### Signal-driven promotion
+
+`tierRouting` uses that registry to move a task *up* one tier when it keeps producing observable progress but has not finished — never on a timer. The trigger is `progressTrend`: two or more recent attempts that changed the worktree/metric, with the latest reading still improving.
+
+```json
+"tierRouting": {
+  "enabled": true,
+  "promoteAfterProgress": 2,
+  "maxPromotions": 1,
+  "respectTaskOverride": true
+}
+```
+
+A flat or regressing trend never promotes (stall recovery and escalation own that case), and `respectTaskOverride` leaves an explicit front-matter/CLI/env model choice alone. Each promotion is recorded on the task and in `docs/logs/TNN.md` under `## Model routing`. The target provider is preflighted with the rest of the run, so a missing binary is found before the task starts.
+
+## Deterministic scheduling and decomposition
+
+Both are explicit and deterministic: no LLM planner decides the queue or the split.
+
+**`scheduling`** (off by default) changes only the order of tasks that are *ready*. `dependsOn` edges always win; among ready tasks the tie-breaker is:
+
+```json
+"scheduling": { "enabled": true, "strategy": "priority" }
+```
+
+| strategy | order among ready tasks |
+|---|---|
+| `roadmap` | strict roadmap order (the disabled behaviour) |
+| `priority` | front-matter `priority` / `weight` (numeric, or `urgent`/`high`/`critical`/`normal`/`low`), then how many tasks it unblocks, then roadmap order |
+| `critical-path` | how many tasks it directly or transitively unblocks, then priority, then roadmap order |
+
+```bash
+symphony schedule                     # preview the configured order
+symphony schedule --strategy critical-path
+symphony schedule --json
+```
+
+**`symphony decompose T05 [--apply]`** turns the items already written in a task into child tickets without a session: its `## Scope` bullets first, or its unchecked acceptance items when it has no scope list. Without `--apply` it prints the plan and touches nothing. With `--apply` it writes `T05a`, `T05b`, … task files, inserts their roadmap bullets directly after the parent, marks the parent accepted as decomposed, and commits the docs. `decomposition.maxChildren` / `minItems` bound the result.
+
+`symphony split T05` remains the agent-driven path when the work items are not already written down.
 
 ## Jev
 

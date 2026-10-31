@@ -534,6 +534,44 @@ export interface MetricConfig {
 }
 
 /**
+ * Signal-driven model routing inside the `modelTiers` registry. A task that keeps producing observable
+ * progress across attempts but has not finished is promoted to the next capability tier; a stalled
+ * task is not (parking and escalation own that case). There is no wall-clock promotion.
+ */
+export interface TierRoutingConfig {
+  enabled: boolean;
+  /** Observable-progress attempts required before a promotion. */
+  promoteAfterProgress: number;
+  /** Promotions one task may take in a run. */
+  maxPromotions: number;
+  /** Respect an explicit front-matter/CLI/env model choice instead of routing it. */
+  respectTaskOverride: boolean;
+}
+
+export type SchedulingStrategy = 'roadmap' | 'priority' | 'critical-path';
+
+/**
+ * Deterministic task ordering. Off by default, so existing runs keep strict roadmap order. When on,
+ * the scheduler still respects `dependsOn` edges and only changes the order of tasks that are ready,
+ * using explicit front-matter priority and/or how many dependents a task unblocks.
+ */
+export interface SchedulingConfig {
+  enabled: boolean;
+  strategy: SchedulingStrategy;
+}
+
+/**
+ * Deterministic decomposition limits. `symphony decompose` is an explicit command; these bounds keep
+ * a scope-heavy task from producing an unbounded pile of children.
+ */
+export interface DecompositionConfig {
+  /** Maximum child tasks produced from one parent. */
+  maxChildren: number;
+  /** Fewer scope/acceptance items than this means there is nothing worth splitting. */
+  minItems: number;
+}
+
+/**
  * Hard autonomy invariants. A task that reaches its cost or wall-clock ceiling is parked (blocked)
  * rather than retried forever; auto-created tickets must dedupe and stay within the split-depth bound.
  * `0` disables a bound.
@@ -669,6 +707,12 @@ export interface Config {
   progress: ProgressConfig;
   /** Objective product metric that drives retry/split/accept policy. See MetricConfig. */
   metric: MetricConfig;
+  /** Signal-driven model promotion inside modelTiers. See TierRoutingConfig. */
+  tierRouting: TierRoutingConfig;
+  /** Deterministic ready-task ordering. See SchedulingConfig. */
+  scheduling: SchedulingConfig;
+  /** Bounds for the explicit deterministic decompose command. See DecompositionConfig. */
+  decomposition: DecompositionConfig;
   /** Hard per-task and task-graph autonomy bounds. See CeilingConfig. */
   ceiling: CeilingConfig;
 }
@@ -889,6 +933,20 @@ export const DEFAULTS: Config = {
     command: undefined,
     direction: 'increase',
     timeoutMin: 5,
+  },
+  tierRouting: {
+    enabled: false,
+    promoteAfterProgress: 2,
+    maxPromotions: 1,
+    respectTaskOverride: true,
+  },
+  scheduling: {
+    enabled: false,
+    strategy: 'priority',
+  },
+  decomposition: {
+    maxChildren: 6,
+    minItems: 2,
   },
   ceiling: {
     maxCostUsdPerTask: 0,
@@ -1220,6 +1278,9 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const breakRulesRaw = isRecord(breakRaw.rules) ? breakRaw.rules : {};
   const progressRaw = isRecord(raw.progress) ? raw.progress : {};
   const metricRaw = isRecord(raw.metric) ? raw.metric : {};
+  const tierRoutingRaw = isRecord(raw.tierRouting) ? raw.tierRouting : {};
+  const schedulingRaw = isRecord(raw.scheduling) ? raw.scheduling : {};
+  const decompositionRaw = isRecord(raw.decomposition) ? raw.decomposition : {};
   const ceilingRaw = isRecord(raw.ceiling) ? raw.ceiling : {};
   const tierPolicyRaw = isRecord(raw.modelTierPolicy) ? raw.modelTierPolicy : {};
 
@@ -1633,6 +1694,20 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
       command: hookString(metricRaw.command, 'metric.command', warnings),
       direction: enumOr(metricRaw.direction, ['increase', 'decrease', 'nonzero'] as const, DEFAULTS.metric.direction, 'metric.direction', warnings),
       timeoutMin: positiveOr(metricRaw.timeoutMin, DEFAULTS.metric.timeoutMin, 'metric.timeoutMin', warnings),
+    },
+    tierRouting: {
+      enabled: boolOr(tierRoutingRaw.enabled, DEFAULTS.tierRouting.enabled, 'tierRouting.enabled', warnings),
+      promoteAfterProgress: Math.max(1, numberOr(tierRoutingRaw.promoteAfterProgress, DEFAULTS.tierRouting.promoteAfterProgress, 'tierRouting.promoteAfterProgress', warnings)),
+      maxPromotions: Math.max(0, numberOr(tierRoutingRaw.maxPromotions, DEFAULTS.tierRouting.maxPromotions, 'tierRouting.maxPromotions', warnings)),
+      respectTaskOverride: boolOr(tierRoutingRaw.respectTaskOverride, DEFAULTS.tierRouting.respectTaskOverride, 'tierRouting.respectTaskOverride', warnings),
+    },
+    scheduling: {
+      enabled: boolOr(schedulingRaw.enabled, DEFAULTS.scheduling.enabled, 'scheduling.enabled', warnings),
+      strategy: enumOr(schedulingRaw.strategy, ['roadmap', 'priority', 'critical-path'] as const, DEFAULTS.scheduling.strategy, 'scheduling.strategy', warnings),
+    },
+    decomposition: {
+      maxChildren: Math.max(1, numberOr(decompositionRaw.maxChildren, DEFAULTS.decomposition.maxChildren, 'decomposition.maxChildren', warnings)),
+      minItems: Math.max(1, numberOr(decompositionRaw.minItems, DEFAULTS.decomposition.minItems, 'decomposition.minItems', warnings)),
     },
     ceiling: {
       maxCostUsdPerTask: Math.max(0, numberOr(ceilingRaw.maxCostUsdPerTask, DEFAULTS.ceiling.maxCostUsdPerTask, 'ceiling.maxCostUsdPerTask', warnings)),

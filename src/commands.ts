@@ -1,20 +1,23 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { acceptanceExcludes, appendApproval, criterionEvidenceHash, parseAcceptanceSpec, readGateResults } from './acceptance.js';
-import { attentionPath, collectAttention, formatAttention, writeAttention } from './attention.js';
-import { DEFAULTS, type Config } from './config.js';
+import { collectAttention, formatAttention, writeAttention, attentionPath } from './attention.js';
+import { applyDecomposition, planDecomposition } from './decomposition.js';
+import { DEFAULTS, type Config, type SchedulingStrategy } from './config.js';
 import { ADR_TEMPLATE, DESIGN_README, LOGS_README, PROGRESS_README, ROADMAP_TEMPLATE, TASK_TEMPLATE, docsContract } from './contract.js';
-import { commitsForTask, commitPrefix, ensureGitignore, git, worktreeRevision } from './git.js';
+import { commitsForTask, commitPrefix, ensureGitignore, git, commitAll, describeCommit, worktreeRevision } from './git.js';
+import { contractsFor } from './graph.js';
 import type { Logger } from './logger.js';
 import { taskLogPath } from './logs.js';
 import { rel, stopIgnoreEntry, stopPresent, type Paths } from './paths.js';
-import { PROGRESS_HEADER } from './prompt.js';
+import { PROGRESS_HEADER, taskFileBody } from './prompt.js';
 import { canonicalId, patchRoadmapFile } from './roadmap.js';
-import { DONE_STATES, haltResumeHint, saveState, type State } from './state.js';
+import { DONE_STATES, haltResumeHint, newTaskState, saveState, type State } from './state.js';
+import { scheduleTasks } from './scheduling.js';
 import { appendSteering, pendingSteering, steeringPath } from './steering.js';
 import { buildStatusTable, formatStatusRow, statusColumnWidths, updatePipelineStatus } from './status.js';
 import { parseFrontMatter, type Task } from './tasks.js';
-import { renderPrompt } from './templates.js';
+import { render, renderPrompt } from './templates.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, fmtUsage, nowIso } from './util.js';
 
 function writeIfMissing(path: string, content: string, created: string[]): void {
@@ -233,6 +236,108 @@ export function steerCommand(
   } else {
     log.info(`it is prepended to ${task.id}'s next session`);
   }
+  return 0;
+}
+
+export function scheduleCommand(
+  paths: Paths,
+  state: State,
+  tasks: Task[],
+  config: Config,
+  log: Logger,
+  opts: { json?: boolean; strategy?: SchedulingStrategy } = {},
+): number {
+  const bodies = new Map(tasks.map((t) => [t.id, taskFileBody(t, config.maxTaskBytes)]));
+  const contracts = contractsFor(tasks, bodies);
+  const pending = tasks.filter((t) => !DONE_STATES.includes(state.tasks[t.id]?.status ?? 'pending'));
+  const effective: Config = opts.strategy
+    ? { ...config, scheduling: { enabled: true, strategy: opts.strategy } }
+    : config;
+  const plan = scheduleTasks(effective, pending, contracts);
+  if (opts.json) {
+    log.plain(JSON.stringify({
+      strategy: plan.strategy,
+      enabled: config.scheduling.enabled || Boolean(opts.strategy),
+      entries: plan.entries.map((e) => ({
+        id: e.task.id,
+        title: e.task.title,
+        priority: e.priority,
+        unlocks: e.unlocks,
+        reason: e.reason,
+      })),
+      unresolved: plan.unresolved.map((t) => t.id),
+    }, null, 2));
+    return 0;
+  }
+  if (!plan.entries.length) {
+    log.info('schedule: no unfinished tasks');
+    return 0;
+  }
+  log.plain(`schedule: ${plan.strategy}${config.scheduling.enabled || opts.strategy ? '' : ' (disabled; showing roadmap order)'}`);
+  for (const [i, entry] of plan.entries.entries()) {
+    log.plain(`${String(i + 1).padStart(2)}. ${entry.task.id} — ${entry.task.title}  [${entry.reason}]`);
+  }
+  if (plan.unresolved.length) log.warn(`unresolved (cycle or broken edge): ${plan.unresolved.map((t) => t.id).join(', ')}`);
+  return 0;
+}
+
+export function decomposeCommand(
+  paths: Paths,
+  state: State,
+  tasks: Task[],
+  config: Config,
+  rawId: string,
+  opts: { apply?: boolean; log: Logger },
+): number {
+  const { log } = opts;
+  const id = canonicalId(rawId);
+  const task = id ? tasks.find((t) => t.id === id) : undefined;
+  if (!task) throw new UsageError(`decompose ${rawId}: no such task in ROADMAP.md`);
+  const st = state.tasks[task.id];
+  if (st && DONE_STATES.includes(st.status)) throw new UsageError(`decompose ${task.id}: it is already ${st.status}`);
+
+  const body = taskFileBody(task, config.maxTaskBytes);
+  const plan = planDecomposition(task, body, tasks, config);
+  if (!plan) {
+    log.info(`decompose ${task.id}: nothing deterministic to split (needs at least ${config.decomposition.minItems} scope or unchecked acceptance items, free child ids, and split depth room)`);
+    return 0;
+  }
+
+  log.plain(`decompose ${task.id} — ${task.title} into ${plan.children.length} child task${plan.children.length === 1 ? '' : 's'} (from ${plan.source}):`);
+  for (const child of plan.children) log.plain(`  ${child.id} — ${child.title}`);
+  if (!opts.apply) {
+    log.plain('dry run: re-run with --apply to create the child task files and retire the parent');
+    return 0;
+  }
+
+  const applied = applyDecomposition(paths, task, plan);
+  if (!applied.roadmapOk) {
+    log.error(`decompose ${task.id}: some child bullets could not be inserted into ${rel(paths.root, paths.roadmap)}; inspect the plan before running`);
+  }
+  // Retire the parent: the children now carry the work. Keep its state row and file for history.
+  const from = st?.status ?? 'pending';
+  const childIds = plan.children.map((c) => c.id);
+  const row = state.tasks[task.id] ?? (state.tasks[task.id] = newTaskState(task.title));
+  row.title = task.title;
+  row.status = 'accepted';
+  delete row.phase;
+  row.accepted = { at: nowIso(), from, note: `decomposed deterministically into ${childIds.join(', ')}` };
+  row.summary = `decomposed into ${childIds.join(', ')}`;
+  row.finished = nowIso();
+  if (state.halted?.taskId === task.id) delete state.halted;
+  for (const childId of childIds) delete state.tasks[childId];
+  saveState(paths, state);
+  try { patchRoadmapFile(paths.roadmap, task.id, 'accepted'); } catch (e) {
+    log.warn(`${task.id}: could not patch ROADMAP.md: ${(e as Error).message}`);
+  }
+  updatePipelineStatus(paths, tasks, state, log);
+
+  const message = render(config.commitMessageTemplate, { id: task.id, title: task.title, status: 'decomposed' });
+  const commit = commitAll(paths.root, message, (m) => log.warn(m), {
+    autoIgnoreUntracked: config.git.autoIgnoreUntracked,
+    extraIgnore: config.git.extraIgnore,
+  });
+  log.info(`${task.id}: decomposed into ${childIds.join(', ')} · ${describeCommit(commit)}`);
   return 0;
 }
 

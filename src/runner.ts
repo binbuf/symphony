@@ -7,7 +7,7 @@ import { isFlexVariant, isModelDowngrade, lookupModelTier, resolveEscalation, re
 import { writeProgressIndex } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { EMPTY_TREE_SHA, changedFilesSince, commitAll, createCheckpoint, currentBranch, describeCommit, headSha, restoreCheckpoint, worktreeRevision } from './git.js';
-import { contractsFor, dependencyClosure, isLandedSubset, parseAcceptance, summarizeAcceptance, topoOrder, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
+import { contractsFor, dependencyClosure, isLandedSubset, parseAcceptance, summarizeAcceptance, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
 import { fireHook } from './hooks.js';
 import { classifyEscalation, classifySessionResult, jevProblem, runnerUp } from './jev.js';
 import { collectChanges, runJudge, type JudgeEvidence, type JudgeVerdict } from './judge.js';
@@ -20,6 +20,8 @@ import { buildContinuePrompt, buildNudgePrompt, buildRepairPrompt, buildResumePr
 import { applyPlan, loadProject, retargetFlags, sanitizeFlags } from './project.js';
 import { computeAttemptDelta, isStalled, metricPlateau, parseMetric } from './progress.js';
 import { createRemainderTask } from './remainder.js';
+import { nextTierEntry, routeTier, tierSpec } from './routing.js';
+import { scheduleTasks } from './scheduling.js';
 import { consumeSteering, pendingSteering, steeringBlock } from './steering.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { addUsage } from './providers/common.js';
@@ -712,8 +714,10 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
   if (final.status === 'done' || final.status === 'accepted') {
     delete st.phase;
     delete st.repairAttempts;
+    delete st.tierPromotions;
   } else {
     delete st.repairAttempts;
+    if (final.status === 'failed') delete st.tierPromotions;
   }
 
   // In `ref` mode, unverified work never lands on the working branch. Snapshot it to a checkpoint,
@@ -1520,6 +1524,21 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     st.phase = 'running';
     st.attempts += 1;
     iterations += 1;
+    // Promote only after observable progress, never on a timer. A pinned front-matter/CLI model is
+    // left alone unless tierRouting.respectTaskOverride is false.
+    const routed = routeTier(config, spec, st);
+    if (routed) {
+      spec = routed.spec;
+      provider = getProvider(spec.providerName);
+      st.tierPromotions = (st.tierPromotions ?? 0) + 1;
+      st.tierRoute = {
+        at: nowIso(),
+        from: `${routed.from.provider}:${routed.from.id}`,
+        to: `${spec.providerName}:${spec.model ?? ''}`,
+        reason: routed.reason,
+      };
+      log.info(`${task.id}: tier routing ${routed.from.tier} → ${routed.entry.tier} (${st.tierRoute.from} → ${st.tierRoute.to}): ${routed.reason}`);
+    }
     st.started = nowIso();
     // Record where this session began: the judge diffs against it so work the session committed
     // itself (the prompt allows a `${id}:`-prefixed commit) is still visible as evidence.
@@ -2150,7 +2169,11 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     log.warn(`dependency closure: running prerequisite${prereqs.length === 1 ? '' : 's'} ${prereqs.map((t) => t.id).join(', ')} before their consumers`);
     selected = [...selected, ...prereqs];
   }
-  selected = topoOrder(selected, contracts);
+  const plan = scheduleTasks(config, selected, contracts);
+  selected = plan.entries.map((e) => e.task);
+  if (config.scheduling.enabled) {
+    log.info(`schedule (${plan.strategy}): ${plan.entries.map((e) => `${e.task.id} [${e.reason}]`).join(' → ')}`);
+  }
   let todo = selected.filter((t) => flags.retry || !SKIP_STATES.includes(state.tasks[t.id]?.status ?? 'pending'));
   const carried = selected.filter((t) => !flags.retry && state.tasks[t.id]?.status === 'blocked');
   const leftRunning = todo.filter((t) => state.tasks[t.id]?.status === 'running');
@@ -2179,6 +2202,11 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     if (esc && !seenProviders.has(esc.spec.providerName)) {
       esc.warnings.forEach((w) => log.warn(`${t.id}: ${w}`));
       addExtra(esc.spec, `${t.id} escalation`);
+    }
+    // Signal-driven routing may move this task to the next tier, so preflight that provider too.
+    if (config.tierRouting.enabled) {
+      const next = nextTierEntry(config, rs.spec);
+      if (next && !seenProviders.has(next.provider)) addExtra(tierSpec(config, rs.spec, next), `${t.id} tier route`);
     }
   }
   // The escalation target only launches when a task fails, but its provider still has to pass
@@ -2323,8 +2351,9 @@ export async function runCommand(ctx: RunContext): Promise<number> {
     let queue: Task[] = todo.slice();
     const rebuild = (): void => {
       const selected = selectTasks(ctx).filter((t) => !attempted.has(t.id) && (flags.retry || !SKIP_STATES.includes(state.tasks[t.id]?.status ?? 'pending')));
-      // Prerequisites before consumers, even after a breakdown rewrote the plan.
-      const ordered = topoOrder(selected, contracts);
+      // Prerequisites before consumers, even after a breakdown rewrote the plan; the configured
+      // deterministic scheduling strategy still applies.
+      const ordered = scheduleTasks(config, selected, contracts).entries.map((e) => e.task);
       // `maxTasksPerRun` counts tasks this invocation has *started*, so a breakdown cannot buy more.
       const room = config.maxTasksPerRun > 0 ? Math.max(0, config.maxTasksPerRun - attempted.size) : ordered.length;
       queue = ordered.slice(0, room);

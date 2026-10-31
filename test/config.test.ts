@@ -325,6 +325,31 @@ test('judge.required parses and defaults to off', () => {
   assert.ok(!warnings.some((w) => /judge\.required/.test(w)), warnings.join('\n'));
 });
 
+test('tier routing, scheduling and decomposition parse with safe defaults', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-p2-cfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  assert.equal(DEFAULTS.tierRouting.enabled, false);
+  assert.equal(DEFAULTS.scheduling.enabled, false);
+  assert.equal(DEFAULTS.scheduling.strategy, 'priority');
+  assert.equal(DEFAULTS.decomposition.maxChildren, 6);
+  writeFileSync(paths.config, JSON.stringify({
+    tierRouting: { enabled: true, promoteAfterProgress: 3, maxPromotions: 2, respectTaskOverride: false },
+    scheduling: { enabled: true, strategy: 'critical-path' },
+    decomposition: { maxChildren: 4, minItems: 3 },
+  }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.tierRouting.enabled, true);
+  assert.equal(config.tierRouting.promoteAfterProgress, 3);
+  assert.equal(config.tierRouting.maxPromotions, 2);
+  assert.equal(config.tierRouting.respectTaskOverride, false);
+  assert.equal(config.scheduling.enabled, true);
+  assert.equal(config.scheduling.strategy, 'critical-path');
+  assert.equal(config.decomposition.maxChildren, 4);
+  assert.equal(config.decomposition.minItems, 3);
+  assert.ok(!warnings.some((w) => /tierRouting|scheduling|decomposition/.test(w)), warnings.join('\n'));
+});
+
 test('verify resolution: front matter > config > inferred package.json test script', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-verify-'));
   const cfg = { ...DEFAULTS };

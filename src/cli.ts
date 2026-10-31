@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { acceptCommand, approveCommand, attentionCommand, briefCommand, clearHaltCommand, initCommand, logsCommand, resetCommand, statusCommand, steerCommand } from './commands.js';
+import { acceptCommand, approveCommand, attentionCommand, briefCommand, clearHaltCommand, decomposeCommand, initCommand, logsCommand, resetCommand, scheduleCommand, statusCommand, steerCommand } from './commands.js';
 import { DEFAULTS, findTaskSet, loadConfig, resolveSession, type CliOverrides, type Config } from './config.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { formatLint, lintDocs } from './lint.js';
@@ -45,6 +45,9 @@ Usage
   symphony attention [--json]            show every task/run that is waiting for a human
   symphony steer T05 "note"              queue operator steering for the task's next session
                    [--by "name"]         (hot: a running task picks it up at its next boundary)
+  symphony schedule [--strategy NAME]    show the deterministic ready-task order (roadmap/priority/critical-path)
+                  [--json]
+  symphony decompose T05 [--apply]       show (or apply) a deterministic split based on the task's scope/acceptance items
   symphony reset   T05 [--revert]        clear a task's state (and revert its commits with --revert) so it runs again
   symphony reset   --all                 clear every task's state and the halt, so a replaced roadmap starts clean
   symphony nudge   T05 [--note "..."]    resume a task's last session and ask it to close out
@@ -135,7 +138,7 @@ export const VERSION: string = (() => {
   }
 })();
 
-const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'split', 'init', 'accept', 'approve', 'attention', 'steer', 'reset', 'nudge', 'clear-halt', 'vision', 'brief', 'start', 'stop', 'attach', 'help']);
+const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'split', 'init', 'accept', 'approve', 'attention', 'steer', 'schedule', 'decompose', 'reset', 'nudge', 'clear-halt', 'vision', 'brief', 'start', 'stop', 'attach', 'help']);
 
 /**
  * The effective path overrides for this invocation: the base `paths`, or — with `--set NAME` — a
@@ -201,6 +204,8 @@ export async function main(argv: string[]): Promise<number> {
       all: { type: 'boolean' },
       note: { type: 'string' },
       by: { type: 'string' },
+      apply: { type: 'boolean' },
+      strategy: { type: 'string' },
       revert: { type: 'boolean' },
       json: { type: 'boolean' },
       prompt: { type: 'string' },
@@ -326,6 +331,21 @@ export async function main(argv: string[]): Promise<number> {
       const id = positionals[1];
       if (!id) throw new UsageError('steer: give a task id and a note, e.g. symphony steer T05 "keep the public API stable"');
       return steerCommand(paths, loaded.state, loaded.tasks, id, positionals.slice(2).join(' '), { by: v.by, log });
+    }
+    case 'schedule': {
+      const strategy = v.strategy;
+      if (strategy !== undefined && !['roadmap', 'priority', 'critical-path'].includes(strategy)) {
+        throw new UsageError('--strategy must be roadmap, priority or critical-path');
+      }
+      return scheduleCommand(paths, loaded.state, loaded.tasks, config, log, {
+        json: v.json === true,
+        strategy: strategy as 'roadmap' | 'priority' | 'critical-path' | undefined,
+      });
+    }
+    case 'decompose': {
+      const id = positionals[1];
+      if (!id) throw new UsageError('decompose: give a task id, e.g. symphony decompose T05 [--apply]');
+      return decomposeCommand(paths, loaded.state, loaded.tasks, config, id, { apply: v.apply === true, log });
     }
     case 'clear-halt':
       return clearHaltCommand(paths, loaded.state, log);
