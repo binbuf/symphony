@@ -563,6 +563,8 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `steer T05 "note" [--by "…"]` | queue operator guidance for the task's next session; a running task receives it at its next session boundary (hot steering, no restart); with no note, list what is queued |
 | `schedule [--strategy roadmap\|priority\|critical-path] [--json]` | preview the deterministic ready-task order; dependency edges always win, then the configured tie-breaker |
 | `decompose T05 [--apply]` | show (or apply) a deterministic split based on the task's `## Scope` bullets or unchecked acceptance items; no agent session |
+| `supervise [--json]` | print the deterministic supervisor decision (`halt`/`attention`/`watch`/`none`) and refresh `.symphony/supervisor.json` |
+| `jev-eval [--json]` | evaluate recorded Jev decisions against later task outcomes: success rate by workflow, confidence calibration, cost |
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also undoes its `T05:` commits (newest first) |
 | `reset --all` | clear every task's state and the halt, and reset every roadmap marker to `[ ]` |
 | `nudge T05 [--note "…"]` | resume a task's last session and ask it to close out with a result block |
@@ -873,6 +875,22 @@ When the [`breakdown` block](#automatic-breakdowns) is enabled and one of its ga
 
 `symphony doctor` reports which workflows are armed and whether the key is present; with a workflow armed, a missing key halts the next `run` (exit `3`) until it is set or `jev.enabled` is turned off.
 
+### Evaluation
+
+Set `"evaluate": true` in the `jev` block to record every answered Jev decision (session, escalation, breakdown) and each task outcome under `.symphony/jev-decisions.jsonl`. `symphony jev-eval` then pairs each decision with the task's next outcome and reports:
+
+- decisions and how many have an outcome,
+- success rate per workflow,
+- average confidence and total cost,
+- a confidence-calibration table (`0.7–0.8` etc. vs observed success).
+
+The pairing is sequential and conservative: a decision with no later outcome stays "waiting" rather than counting as a failure. Evaluation is telemetry only — it never changes a run decision, and leaving `evaluate` off writes nothing.
+
+```bash
+symphony jev-eval
+symphony jev-eval --json
+```
+
 ## Vision tool
 
 Sometimes a task only makes sense if you can *look* at something — a screenshot of a failing UI, a photo of a whiteboard, a diagram, a chart, a mockup. When the session's model accepts image input, the session sees the image **natively** — OpenCode 2.x advertises which models do, reads images through its file tools, and resizes oversized ones — and the prompt tells it to look first. For a model that cannot accept images, or when an independent text-only description is wanted, symphony can also run a separate **vision model** on the session's behalf. When enabled, task, continuation, nudge, and resume prompts include a short image-analysis section naming both routes. From the project root, the session can run:
@@ -919,11 +937,11 @@ While a run is in flight, a **separate, read-only** LLM session can summarize ho
 
 It is asked for a short answer that fits the four-line strip. A stray conversational opener like "I looked into…" is stripped before display. Before any summary exists, the panel shows a dim `No update yet — watching for a meaningful change.` placeholder.
 
-A check runs every `watch.intervalMin`, **and again each time a task ends**, so a summary reflects the ticket that just moved rather than the pipeline as of the last timer tick.
+A check runs every `watch.intervalMin`, **and again each time a task ends**, so a summary reflects the ticket that just moved rather than the pipeline as of the last timer tick. With `watch.mode: "exceptions"` the timer is only a poll: the deterministic [supervisor](#supervisor) decides whether there is an exception (slow, retrying, stalled) before a model session is spent; ordinary progress is left alone. `"both"` keeps the periodic checks and also checks on exceptions.
 
 The latest answer is shown in the TUI's **Pipeline watch** strip (above the status table) and every check is appended to `.symphony/watch.log` with the snapshot and a link to the session's raw files. The strip shows `Waiting for updates` until the first check returns, with the countdown to the first check on the right of the title; press `w` to run one immediately. A ready check replaces the summary and refreshes the count and update time in the title.
 
-The watcher is *advisory only*: it never edits the tree (the harness pins `autoApprove: false`, and its sole permitted action is reading the log file named in the prompt), a failed or timed-out check just updates the panel, and a missing watcher binary disables it with a warning — the run is never blocked or halted by it.
+The watcher is *advisory only*: it never edits the tree (the harness pins `autoApprove: false`, and its sole permitted action is reading the log file named in the prompt), a failed or timed-out check just updates the panel, and a missing watcher binary disables it with a warning — the run is never blocked or halted by it. `symphony supervise` shows the same deterministic decision without spending a model call.
 
 Configure it with the `watch` block; the provider and model are independent of the run's, so the watcher can be a cheaper model:
 
@@ -934,7 +952,8 @@ Configure it with the `watch` block; the provider and model are independent of t
   "provider": "opencode",
   "model": "deepseek/deepseek-v4.1-flash",
   "modelProvider": "openrouter",
-  "timeoutMin": 5
+  "timeoutMin": 5,
+  "mode": "periodic"
 }
 ```
 
@@ -942,7 +961,28 @@ Configure it with the `watch` block; the provider and model are independent of t
 
 Set `"enabled": false` to turn it off. The panel appears once the watcher is armed (or, if its provider binary is missing, shows the error while the run continues), and the timer starts after preflight passes — not during `--dry-run`, `prepare`, or an empty run.
 
-## Judge
+## Supervisor
+
+The supervisor is the deterministic controller in front of the watcher. It reads durable state and returns one of four actions:
+
+| action | when |
+|---|---|
+| `halt` | the run is halted |
+| `attention` | a task is blocked/failed/needs-attention, acceptance is `pending_human` or `inconclusive`, or a required judge is unavailable |
+| `watch` | a running task is slow (`supervisor.slowAfterMin`), on a repeated attempt, or its observable progress is flat/regressing |
+| `none` | ordinary progress |
+
+It never calls a model. Every run writes its current decision to `.symphony/supervisor.json`, and `symphony supervise [--json]` prints it on demand. The watcher only spends a model session when this decision is `watch` (in `watch.mode: "exceptions"`), so supervision is exception-driven rather than a periodic LLM poll.
+
+```json
+"supervisor": {
+  "enabled": true,
+  "slowAfterMin": 45,
+  "watchOnExceptions": true
+}
+```
+
+## Jev
 
 The [verify command](#the-lifecycle) checks what it was told to check — tests, a build. It cannot tell whether a task that goes green actually did *what the task asked for*. The optional **judge** adds that independent check: after a task reports `done` and its verify passes, a separate **read-only** LLM session reads the task's own intent (Goal, Scope, Design notes, acceptance items), the work that landed (the worktree diff), the verify evidence and the session's own summary, and returns a verdict. It is **off by default**.
 
@@ -1132,10 +1172,11 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `escalation.enabled`, `.provider`, `.model`, `.modelProvider`, `.maxAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, `1`, `[task, verify]` | hand a task the workhorse model failed to a stronger provider/model (see [Escalation](#escalation)) |
 | `fallback.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.afterAttempts`, `.onCategories` | `false`, `opencode`, `z-ai/glm-5.3`, `openrouter`, –, `2`, `[rate_limit, overloaded, server, network, stall, crash]` | switch a task to a second provider/model after repeated transient infrastructure faults (see [Fallback](#fallback)) |
 | `flex.variantPrefix`, `.variants`, `.onUnavailable`, `.pollSec`, `.maxWaitMin`, `.onCategories` | `flex-`, `[]`, `wait`, `60`, `0`, `[rate_limit, overloaded, server]` | how to react when a flex service-tier variant loses capacity: wait/poll (default), block, or fallback (see [Flex service tier](#flex-service-tier)) |
-| `jev.enabled`, `.resultFallback`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses` | `false`, `true`, `true`, `true`, `openrouter`, `typesafe/jev-1.13`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]` | Jev decision workflows, each behind its own flag (see [Jev](#jev)) |
+| `jev.enabled`, `.resultFallback`, `.escalationDecision`, `.breakdownDecision`, `.provider`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.minConfidence`, `.acceptStatuses`, `.evaluate` | `false`, `true`, `true`, `true`, `openrouter`, `typesafe/jev-1.13`, `OPENROUTER_API_KEY`, `4000`, `0.7`, `[done, continue]`, `false` | Jev decision workflows, each behind its own flag; `evaluate` records decisions/outcomes for `symphony jev-eval` (see [Jev](#jev)) |
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, adaptive image description, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt explains it (see [Vision tool](#vision-tool)) |
 | `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true` except `watch`, `10000` | post lifecycle events to a Slack channel or DM a user, threading a task's later events under its start (see [Slack notifications](#slack-notifications)) |
-| `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
+| `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.mode` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5`, `periodic` | read-only pipeline summary in the TUI strip and `.symphony/watch.log`; `mode` is `periodic`, `exceptions` or `both` (see [Pipeline watch](#pipeline-watch)) |
+| `supervisor.enabled`, `.slowAfterMin`, `.watchOnExceptions` | `true`, `45`, `true` | deterministic exception supervision; writes `.symphony/supervisor.json` and only asks the watcher to look when an exception is flagged (see [Supervisor](#supervisor)) |
 | `judge.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.onFail`, `.minConfidence`, `.required`, `.maxPerTask`, `.includeDiff`, `.maxDiffBytes`, `.timeoutMin` | `false`, the `watch` block's, `fail`, `0.7`, `false`, `1`, `true`, `20000`, `10` | independent read-only completion judge after a task's verify passes: checks the task's intent against the work that landed and can demote a confident rejection; `required` parks the task when the judge itself cannot run (see [Judge](#judge)) |
 | `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.onBlocked`, `.onGap`, `.rules.*`, `.decision`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `true`, `true`, `1`/`1`/`[task, verify]`/`proceed`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, when a task reports blocked, when the judge passes below its confidence bar, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |

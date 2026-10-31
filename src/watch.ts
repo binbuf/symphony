@@ -10,7 +10,8 @@ import type { RunContext } from './runner.js';
 import { notifyTaskSlack, slackEventEnabled, slackProject } from './slack.js';
 import { startSession, type Session, type SessionOutcome } from './session.js';
 import { buildStatusTable } from './status.js';
-import { type State } from './state.js';
+import type { State } from './state.js';
+import { decideSupervision, writeSupervisorSnapshot } from './supervisor.js';
 import type { Task } from './tasks.js';
 import { renderPrompt } from './templates.js';
 import { ensureDir, fmtCost, fmtDuration, nowIso, resolveBinary, resolveExecutable, squash, stamp } from './util.js';
@@ -247,7 +248,7 @@ export class PipelineWatcher {
   async checkNow(): Promise<void> {
     if (this.stopped) return;
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
-    await this.fire();
+    await this.fire(true);
   }
 
   private arm(delayMs: number): void {
@@ -258,9 +259,20 @@ export class PipelineWatcher {
     this.timer.unref?.();
   }
 
-  private async fire(): Promise<void> {
+  private async fire(force = false): Promise<void> {
     if (this.stopped || this.inFlight) return;
     this.timer = undefined;
+    // In exception mode the deterministic supervisor decides whether there is anything to look at;
+    // ordinary progress is left alone. A manual refresh (force) always runs.
+    if (!force && this.ctx.config.watch.mode === 'exceptions') {
+      const decision = decideSupervision({ state: this.ctx.state, tasks: this.ctx.tasks, config: this.ctx.config });
+      writeSupervisorSnapshot(this.ctx.paths, decision);
+      if (!this.ctx.config.supervisor.watchOnExceptions || decision.action !== 'watch') {
+        this.ctx.log.info(`watch: skipped (supervisor ${decision.action}: ${decision.reason})`);
+        if (!this.stopped) this.arm(this.intervalMs);
+        return;
+      }
+    }
     this.inFlight = true;
     this.checks += 1;
     try {
@@ -357,6 +369,7 @@ export function startPipelineWatch(ctx: RunContext): PipelineWatcher | undefined
   const watcher = new PipelineWatcher(ctx, spec, provider);
   ctx.watch = { status: 'waiting', enabled: true, intervalMin: w.intervalMin, provider: spec.providerName, model: spec.model, nextAt: Date.now() + w.intervalMin * 60_000, checks: 0 };
   ctx.watchRefresh = () => void watcher.checkNow();
+  writeSupervisorSnapshot(ctx.paths, decideSupervision({ state: ctx.state, tasks: ctx.tasks, config: ctx.config }));
   watcher.start();
   ctx.log.info(`watch: pipeline watch on · ${spec.providerName}${spec.model ? ` · ${spec.model}` : ''} every ${w.intervalMin} min → ${rel(ctx.paths.root, watchLogPath(ctx.paths))}`);
   return watcher;

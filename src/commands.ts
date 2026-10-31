@@ -3,6 +3,8 @@ import { basename, join } from 'node:path';
 import { acceptanceExcludes, appendApproval, criterionEvidenceHash, parseAcceptanceSpec, readGateResults } from './acceptance.js';
 import { collectAttention, formatAttention, writeAttention, attentionPath } from './attention.js';
 import { applyDecomposition, planDecomposition } from './decomposition.js';
+import { evaluateJev, formatJevEvaluation, readJevRecords } from './jev-eval.js';
+import { decideSupervision, formatSupervisor, supervisorPath, writeSupervisorSnapshot } from './supervisor.js';
 import { DEFAULTS, type Config, type SchedulingStrategy } from './config.js';
 import { ADR_TEMPLATE, DESIGN_README, LOGS_README, PROGRESS_README, ROADMAP_TEMPLATE, TASK_TEMPLATE, docsContract } from './contract.js';
 import { commitsForTask, commitPrefix, ensureGitignore, git, commitAll, describeCommit, worktreeRevision } from './git.js';
@@ -338,6 +340,36 @@ export function decomposeCommand(
     extraIgnore: config.git.extraIgnore,
   });
   log.info(`${task.id}: decomposed into ${childIds.join(', ')} · ${describeCommit(commit)}`);
+  return 0;
+}
+
+export function supervisorCommand(
+  paths: Paths,
+  state: State,
+  tasks: Task[],
+  config: Config,
+  log: Logger,
+  json: boolean,
+): number {
+  const decision = decideSupervision({ state, tasks, config });
+  writeSupervisorSnapshot(paths, decision);
+  if (json) {
+    log.plain(JSON.stringify(decision, null, 2));
+  } else {
+    for (const line of formatSupervisor(decision)) log.plain(line);
+    log.plain(`snapshot: ${rel(paths.root, supervisorPath(paths))}`);
+  }
+  return decision.action === 'halt' ? 3 : 0;
+}
+
+export function jevEvalCommand(paths: Paths, log: Logger, json: boolean): number {
+  const evaluation = evaluateJev(readJevRecords(paths));
+  if (json) {
+    log.plain(JSON.stringify(evaluation, null, 2));
+    return 0;
+  }
+  for (const line of formatJevEvaluation(evaluation)) log.plain(line);
+  if (!evaluation.decisions) log.plain('no Jev decisions recorded; enable jev.evaluate to collect them');
   return 0;
 }
 

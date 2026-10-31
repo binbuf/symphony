@@ -220,6 +220,11 @@ export interface JevConfig {
   minConfidence: number;
   /** Dispositions `resultFallback` is allowed to settle. Ending a task stays with the nudge by default. */
   acceptStatuses: ReportedStatus[];
+  /**
+   * Record every Jev decision (session/escalation/breakdown) and each task outcome to
+   * `.symphony/jev-decisions.jsonl`, so `symphony jev-eval` can report calibration and success rates.
+   */
+  evaluate: boolean;
 }
 
 /**
@@ -272,6 +277,26 @@ export interface WatchConfig {
   variant?: string;
   /** Hard wall clock for one check; on timeout the check is abandoned. */
   timeoutMin: number;
+  /**
+   * When the watcher runs. `periodic` keeps the historical timer; `exceptions` runs only when the
+   * deterministic supervisor flags a slow/retrying/stuck task; `both` runs on the timer and on an
+   * exception. The watcher never decides run behaviour either way.
+   */
+  mode: 'periodic' | 'exceptions' | 'both';
+}
+
+/**
+ * Deterministic supervisor: reads durable state and decides whether anything needs attention or a
+ * watch check. It never calls a model itself; the watcher is the optional model-backed escalation for
+ * an exception it flags.
+ */
+export interface SupervisorConfig {
+  /** Write `.symphony/supervisor.json` and evaluate exceptions when the run progresses. */
+  enabled: boolean;
+  /** A running task older than this is a "slow" exception. */
+  slowAfterMin: number;
+  /** Raise a watch check when an exception is detected (only when `watch.mode` includes exceptions). */
+  watchOnExceptions: boolean;
 }
 
 /**
@@ -699,6 +724,8 @@ export interface Config {
   watch: WatchConfig;
   /** Optional independent completion judge before a `done` is accepted. See JudgeConfig. */
   judge: JudgeConfig;
+  /** Deterministic exception supervision and the watch-on-exception policy. See SupervisorConfig. */
+  supervisor: SupervisorConfig;
   /** Per-session MCP server selection. See McpConfig. */
   mcp: McpConfig;
   /** Automatic task breakdown at task start, at a `continue` boundary, or instead of escalating. See BreakdownConfig. */
@@ -838,6 +865,7 @@ export const DEFAULTS: Config = {
     timeoutMs: 4000,
     minConfidence: 0.7,
     acceptStatuses: ['done', 'continue'],
+    evaluate: false,
   },
   vision: {
     enabled: false,
@@ -881,6 +909,12 @@ export const DEFAULTS: Config = {
     model: 'deepseek/deepseek-v4.1-flash',
     modelProvider: 'openrouter',
     timeoutMin: 5,
+    mode: 'periodic',
+  },
+  supervisor: {
+    enabled: true,
+    slowAfterMin: 45,
+    watchOnExceptions: true,
   },
   judge: {
     enabled: false,
@@ -1277,6 +1311,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
   const breakRaw = isRecord(raw.breakdown) ? raw.breakdown : {};
   const breakRulesRaw = isRecord(breakRaw.rules) ? breakRaw.rules : {};
   const progressRaw = isRecord(raw.progress) ? raw.progress : {};
+  const supervisorRaw = isRecord(raw.supervisor) ? raw.supervisor : {};
   const metricRaw = isRecord(raw.metric) ? raw.metric : {};
   const tierRoutingRaw = isRecord(raw.tierRouting) ? raw.tierRouting : {};
   const schedulingRaw = isRecord(raw.scheduling) ? raw.scheduling : {};
@@ -1494,6 +1529,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
           return n;
         })(),
         acceptStatuses,
+        evaluate: boolOr(jevRaw.evaluate, DEFAULTS.jev.evaluate, 'jev.evaluate', warnings),
       };
     })(),
     vision: (() => {
@@ -1592,8 +1628,14 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
           return undefined;
         })(),
         timeoutMin: positiveOr(watchRaw.timeoutMin, DEFAULTS.watch.timeoutMin, 'watch.timeoutMin', warnings),
+        mode: enumOr(watchRaw.mode, ['periodic', 'exceptions', 'both'] as const, DEFAULTS.watch.mode, 'watch.mode', warnings),
       };
     })(),
+    supervisor: {
+      enabled: boolOr(supervisorRaw.enabled, DEFAULTS.supervisor.enabled, 'supervisor.enabled', warnings),
+      slowAfterMin: positiveOr(supervisorRaw.slowAfterMin, DEFAULTS.supervisor.slowAfterMin, 'supervisor.slowAfterMin', warnings),
+      watchOnExceptions: boolOr(supervisorRaw.watchOnExceptions, DEFAULTS.supervisor.watchOnExceptions, 'supervisor.watchOnExceptions', warnings),
+    },
     judge: (() => {
       let provider: ProviderName | undefined;
       if (judgeRaw.provider !== undefined && judgeRaw.provider !== null) {

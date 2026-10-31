@@ -350,6 +350,28 @@ test('tier routing, scheduling and decomposition parse with safe defaults', () =
   assert.ok(!warnings.some((w) => /tierRouting|scheduling|decomposition/.test(w)), warnings.join('\n'));
 });
 
+test('supervisor, watch mode and jev evaluation parse with safe defaults', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-p3-cfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  assert.equal(DEFAULTS.supervisor.enabled, true);
+  assert.equal(DEFAULTS.supervisor.slowAfterMin, 45);
+  assert.equal(DEFAULTS.watch.mode, 'periodic');
+  assert.equal(DEFAULTS.jev.evaluate, false);
+  writeFileSync(paths.config, JSON.stringify({
+    supervisor: { enabled: false, slowAfterMin: 15, watchOnExceptions: false },
+    watch: { mode: 'both' },
+    jev: { evaluate: true },
+  }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.supervisor.enabled, false);
+  assert.equal(config.supervisor.slowAfterMin, 15);
+  assert.equal(config.supervisor.watchOnExceptions, false);
+  assert.equal(config.watch.mode, 'both');
+  assert.equal(config.jev.evaluate, true);
+  assert.ok(!warnings.some((w) => /supervisor|watch\.mode|jev\.evaluate/.test(w)), warnings.join('\n'));
+});
+
 test('verify resolution: front matter > config > inferred package.json test script', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-verify-'));
   const cfg = { ...DEFAULTS };

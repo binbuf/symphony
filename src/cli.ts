@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { acceptCommand, approveCommand, attentionCommand, briefCommand, clearHaltCommand, decomposeCommand, initCommand, logsCommand, resetCommand, scheduleCommand, statusCommand, steerCommand } from './commands.js';
+import { acceptCommand, approveCommand, attentionCommand, briefCommand, clearHaltCommand, decomposeCommand, initCommand, jevEvalCommand, logsCommand, resetCommand, scheduleCommand, statusCommand, steerCommand, supervisorCommand } from './commands.js';
 import { DEFAULTS, findTaskSet, loadConfig, resolveSession, type CliOverrides, type Config } from './config.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { formatLint, lintDocs } from './lint.js';
@@ -48,6 +48,8 @@ Usage
   symphony schedule [--strategy NAME]    show the deterministic ready-task order (roadmap/priority/critical-path)
                   [--json]
   symphony decompose T05 [--apply]       show (or apply) a deterministic split based on the task's scope/acceptance items
+  symphony supervise [--json]            deterministic exception check: halt/attention/watch/none
+  symphony jev-eval [--json]             evaluate recorded Jev decisions against task outcomes
   symphony reset   T05 [--revert]        clear a task's state (and revert its commits with --revert) so it runs again
   symphony reset   --all                 clear every task's state and the halt, so a replaced roadmap starts clean
   symphony nudge   T05 [--note "..."]    resume a task's last session and ask it to close out
@@ -138,7 +140,7 @@ export const VERSION: string = (() => {
   }
 })();
 
-const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'split', 'init', 'accept', 'approve', 'attention', 'steer', 'schedule', 'decompose', 'reset', 'nudge', 'clear-halt', 'vision', 'brief', 'start', 'stop', 'attach', 'help']);
+const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'split', 'init', 'accept', 'approve', 'attention', 'steer', 'schedule', 'decompose', 'supervise', 'jev-eval', 'reset', 'nudge', 'clear-halt', 'vision', 'brief', 'start', 'stop', 'attach', 'help']);
 
 /**
  * The effective path overrides for this invocation: the base `paths`, or — with `--set NAME` — a
@@ -347,6 +349,10 @@ export async function main(argv: string[]): Promise<number> {
       if (!id) throw new UsageError('decompose: give a task id, e.g. symphony decompose T05 [--apply]');
       return decomposeCommand(paths, loaded.state, loaded.tasks, config, id, { apply: v.apply === true, log });
     }
+    case 'supervise':
+      return supervisorCommand(paths, loaded.state, loaded.tasks, config, log, v.json === true);
+    case 'jev-eval':
+      return jevEvalCommand(paths, log, v.json === true);
     case 'clear-halt':
       return clearHaltCommand(paths, loaded.state, log);
     case 'reset': {

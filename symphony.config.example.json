@@ -158,7 +158,9 @@
     "acceptStatuses": [
       "done",
       "continue"
-    ]
+    ],
+    "_evaluate": "Set true to record every Jev decision and each task outcome under .symphony/jev-decisions.jsonl; `symphony jev-eval` then reports success rate, average confidence, cost and calibration. Evaluation never changes a run decision.",
+    "evaluate": false
   },
   "vision": {
     "enabled": false,
@@ -196,12 +198,20 @@
     "timeoutMs": 10000
   },
   "watch": {
+    "_watch": "Periodic read-only pipeline summary. mode periodic keeps the timer; exceptions runs only when the deterministic supervisor flags a slow/retrying/stalled task; both runs on the timer and on exceptions. Advisory only.",
     "enabled": true,
     "intervalMin": 5,
     "provider": "opencode",
     "model": "deepseek/deepseek-v4.1-flash",
     "modelProvider": "openrouter",
-    "timeoutMin": 5
+    "timeoutMin": 5,
+    "mode": "periodic"
+  },
+  "supervisor": {
+    "_supervisor": "Deterministic exception supervision. It never calls a model: it writes .symphony/supervisor.json and decides whether the run should do nothing, ask the watcher to look, or surface attention. slowAfterMin flags a running task that is taking too long.",
+    "enabled": true,
+    "slowAfterMin": 45,
+    "watchOnExceptions": true
   },
   "judge": {
     "_judge": "Off by default. When enabled, after a task reports done and its verify passes, a separate read-only session reviews the task's Goal/Scope/acceptance against the worktree diff and returns pass/fail. onFail fail demotes a confident rejection so retry/escalation/breakdown re-engage; warn is advisory. required true parks the task for attention when the judge itself cannot run (missing binary/key, timeout, unusable answer) instead of accepting or failing it. Add \"judge\" to escalation.onCategories and breakdown.rules.onCategories to have those react to a rejected done.",

@@ -10,6 +10,7 @@ import { EMPTY_TREE_SHA, changedFilesSince, commitAll, createCheckpoint, current
 import { contractsFor, dependencyClosure, isLandedSubset, parseAcceptance, summarizeAcceptance, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
 import { fireHook } from './hooks.js';
 import { classifyEscalation, classifySessionResult, jevProblem, runnerUp } from './jev.js';
+import { recordJevDecision, recordJevOutcome } from './jev-eval.js';
 import { collectChanges, runJudge, type JudgeEvidence, type JudgeVerdict } from './judge.js';
 import { collectAttention, writeAttention } from './attention.js';
 import { createLogger, openRunSinks, type Logger, type RunSinks } from './logger.js';
@@ -23,6 +24,7 @@ import { createRemainderTask } from './remainder.js';
 import { nextTierEntry, routeTier, tierSpec } from './routing.js';
 import { scheduleTasks } from './scheduling.js';
 import { consumeSteering, pendingSteering, steeringBlock } from './steering.js';
+import { decideSupervision, writeSupervisorSnapshot } from './supervisor.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { addUsage } from './providers/common.js';
 import type { Provider, ResultEvent, SpawnSpec, TokenUsage } from './providers/types.js';
@@ -363,6 +365,17 @@ async function autoBreakdown(ctx: RunContext, task: Task, ev: BreakdownEvidence)
   const verdict = await decideBreakdown(ctx.config, ev, { log: ctx.log, paths: ctx.paths, abort: ctx.abort.signal, fetchImpl: ctx.fetchImpl });
   if (!verdict) return { split: false, replan: false };
   addDecisionCost(ctx, task, verdict.costUsd);
+  if (verdict.source === 'jev') {
+    recordJevDecision(ctx.paths, ctx.config, {
+      workflow: 'breakdown',
+      taskId: task.id,
+      decision: verdict.action,
+      confidence: verdict.confidence,
+      costUsd: verdict.costUsd,
+      stage: ev.stage,
+      source: verdict.source,
+    });
+  }
   const pct = verdict.confidence !== undefined ? ` ${Math.round(verdict.confidence * 100)}%` : '';
 
   if (verdict.action === 'replan') {
@@ -826,6 +839,13 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
   }
 
   if (halt) state.halted = halt;
+  recordJevOutcome(paths, config, {
+    taskId: task.id,
+    status: final.status,
+    success: final.status === 'done' || final.status === 'accepted',
+    attempts: st.attempts,
+    costUsd: st.costUsd,
+  });
   saveState(paths, state);
   refreshAttention(ctx);
   fireHook(config, 'afterTask', {
@@ -852,7 +872,17 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
   log.info(`=== ${task.id} -> ${final.status.toUpperCase()} · ${fmtDuration(st.durationS)} · ${fmtCost(st.costUsd)} · ${final.summary} · git: ${st.commit}`);
   // A ticket just ended: refresh the advisory watch panel now rather than waiting for the next
   // interval, so the summary leads with this outcome. Fire-and-forget; a no-op when watch is off.
-  ctx.watchRefresh?.();
+  // In exception mode, only an exception the deterministic supervisor flags triggers a model check.
+  if (config.supervisor.enabled) {
+    const decision = decideSupervision({ state, tasks: ctx.tasks, config });
+    writeSupervisorSnapshot(paths, decision);
+    const exceptionWatch = config.watch.mode === 'exceptions'
+      && config.supervisor.watchOnExceptions
+      && decision.action === 'watch';
+    if (config.watch.mode !== 'exceptions' || exceptionWatch) ctx.watchRefresh?.();
+  } else {
+    ctx.watchRefresh?.();
+  }
 }
 
 /** Active ADR titles, with historical (superseded/rejected/withdrawn) records machine-excluded. */
@@ -1281,6 +1311,17 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         );
         const pct = decision ? Math.round(decision.confidence * 100) : 0;
         addDecisionCost(ctx, task, decision?.costUsd);
+        if (decision) {
+          recordJevDecision(ctx.paths, config, {
+            workflow: 'escalation',
+            taskId: task.id,
+            decision: decision.escalate ? 'escalate' : 'decline',
+            confidence: decision.confidence,
+            costUsd: decision.costUsd,
+            model: decision.model,
+            source: 'jev',
+          });
+        }
         if (decision && decision.confidence >= config.jev.minConfidence) {
           if (!decision.escalate) {
             log.warn(`${task.id}: [jev] ${category} — ${reason}. Jev says a stronger model would not help (${pct}%); not escalating.`);
@@ -1590,6 +1631,17 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         const decision = await classifySessionResult(config.jev, { taskTitle: task.title, output: outcome.allText }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal, note: (m) => { note = m; } });
         // Charge any answered call, even when the disposition is not accepted below.
         addDecisionCost(ctx, task, decision?.costUsd);
+        if (decision) {
+          recordJevDecision(ctx.paths, config, {
+            workflow: 'session',
+            taskId: task.id,
+            decision: decision.status,
+            confidence: decision.confidence,
+            costUsd: decision.costUsd,
+            model: decision.model,
+            source: 'jev',
+          });
+        }
         const pct = decision ? Math.round(decision.confidence * 100) : 0;
         if (decision && decision.confidence >= config.jev.minConfidence && config.jev.acceptStatuses.includes(decision.status)) {
           block = { status: decision.status, summary: `Jev classified the session as ${decision.status} (confidence ${pct}%)` };
@@ -2586,6 +2638,7 @@ export async function nudgeCommand(ctx: RunContext, rawId: string, note?: string
   acquireLock(paths);
   ctx.startBranch = currentBranch(paths.root);
   refreshAttention(ctx);
+  if (config.supervisor.enabled) writeSupervisorSnapshot(paths, decideSupervision({ state: ctx.state, tasks: ctx.tasks, config }));
   const stopHeartbeat = startLockHeartbeat(paths);
   try {
     st.status = 'running';
