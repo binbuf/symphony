@@ -10,10 +10,10 @@ export interface VerifyResult {
  * Run the task's verify command in the project root. This is the harness's own acceptance check,
  * independent of what the agent claimed: a non-zero exit (or a timeout) means the task is not done.
  */
-export function runVerify(root: string, command: string, timeoutMs: number): VerifyResult {
+export function runVerify(root: string, command: string, timeoutMs: number, extraEnv?: Record<string, string>): VerifyResult {
   let r: ReturnType<typeof spawnSync>;
   try {
-    r = spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', timeout: timeoutMs, env: process.env });
+    r = spawnSync(command, { cwd: root, shell: true, encoding: 'utf8', timeout: timeoutMs, env: { ...process.env, ...extraEnv } });
   } catch (e) {
     return { ok: false, code: null, output: `could not run verify command: ${(e as Error).message}` };
   }

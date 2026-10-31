@@ -1,12 +1,12 @@
 import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { evaluateAcceptance, parseAcceptanceSpec, type AcceptanceSpec } from './acceptance.js';
+import { acceptanceExcludes, evaluateAcceptance, parseAcceptanceSpec, type AcceptanceSpec } from './acceptance.js';
 import { decideBreakdown, type BreakdownEvidence, type BreakdownStage, type BreakdownVerdict } from './breakdown.js';
 import { classifyFailure, type Classified, type FailureEvidence } from './classify.js';
 import { isFlexVariant, isModelDowngrade, lookupModelTier, resolveEscalation, resolveFallback, resolveJudge, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
 import { writeProgressIndex } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
-import { changedFilesSince, commitAll, createCheckpoint, currentBranch, describeCommit, headSha, restoreCheckpoint, worktreeRevision } from './git.js';
+import { EMPTY_TREE_SHA, changedFilesSince, commitAll, createCheckpoint, currentBranch, describeCommit, headSha, restoreCheckpoint, worktreeRevision } from './git.js';
 import { contractsFor, dependencyClosure, isLandedSubset, parseAcceptance, summarizeAcceptance, topoOrder, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
 import { fireHook } from './hooks.js';
 import { classifyEscalation, classifySessionResult, jevProblem, runnerUp } from './jev.js';
@@ -33,7 +33,7 @@ import { DONE_STATES, SKIP_STATES, acquireLock, haltResumeHint, liveLock, newTas
 import { metaBool, parseFrontMatter, type Task } from './tasks.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, nowIso, sleep, squash, stamp } from './util.js';
 import { runVerify, type VerifyResult } from './verify.js';
-import { visionPromptNote } from './vision.js';
+import { describeImage, visionProblem, visionPromptNote } from './vision.js';
 import { notifyTaskSlack, slackProject, type SlackEvent } from './slack.js';
 import { startPipelineWatch, type WatchState } from './watch.js';
 
@@ -693,8 +693,14 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
   }
 
   // In `ref` mode, unverified work never lands on the working branch. Snapshot it to a checkpoint,
-  // then restore the pre-task worktree so the next independent task cannot inherit it.
-  const isolated = config.git.checkpointMode === 'ref' && final.status !== 'done' && final.status !== 'accepted';
+  // then restore the pre-task worktree so the next independent task cannot inherit it. Work parked
+  // only for human approval or missing evidence is *kept* in place: it must survive until the gate can
+  // be re-evaluated.
+  const keepForAttention = st.acceptance?.status === 'pending_human' || st.acceptance?.status === 'inconclusive';
+  const isolated = config.git.checkpointMode === 'ref'
+    && final.status !== 'done'
+    && final.status !== 'accepted'
+    && !keepForAttention;
   if (isolated) {
     st.phase = 'checkpointing';
     saveState(paths, state);
@@ -731,6 +737,8 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
     delete st.commitSha;
     saveState(paths, state);
   }
+  if (keepForAttention) st.phase = 'needs_attention';
+  else if (!isolated) delete st.phase;
 
   const writeArtifacts = (status: TaskStatus): string => {
     // Marker first so the task's own commit carries the final [x]/[~] state.
@@ -987,7 +995,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   const acceptanceSpec = acceptanceRead.spec;
   const hasAcceptanceContract = !acceptanceRead.legacy;
   for (const error of acceptanceRead.errors) log.warn(`${task.id}: acceptance contract: ${error}`);
-  if (acceptanceSpec && !st.taskBaseSha) st.taskBaseSha = headSha(paths.root);
+  if (acceptanceSpec && !st.taskBaseSha) st.taskBaseSha = headSha(paths.root) ?? EMPTY_TREE_SHA;
   if (config.git.checkpointMode === 'ref' && !st.preTaskRef && st.phase !== 'verifying' && st.phase !== 'repairing') {
     const pre = createCheckpoint(paths.root, task.id, 'pre', { message: `symphony ${task.id} pre-task snapshot` });
     if (pre) {
@@ -1115,11 +1123,12 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
       taskBaseSha: st.taskBaseSha,
       revision: rev,
       log,
-      runVerify: (command, timeoutMs) => runVerify(paths.root, command, timeoutMs),
+      runVerify: (command, timeoutMs, env) => runVerify(paths.root, command, timeoutMs, env),
       changedFiles: (base) => changedFilesSince(paths.root, base, excludes),
       verifyRetries: config.verifyRetries,
       retryDelayMs: Math.min(30_000, Math.max(0, config.retry.baseSec) * 1000),
       repair: allowRepair && config.verifyRepair ? (command, res) => runFocusedRepair(command, res) : undefined,
+      reviewImage: visionProblem(config.vision) ? undefined : (image, prompt) => describeImage(config.vision, { image, prompt, cwd: paths.root }),
     });
     let evaluated = await evaluateAt(revision, true);
     let after = worktreeRevision(paths.root, excludes);
@@ -1164,17 +1173,33 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   };
 
   // A crash during verification leaves the implementation intact. On the next run, resume the
-  // acceptance gates before opening a new implementation session.
-  if (st.phase === 'verifying' && acceptanceSpec && hasAcceptanceContract) {
-    log.warn(`${task.id}: resuming validation of the existing work without a new implementation session`);
+  // acceptance gates before opening a new implementation session. A task parked for human approval or
+  // missing evidence does the same: `symphony approve ...` followed by `run --retry` re-validates the
+  // existing work instead of reimplementing it.
+  const awaitingAcceptance = st.status === 'blocked'
+    && st.phase === 'needs_attention'
+    && (st.acceptance?.status === 'pending_human' || st.acceptance?.status === 'inconclusive');
+  if ((st.phase === 'verifying' || awaitingAcceptance) && acceptanceSpec && hasAcceptanceContract) {
+    log.warn(`${task.id}: re-validating the existing work without a new implementation session`);
     const recovered = await runAcceptance(acceptanceSpec);
     if (recovered?.decision.accepted) {
       final = { status: 'done', summary: 'recovered: acceptance verification passed after a restart' };
       await finalizeTask(ctx, task, st, final);
       return { status: 'done' };
     }
+    if (recovered && (recovered.decision.status === 'pending_human' || recovered.decision.status === 'inconclusive')) {
+      const summary = `acceptance ${recovered.decision.status}: ${recovered.decision.reasons.join('; ')}`;
+      log.warn(`${task.id}: ${summary}; keeping the work for attention`);
+      final = {
+        status: 'blocked',
+        summary,
+        lastError: { category: 'verify', message: summary, transient: false, fatal: false, at: nowIso() },
+      };
+      await finalizeTask(ctx, task, st, final);
+      return { status: 'blocked' };
+    }
     if (recovered) {
-      log.warn(`${task.id}: acceptance still ${recovered.decision.status}; continuing with the ordinary task path`);
+      log.warn(`${task.id}: acceptance ${recovered.decision.status}; continuing with the ordinary task path`);
       st.phase = 'running';
       st.lastError = { category: 'verify', message: `acceptance ${recovered.decision.status}: ${recovered.decision.reasons.join('; ')}`, transient: false, fatal: false, at: nowIso() };
       saveState(paths, state);
@@ -1680,6 +1705,18 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
           }
           if (!evaluated.decision.accepted) {
             const msg = `acceptance ${evaluated.decision.status}: ${evaluated.decision.reasons.join('; ')}`;
+            if (evaluated.decision.status === 'pending_human') {
+              log.warn(`${task.id}: ${msg}; parking the task for human approval (symphony approve ${task.id} <criterion>)`);
+              final = { status: 'blocked', summary: msg, lastError: { category: 'verify', message: msg, transient: false, fatal: false, at: nowIso() } };
+              break;
+            }
+            if (evaluated.decision.status === 'inconclusive') {
+              // Missing or unstable evidence is not an implementation failure. Park it for attention
+              // instead of spending another implementation session or silently accepting it.
+              log.warn(`${task.id}: ${msg}; parking the task until the evidence can be acquired`);
+              final = { status: 'blocked', summary: msg, lastError: { category: 'verify', message: msg, transient: false, fatal: false, at: nowIso() } };
+              break;
+            }
             log.error(`${task.id}: ${msg}`);
             const rec = await recover('verify', msg);
             if (rec === 'split') return { status: st.status, split: true };
@@ -2027,23 +2064,8 @@ function contractsOf(ctx: RunContext): Map<string, TaskContract> {
 }
 
 /**
- * Harness-owned/generated files that are not part of the implementation an acceptance gate should
- * bind to. The task file is checked separately for contract changes; roadmap/logs/progress/index are
- * rewritten by the harness after acceptance and would otherwise make every gate revision stale.
+ * Read a task's v2 acceptance block from disk. No block means the legacy contract.
  */
-function acceptanceExcludes(paths: Paths): string[] {
-  return [
-    rel(paths.root, paths.roadmap),
-    rel(paths.root, paths.progress),
-    rel(paths.root, paths.progressDir),
-    rel(paths.root, paths.tasksDir),
-    rel(paths.root, paths.logsDir),
-    rel(paths.root, paths.index),
-    rel(paths.root, paths.stop),
-  ].filter(Boolean);
-}
-
-/** Read a task's v2 acceptance block from disk. No block means the legacy contract. */
 function readTaskAcceptance(task: Task): { spec?: AcceptanceSpec; errors: string[]; legacy: boolean } {
   if (!task.taskFile || !existsSync(task.taskFile)) return { errors: [], legacy: true };
   try {

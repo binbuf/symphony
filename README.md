@@ -484,7 +484,44 @@ A task file may add one fenced `symphony-acceptance` block. Tasks without it kee
 ```
 ````
 
-This build implements the deterministic `verify` and `diff` gates. The `diff` gate proves that a change exists under the declared paths, not that the change is semantically correct; the semantic judge remains responsible for intent. Every blocking criterion must have a passing result at the exact worktree revision being accepted. Gate results are append-only under `.symphony/evidence/<task>/gate-results.jsonl`; a pass from an older revision is stale and cannot satisfy acceptance. The parser recognises the later gate kinds (`metric`, `semantic`, the visual gates, and `human`) but rejects them until their runner lands. `symphony lint` validates the block, including stable criterion ids, duplicate ids, and required commands.
+This build implements `verify`, `diff`, `metric`, `visual-regression`, `visual-layout`, `visual-semantic`, and `human` gates; `semantic` is recognised but still rejected until the judge-backed gate lands.
+
+- **`verify`** runs a shell command itself.
+- **`diff`** proves that a change exists under the declared paths, not that it is semantically correct.
+- **`metric`** samples a command (`samples`, with `warmup` samples ignored), parses the last number or a JSON path (`parser` + `metric`), aggregates with `mean`/`median`/`min`/`max`/`first`/`last`, and compares the result with `operator` and `target`. An optional `regex` narrows the value first.
+- **`visual-regression` / `visual-layout`** run `capture`, then `compare` against `baseline` with a `threshold`. Both commands receive `SYMPHONY_VISUAL_ACTUAL`, `SYMPHONY_VISUAL_BASELINE`, `SYMPHONY_VISUAL_DIFF`, `SYMPHONY_VISUAL_THRESHOLD` and `SYMPHONY_VISUAL_ARTIFACT_DIR`, and support `{actual}`, `{baseline}`, `{diff}`, `{threshold}` and `{artifactDir}` placeholders. Compare exiting 0 means match; non-zero means the image changed; a missing capture or baseline is inconclusive, not an implementation failure.
+- **`visual-semantic`** captures an image (or uses `image`) and asks the configured `vision` model to judge `prompt`. The review must end with `VERDICT: PASS` or `VERDICT: FAIL`; anything else is inconclusive.
+- **`human`** passes only when `symphony approve T05 <criterion> --by "name"` has recorded an approval for that criterion, revision and non-human evidence set. Any later worktree revision invalidates the approval automatically.
+
+```json
+{
+  "version": 2,
+  "criteria": [
+    {
+      "id": "perf",
+      "text": "Benchmark stays above target",
+      "gates": [{
+        "kind": "metric",
+        "command": "node bench.js",
+        "parser": "json",
+        "metric": "score",
+        "operator": ">=",
+        "target": 1000,
+        "samples": 5,
+        "aggregate": "median",
+        "warmup": 1
+      }]
+    },
+    {
+      "id": "design",
+      "text": "Design review signed off",
+      "gates": [{ "kind": "human", "approver": "dan" }]
+    }
+  ]
+}
+```
+
+Every blocking criterion must have a passing result at the exact worktree revision being accepted. Gate results are append-only under `.symphony/evidence/<task>/gate-results.jsonl`; a pass from an older revision is stale and cannot satisfy acceptance. Evidence acquisition is retried (`verifyRetries`) and, when it still cannot produce evidence, recorded as `inconclusive` rather than a task failure. A `pending_human` or `inconclusive` task is parked with `phase: needs_attention`; `symphony approve ...` followed by `symphony run --retry --only T05` re-validates the existing work without opening a new implementation session. A real `fail` goes through the ordinary recovery path (focused repair, breakdown, escalation). `symphony lint` validates the block, including stable criterion ids, duplicate ids, and required commands/fields.
 
 At the end of every task the harness also rewrites a **pipeline status block** at the bottom of `ROADMAP.md` (between `<!-- symphony:status -->` and `<!-- /symphony:status -->`): what is done, blocked, failed and left, the last finished task and any halt. It is the one place to see the pipeline's high-level state at a glance. Do not edit that block by hand; everything outside the markers stays yours.
 
@@ -521,6 +558,7 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `split T05 [--into N] [--note "…"] [--dry-run]` | break one oversized task into subtasks (`T05` → `T05a`, `T05b`, …) with one agent session, then commit the rewritten plan; see [Splitting a task](#splitting-a-task) |
 | `brief` | print a paste-ready prompt so any LLM turns an idea into the docs package in this exact format |
 | `accept T05[,T06…] [--note "…"]` | human sign-off on one or more blocked/failed tasks; counts as done, bullet becomes `[x] ⟵ accepted` |
+| `approve T05 [criterion] [--by "…"] [--note "…"]` | record a v2 `human` gate approval; with no criterion, list the human criteria and their status; the approval is bound to the current revision and evidence |
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also undoes its `T05:` commits (newest first) |
 | `reset --all` | clear every task's state and the halt, and reset every roadmap marker to `[ ]` |
 | `nudge T05 [--note "…"]` | resume a task's last session and ask it to close out with a result block |

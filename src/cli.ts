@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { acceptCommand, briefCommand, clearHaltCommand, initCommand, logsCommand, resetCommand, statusCommand } from './commands.js';
+import { acceptCommand, approveCommand, briefCommand, clearHaltCommand, initCommand, logsCommand, resetCommand, statusCommand } from './commands.js';
 import { DEFAULTS, findTaskSet, loadConfig, resolveSession, type CliOverrides, type Config } from './config.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
 import { formatLint, lintDocs } from './lint.js';
@@ -40,6 +40,8 @@ Usage
                    [--note "..."] [--dry-run]   rewrites the task into subtask files, the harness validates and commits
   symphony init                          scaffold the docs/ package (ROADMAP, PROGRESS, tasks/, design/, adr/) + config + .gitignore
   symphony accept  T05 [--note "..."]    human sign-off on a blocked/failed/running task (counts as done)
+  symphony approve T05 [criterion]       record human approval for a v2 human acceptance gate
+                   [--by "name"]         (list criteria when omitted); then re-run with --retry
   symphony reset   T05 [--revert]        clear a task's state (and revert its commits with --revert) so it runs again
   symphony reset   --all                 clear every task's state and the halt, so a replaced roadmap starts clean
   symphony nudge   T05 [--note "..."]    resume a task's last session and ask it to close out
@@ -130,7 +132,7 @@ export const VERSION: string = (() => {
   }
 })();
 
-const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'split', 'init', 'accept', 'reset', 'nudge', 'clear-halt', 'vision', 'brief', 'start', 'stop', 'attach', 'help']);
+const COMMANDS = new Set(['run', 'status', 'logs', 'doctor', 'lint', 'prepare', 'replan', 'split', 'init', 'accept', 'approve', 'reset', 'nudge', 'clear-halt', 'vision', 'brief', 'start', 'stop', 'attach', 'help']);
 
 /**
  * The effective path overrides for this invocation: the base `paths`, or — with `--set NAME` — a
@@ -195,6 +197,7 @@ export async function main(argv: string[]): Promise<number> {
       into: { type: 'string' },
       all: { type: 'boolean' },
       note: { type: 'string' },
+      by: { type: 'string' },
       revert: { type: 'boolean' },
       json: { type: 'boolean' },
       prompt: { type: 'string' },
@@ -308,6 +311,11 @@ export async function main(argv: string[]): Promise<number> {
       const ids = positionals.slice(1).flatMap((s) => s.split(','));
       if (!ids.length) throw new UsageError('accept: give one or more task ids, e.g. symphony accept T05');
       return acceptCommand(paths, loaded.state, loaded.tasks, ids, v.note, log);
+    }
+    case 'approve': {
+      const id = positionals[1];
+      if (!id) throw new UsageError('approve: give a task id, e.g. symphony approve T05 [criterion] --by "name"');
+      return approveCommand(paths, loaded.state, loaded.tasks, id, positionals[2], { approver: v.by, note: v.note, log });
     }
     case 'clear-halt':
       return clearHaltCommand(paths, loaded.state, log);

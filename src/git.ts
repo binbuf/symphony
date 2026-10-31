@@ -57,30 +57,39 @@ export interface WorktreeRevision {
   dirty: boolean;
 }
 
+/** Git's canonical empty tree. Used as the base when a task starts in a repository with no commits. */
+export const EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
 /**
  * A stable identity for "the implementation currently in the worktree". Unlike a commit SHA, this
  * includes uncommitted edits and untracked files, so acceptance evidence can be tied to the exact
  * content it evaluated. The snapshot is built in a temporary index and never changes the real index
  * or working tree. `.symphony/` is harness state, not implementation, and is excluded.
  */
+/**
+ * Stage the current worktree into an isolated index, excluding harness-owned paths. `git add -A`
+ * without a pathspec is used deliberately: an explicit `:(exclude)` pathspec still trips Git's
+ * "ignored paths" error in repositories whose .gitignore lists .symphony/. Excluded paths are removed
+ * from the temporary index afterwards instead.
+ */
+function stageWorktree(root: string, dir: string, exclude: string[]): boolean {
+  const env = { GIT_INDEX_FILE: join(dir, 'index') };
+  if (gitWithEnv(root, ['read-tree', '--empty'], env).code !== 0) return false;
+  if (gitWithEnv(root, ['add', '-A'], env).code !== 0) return false;
+  const paths = [...new Set(['.symphony', ...exclude]
+    .map((p) => p.replace(/\\/g, '/').replace(/^\.?\//, ''))
+    .filter(Boolean))];
+  if (!paths.length) return true;
+  return gitWithEnv(root, ['rm', '-r', '--cached', '--ignore-unmatch', '--', ...paths], env).code === 0;
+}
+
 export function worktreeRevision(root: string, exclude: string[] = []): WorktreeRevision | undefined {
   const commit = headSha(root);
   let dir: string | undefined;
   try {
     dir = mkdtempSync(join(tmpdir(), 'symphony-tree-'));
-    const env = { GIT_INDEX_FILE: join(dir, 'index') };
-    // Start from an empty index and stage the current worktree with the harness-owned paths
-    // excluded. This gives an exact tree hash of the implementation even when the agent committed
-    // its own work (HEAD would otherwise include harness bookkeeping).
-    const seed = gitWithEnv(root, ['read-tree', '--empty'], env);
-    if (seed.code !== 0) return undefined;
-    const excluded = ['.symphony', ...exclude]
-      .map((p) => p.replace(/\\/g, '/').replace(/^\.?\//, ''))
-      .filter(Boolean)
-      .map((p) => `:(exclude)${p}`);
-    const add = gitWithEnv(root, ['add', '-A', '--', '.', ...excluded], env);
-    if (add.code !== 0) return undefined;
-    const tree = gitWithEnv(root, ['write-tree'], env);
+    if (!stageWorktree(root, dir, exclude)) return undefined;
+    const tree = gitWithEnv(root, ['write-tree'], { GIT_INDEX_FILE: join(dir, 'index') });
     return tree.code === 0 && tree.stdout ? { tree: tree.stdout, commit, dirty: dirtyFiles(root).length > 0 } : undefined;
   } catch {
     return undefined;
@@ -134,14 +143,8 @@ export function createCheckpoint(
   let dir: string | undefined;
   try {
     dir = mkdtempSync(join(tmpdir(), 'symphony-checkpoint-'));
-    const env = { GIT_INDEX_FILE: join(dir, 'index') };
-    if (gitWithEnv(root, ['read-tree', '--empty'], env).code !== 0) return undefined;
-    const excluded = ['.symphony', '.stop', ...(opts.exclude ?? [])]
-      .map((p) => p.replace(/\\/g, '/').replace(/^\.?\//, ''))
-      .filter(Boolean)
-      .map((p) => `:(exclude)${p}`);
-    if (gitWithEnv(root, ['add', '-A', '--', '.', ...excluded], env).code !== 0) return undefined;
-    const tree = gitWithEnv(root, ['write-tree'], env);
+    if (!stageWorktree(root, dir, ['.stop', ...(opts.exclude ?? [])])) return undefined;
+    const tree = gitWithEnv(root, ['write-tree'], { GIT_INDEX_FILE: join(dir, 'index') });
     if (tree.code !== 0 || !tree.stdout) return undefined;
     const parent = headSha(root);
     const args = ['-c', 'user.name=symphony', '-c', 'user.email=symphony@localhost', 'commit-tree', tree.stdout];

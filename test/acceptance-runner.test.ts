@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { gateResultsPath, readGateResults } from '../src/acceptance.js';
+import { approveCommand } from '../src/commands.js';
 import { DEFAULTS } from '../src/config.js';
 import { headSha } from '../src/git.js';
 import type { Logger } from '../src/logger.js';
@@ -38,6 +39,20 @@ function v2Block(verifyCommand: string): string {
           blocking: true,
           gates: [{ kind: 'diff', paths: ['part1.txt'] }],
         },
+      ],
+    }, null, 2),
+    fence,
+  ].join('\n');
+}
+
+function humanBlock(): string {
+  return [
+    `${fence}symphony-acceptance`,
+    JSON.stringify({
+      version: 2,
+      criteria: [
+        { id: 'feature', text: 'Feature implemented', blocking: true, gates: [{ kind: 'diff', paths: ['part1.txt'] }] },
+        { id: 'review', text: 'Human review', blocking: true, gates: [{ kind: 'human', approver: 'dan' }] },
       ],
     }, null, 2),
     fence,
@@ -241,6 +256,54 @@ test('a failed verify runs a focused repair session and re-verifies', async () =
     assert.ok(existsSync(join(dir, 'fixed.txt')), 'the repair session wrote the fix');
     assert.ok(state.tasks.T01.logs.some((l) => l.kind === 'repair'), 'the repair session is recorded');
     assert.equal(state.tasks.T01.repairAttempts, undefined);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a human gate parks the task; approving re-validates without a new implementation session', async () => {
+  const { paths, task } = project(humanBlock());
+  const { ctx, state } = ctxFor(paths, task);
+  try {
+    const first = await runTask(ctx, task);
+    assert.equal(first.status, 'blocked');
+    assert.equal(state.tasks.T01.acceptance?.status, 'pending_human');
+    assert.equal(state.tasks.T01.phase, 'needs_attention');
+    assert.ok(existsSync(join(paths.root, 'part1.txt')), 'the implementation is kept for review');
+    const sessions = state.tasks.T01.logs.length;
+    assert.equal(sessions, 1);
+
+    approveCommand(paths, state, [task], 'T01', 'review', { approver: 'dan', note: 'looks good', log: silent });
+
+    const second = await runTask(ctx, task);
+    assert.equal(second.status, 'done');
+    assert.equal(state.tasks.T01.acceptance?.status, 'accepted');
+    assert.equal(state.tasks.T01.phase, undefined);
+    assert.equal(state.tasks.T01.logs.length, sessions, 'no new implementation session ran');
+    assert.ok(readGateResults(paths, 'T01').some((r) => r.gate === 'human' && r.status === 'pass'));
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('inconclusive acceptance evidence parks the task instead of reimplementing or accepting', async () => {
+  const block = [
+    `${fence}symphony-acceptance`,
+    JSON.stringify({
+      version: 2,
+      criteria: [{ id: 'perf', text: 'Perf', blocking: true, gates: [{ kind: 'metric', command: 'node -e "console.log(\'no number\')"', target: 1 }] }],
+    }, null, 2),
+    fence,
+  ].join('\n');
+  const { paths, task } = project(block);
+  const { ctx, state } = ctxFor(paths, task);
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'blocked');
+    assert.equal(state.tasks.T01.acceptance?.status, 'inconclusive');
+    assert.equal(state.tasks.T01.phase, 'needs_attention');
+    assert.equal(state.tasks.T01.logs.length, 1);
+    assert.ok(existsSync(join(paths.root, 'part1.txt')));
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

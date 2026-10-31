@@ -9,38 +9,67 @@ import { ensureDir, headAndTailBytes, isRecord, nowIso, sleep, squash, stamp } f
 import type { VerifyResult } from './verify.js';
 
 /**
- * Structured acceptance (P0a).
+ * Structured acceptance.
  *
  * A task may contain one fenced `symphony-acceptance` JSON block. Tasks without the block keep the
  * legacy contract unchanged. A v2 contract is explicit: every criterion has a stable id, and every
  * criterion names the gates that prove it. The harness, not the agent's checkboxes, decides whether
  * the task is accepted.
  *
- * P0a implements the deterministic `verify` and `diff` gates. The parser recognises the later gate
- * kinds (metric/visual/semantic/human) so their contracts are explicit from day one, but rejects them
- * until the phase that implements the runner for them.
+ * Implemented gates: `verify`, `diff`, `metric`, `visual-regression`, `visual-layout`,
+ * `visual-semantic`, and `human`. `semantic` is recognised but rejected until the judge-backed gate
+ * lands.
  */
 
 export type GateStatus = 'pass' | 'fail' | 'inconclusive' | 'pending_human';
 export type AcceptanceStatus = 'accepted' | 'failed' | 'inconclusive' | 'pending_human';
-export type SupportedGateKind = 'verify' | 'diff';
-export type RecognizedGateKind =
-  | SupportedGateKind
-  | 'semantic'
+export type SupportedGateKind =
+  | 'verify'
+  | 'diff'
   | 'metric'
   | 'visual-regression'
   | 'visual-layout'
   | 'visual-semantic'
   | 'human';
+export type RecognizedGateKind = SupportedGateKind | 'semantic';
+
+export type MetricOperator = '>=' | '>' | '<=' | '<' | '==' | '!=';
+export type MetricAggregate = 'mean' | 'median' | 'min' | 'max' | 'first' | 'last';
+export type MetricParser = 'number' | 'json';
 
 export interface AcceptanceGateSpec {
   kind: SupportedGateKind;
-  /** verify: the shell command the harness runs itself. */
+  /** verify/metric/visual: the shell command the harness runs itself. */
   command?: string;
-  /** verify: wall-clock cap; defaults to config.verifyTimeoutMin. */
+  /** verify/metric/visual: wall-clock cap; defaults to config.verifyTimeoutMin. */
   timeoutMin?: number;
   /** diff: optional path prefixes; at least one changed file must match. */
   paths?: string[];
+
+  // metric
+  parser?: MetricParser;
+  /** metric (json parser): dot path into the JSON document, e.g. "results.0.value". */
+  metric?: string;
+  /** metric: optional regex whose first capture group (or whole match) is parsed first. */
+  regex?: string;
+  operator?: MetricOperator;
+  target?: number;
+  samples?: number;
+  aggregate?: MetricAggregate;
+  warmup?: number;
+
+  // visual-regression / visual-layout
+  capture?: string;
+  compare?: string;
+  baseline?: string;
+  threshold?: number;
+
+  // visual-semantic
+  image?: string;
+  prompt?: string;
+
+  // human
+  approver?: string;
 }
 
 export interface AcceptanceCriterion {
@@ -62,13 +91,19 @@ export interface WorktreeRevisionLike {
 }
 
 export interface GateEvidence {
-  kind: 'command-output' | 'files' | 'artifact' | 'approval';
+  kind: 'command-output' | 'files' | 'artifact' | 'image' | 'review' | 'approval';
   /** Path relative to the project root, when the evidence is a file. */
   path?: string;
   sha256?: string;
   command?: string;
   /** A short excerpt; the full artifact is referenced by `path`. */
   outputTail?: string;
+  /** metric/visual: the measured value or sample set. */
+  value?: number;
+  samples?: number[];
+  /** human: who approved and when. */
+  approver?: string;
+  at?: string;
 }
 
 export interface GateResult {
@@ -83,6 +118,10 @@ export interface GateResult {
   exitCode?: number;
   /** Whether a focused repair session ran before this result was recorded. */
   repaired?: boolean;
+  /** metric: the aggregated measured value. */
+  value?: number;
+  /** metric: every measured sample value. */
+  samples?: number[];
   details?: string;
 }
 
@@ -120,7 +159,12 @@ const RECOGNIZED = new Set<RecognizedGateKind>([
   'verify', 'diff', 'semantic', 'metric', 'visual-regression',
   'visual-layout', 'visual-semantic', 'human',
 ]);
-const SUPPORTED = new Set<SupportedGateKind>(['verify', 'diff']);
+const SUPPORTED = new Set<SupportedGateKind>([
+  'verify', 'diff', 'metric', 'visual-regression', 'visual-layout', 'visual-semantic', 'human',
+]);
+const METRIC_OPERATORS = new Set<MetricOperator>(['>=', '>', '<=', '<', '==', '!=']);
+const METRIC_AGGREGATES = new Set<MetricAggregate>(['mean', 'median', 'min', 'max', 'first', 'last']);
+const METRIC_PARSERS = new Set<MetricParser>(['number', 'json']);
 
 /** Read the fenced v2 block, if any. Absence is legacy, not an error. */
 export function parseAcceptanceSpec(body: string | undefined): { spec?: AcceptanceSpec; legacy: boolean; errors: string[] } {
@@ -195,31 +239,133 @@ function parseGate(raw: unknown, where: string, errors: string[]): AcceptanceGat
     return undefined;
   }
   if (!SUPPORTED.has(kind as SupportedGateKind)) {
-    errors.push(`${where}.kind "${kind}" is not supported in this build yet (currently verify and diff)`);
+    errors.push(`${where}.kind "${kind}" is not supported in this build yet`);
     return undefined;
   }
+
+  const timeoutMin = optionalPositive(raw.timeoutMin, `${where}.timeoutMin`, errors);
 
   if (kind === 'verify') {
     const command = typeof raw.command === 'string' ? raw.command.trim() : '';
     if (!command) errors.push(`${where}.command is required for a verify gate`);
-    let timeoutMin: number | undefined;
-    if (raw.timeoutMin !== undefined) {
-      if (typeof raw.timeoutMin !== 'number' || !Number.isFinite(raw.timeoutMin) || raw.timeoutMin <= 0) {
-        errors.push(`${where}.timeoutMin must be a positive number`);
-      } else timeoutMin = raw.timeoutMin;
-    }
     return { kind: 'verify', ...(command ? { command } : {}), ...(timeoutMin ? { timeoutMin } : {}) };
   }
 
-  let paths: string[] | undefined;
-  if (raw.paths !== undefined) {
-    if (!Array.isArray(raw.paths) || raw.paths.some((p) => typeof p !== 'string' || !p.trim())) {
-      errors.push(`${where}.paths must be an array of non-empty strings`);
-    } else {
-      paths = raw.paths.map((p) => p.trim().replace(/\\/g, '/'));
+  if (kind === 'diff') {
+    let paths: string[] | undefined;
+    if (raw.paths !== undefined) {
+      if (!Array.isArray(raw.paths) || raw.paths.some((p) => typeof p !== 'string' || !p.trim())) {
+        errors.push(`${where}.paths must be an array of non-empty strings`);
+      } else {
+        paths = raw.paths.map((p) => p.trim().replace(/\\/g, '/'));
+      }
     }
+    return { kind: 'diff', ...(paths?.length ? { paths } : {}) };
   }
-  return { kind: 'diff', ...(paths?.length ? { paths } : {}) };
+
+  if (kind === 'metric') {
+    const command = typeof raw.command === 'string' ? raw.command.trim() : '';
+    if (!command) errors.push(`${where}.command is required for a metric gate`);
+    const parser = typeof raw.parser === 'string' ? raw.parser.trim() as MetricParser : 'number';
+    if (!METRIC_PARSERS.has(parser)) errors.push(`${where}.parser must be "number" or "json"`);
+    const metric = typeof raw.metric === 'string' ? raw.metric.trim() : undefined;
+    if (parser === 'json' && !metric) errors.push(`${where}.metric is required when parser is "json"`);
+    let regex: string | undefined;
+    if (raw.regex !== undefined) {
+      if (typeof raw.regex !== 'string' || !raw.regex) errors.push(`${where}.regex must be a non-empty string`);
+      else {
+        try { new RegExp(raw.regex); regex = raw.regex; } catch (e) { errors.push(`${where}.regex is not a valid regular expression: ${(e as Error).message}`); }
+      }
+    }
+    const operator = typeof raw.operator === 'string' ? raw.operator.trim() as MetricOperator : '>=';
+    if (!METRIC_OPERATORS.has(operator)) errors.push(`${where}.operator must be one of ${[...METRIC_OPERATORS].join(' ')}`);
+    if (typeof raw.target !== 'number' || !Number.isFinite(raw.target)) errors.push(`${where}.target must be a finite number`);
+    const samples = optionalCount(raw.samples, `${where}.samples`, errors);
+    const warmup = optionalCount(raw.warmup, `${where}.warmup`, errors);
+    const aggregate = typeof raw.aggregate === 'string' ? raw.aggregate.trim() as MetricAggregate : 'median';
+    if (!METRIC_AGGREGATES.has(aggregate)) errors.push(`${where}.aggregate must be one of ${[...METRIC_AGGREGATES].join(' ')}`);
+    return {
+      kind: 'metric',
+      ...(command ? { command } : {}),
+      parser,
+      ...(metric ? { metric } : {}),
+      ...(regex ? { regex } : {}),
+      operator,
+      ...(typeof raw.target === 'number' && Number.isFinite(raw.target) ? { target: raw.target } : {}),
+      samples: samples ?? 1,
+      aggregate,
+      warmup: warmup ?? 0,
+      ...(timeoutMin ? { timeoutMin } : {}),
+    };
+  }
+
+  if (kind === 'visual-regression' || kind === 'visual-layout') {
+    const capture = typeof raw.capture === 'string' ? raw.capture.trim() : '';
+    const compare = typeof raw.compare === 'string' ? raw.compare.trim() : '';
+    const baseline = typeof raw.baseline === 'string' ? raw.baseline.trim().replace(/\\/g, '/') : '';
+    if (!capture) errors.push(`${where}.capture is required for a ${kind} gate`);
+    if (!compare) errors.push(`${where}.compare is required for a ${kind} gate`);
+    if (!baseline) errors.push(`${where}.baseline is required for a ${kind} gate`);
+    let threshold: number | undefined;
+    if (raw.threshold !== undefined) {
+      if (typeof raw.threshold !== 'number' || !Number.isFinite(raw.threshold) || raw.threshold < 0) {
+        errors.push(`${where}.threshold must be a non-negative number`);
+      } else threshold = raw.threshold;
+    }
+    return {
+      kind,
+      ...(capture ? { capture } : {}),
+      ...(compare ? { compare } : {}),
+      ...(baseline ? { baseline } : {}),
+      ...(threshold !== undefined ? { threshold } : {}),
+      ...(timeoutMin ? { timeoutMin } : {}),
+    };
+  }
+
+  if (kind === 'visual-semantic') {
+    const capture = typeof raw.capture === 'string' ? raw.capture.trim() : undefined;
+    const image = typeof raw.image === 'string' ? raw.image.trim().replace(/\\/g, '/') : undefined;
+    const prompt = typeof raw.prompt === 'string' ? raw.prompt.trim() : '';
+    if (!capture && !image) errors.push(`${where}.capture or .image is required for a visual-semantic gate`);
+    if (!prompt) errors.push(`${where}.prompt is required for a visual-semantic gate`);
+    return {
+      kind: 'visual-semantic',
+      ...(capture ? { capture } : {}),
+      ...(image ? { image } : {}),
+      ...(prompt ? { prompt } : {}),
+      ...(timeoutMin ? { timeoutMin } : {}),
+    };
+  }
+
+  // human
+  let approver: string | undefined;
+  if (raw.approver !== undefined) {
+    if (typeof raw.approver !== 'string' || !raw.approver.trim()) errors.push(`${where}.approver must be a non-empty string`);
+    else approver = raw.approver.trim();
+  }
+  return { kind: 'human', ...(approver ? { approver } : {}) };
+}
+
+function optionalPositive(raw: unknown, where: string, errors: string[]): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
+    errors.push(`${where} must be a positive number`);
+    return undefined;
+  }
+  return raw;
+}
+
+function optionalCount(raw: unknown, where: string, errors: string[]): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0 || raw > 100) {
+    errors.push(`${where} must be a whole number between 0 and 100`);
+    return undefined;
+  }
+  if (where.endsWith('.samples') && raw === 0) {
+    errors.push(`${where} must be at least 1`);
+    return undefined;
+  }
+  return raw;
 }
 
 /** Hash of the config that can affect a gate result. Used to invalidate results after config edits. */
@@ -253,7 +399,8 @@ export function readGateResults(paths: Paths, taskId: string): GateResult[] {
       const parsed: unknown = JSON.parse(line);
       if (isRecord(parsed)
         && typeof parsed.criterionId === 'string'
-        && (parsed.gate === 'verify' || parsed.gate === 'diff')
+        && typeof parsed.gate === 'string'
+        && SUPPORTED.has(parsed.gate as SupportedGateKind)
         && (parsed.status === 'pass' || parsed.status === 'fail' || parsed.status === 'inconclusive' || parsed.status === 'pending_human')
         && isRecord(parsed.revision)
         && typeof parsed.revision.tree === 'string') {
@@ -262,6 +409,97 @@ export function readGateResults(paths: Paths, taskId: string): GateResult[] {
     } catch { /* a partial line from a crash is not a usable result */ }
   }
   return out;
+}
+
+/**
+ * Files the harness owns: they must never make a task's acceptance revision look dirty or different.
+ * Kept here (rather than in the runner) so the approval command and the gate engine compute exactly
+ * the same revision.
+ */
+export function acceptanceExcludes(paths: Paths): string[] {
+  return [
+    rel(paths.root, paths.roadmap),
+    rel(paths.root, paths.progress),
+    rel(paths.root, paths.progressDir),
+    rel(paths.root, paths.tasksDir),
+    rel(paths.root, paths.logsDir),
+    rel(paths.root, paths.index),
+    rel(paths.root, paths.stop),
+  ].filter(Boolean);
+}
+
+export function visualArtifactDir(paths: Paths, taskId: string): string {
+  return join(evidenceDir(paths, taskId), 'visual');
+}
+
+export function approvalsPath(paths: Paths, taskId: string): string {
+  return join(dirname(paths.state), 'approvals', `${taskId}.jsonl`);
+}
+
+/**
+ * A human approval is bound to one criterion at one exact worktree revision and to the evidence that
+ * supported it. Any later worktree change invalidates it automatically because the revision no longer
+ * matches.
+ */
+export interface ApprovalRecord {
+  taskId: string;
+  criterionId: string;
+  approver: string;
+  at: string;
+  /** Worktree tree hash the human approved. */
+  revision: string;
+  /** Hash of the non-human gate evidence at that revision. */
+  evidenceHash: string;
+  note?: string;
+}
+
+export function readApprovals(paths: Paths, taskId: string): ApprovalRecord[] {
+  const file = approvalsPath(paths, taskId);
+  if (!existsSync(file)) return [];
+  const out: ApprovalRecord[] = [];
+  for (const line of readFileSync(file, 'utf8').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const parsed: unknown = JSON.parse(line);
+      if (isRecord(parsed)
+        && parsed.taskId === taskId
+        && typeof parsed.criterionId === 'string'
+        && typeof parsed.approver === 'string'
+        && typeof parsed.at === 'string'
+        && typeof parsed.revision === 'string'
+        && typeof parsed.evidenceHash === 'string') {
+        out.push(parsed as unknown as ApprovalRecord);
+      }
+    } catch { /* ignore a partial line */ }
+  }
+  return out;
+}
+
+export function appendApproval(paths: Paths, approval: ApprovalRecord): string {
+  const file = approvalsPath(paths, approval.taskId);
+  ensureDir(dirname(file));
+  appendFileSync(file, `${JSON.stringify(approval)}\n`);
+  return file;
+}
+
+/**
+ * Hash the non-human gate evidence supporting one criterion at one revision. Human approvals bind to
+ * this value, so a different gate outcome (or a different worktree) requires a new approval. Gate
+ * kinds, statuses and commands are used rather than raw output bytes: verify/test output often
+ * contains timings, which would invalidate an approval on every harmless re-run.
+ */
+export function criterionEvidenceHash(
+  criterion: AcceptanceCriterion,
+  results: readonly GateResult[],
+  revisionTree: string,
+): string {
+  const evidence = results
+    .filter((r) => r.criterionId === criterion.id && r.gate !== 'human' && r.revision.tree === revisionTree)
+    .map((r) => ({ gate: r.gate, status: r.status, command: r.command ?? '' }))
+    .sort((a, b) => `${a.gate}\0${a.command}`.localeCompare(`${b.gate}\0${b.command}`));
+  return createHash('sha256')
+    .update(JSON.stringify({ criterionId: criterion.id, text: criterion.text, revision: revisionTree, evidence }))
+    .digest('hex');
 }
 
 let artifactSeq = 0;
@@ -370,20 +608,373 @@ export interface EvaluateAcceptanceOptions {
   /** Snapshot of the worktree the gates are evaluated against. */
   revision: WorktreeRevisionLike;
   log?: Logger;
-  runVerify: (command: string, timeoutMs: number) => VerifyResult;
+  runVerify: (command: string, timeoutMs: number, env?: Record<string, string>) => VerifyResult;
   changedFiles: (base?: string) => string[];
-  /** Extra attempts when verify could not complete (timeout/spawn/network), before repair. */
+  /** Extra attempts when a gate could not acquire evidence (timeout/spawn/network), before repair. */
   verifyRetries?: number;
   /** Delay between infrastructure retries. */
   retryDelayMs?: number;
   /** A focused repair session; returns true when it actually ran and verify should be retried. */
   repair?: (command: string, result: VerifyResult) => Promise<boolean>;
+  /** Visual-semantic review. Wired to the configured vision model by the runner. */
+  reviewImage?: (image: string, prompt: string) => Promise<{ text: string }>;
+}
+
+/** Last finite number in a command's output. */
+function lastNumber(output: string): number | undefined {
+  const matches = output.match(/-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g);
+  if (!matches?.length) return undefined;
+  const value = Number(matches[matches.length - 1]);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function jsonPath(value: unknown, path: string | undefined): unknown {
+  if (!path) return value;
+  let current: unknown = value;
+  for (const part of path.split('.').filter(Boolean)) {
+    if (Array.isArray(current)) {
+      const index = Number(part);
+      if (!Number.isInteger(index) || index < 0 || index >= current.length) return undefined;
+      current = current[index];
+    } else if (isRecord(current)) {
+      current = current[part];
+    } else {
+      return undefined;
+    }
+  }
+  return current;
+}
+
+function parseMetricOutput(output: string, gate: AcceptanceGateSpec): number | undefined {
+  let text = output;
+  if (gate.regex) {
+    try {
+      const match = new RegExp(gate.regex).exec(output);
+      if (!match) return undefined;
+      text = match[1] ?? match[0];
+    } catch {
+      return undefined;
+    }
+  }
+  if (gate.parser === 'json') {
+    try {
+      const parsed: unknown = JSON.parse(text.trim());
+      const value = jsonPath(parsed, gate.metric);
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+      if (typeof value === 'string') {
+        const n = Number(value.trim());
+        return Number.isFinite(n) ? n : undefined;
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return lastNumber(text);
+}
+
+function aggregateValues(values: number[], aggregate: MetricAggregate): number {
+  if (!values.length) return Number.NaN;
+  const sorted = [...values].sort((a, b) => a - b);
+  switch (aggregate) {
+    case 'first': return values[0];
+    case 'last': return values[values.length - 1];
+    case 'min': return sorted[0];
+    case 'max': return sorted[sorted.length - 1];
+    case 'mean': return values.reduce((a, b) => a + b, 0) / values.length;
+    case 'median': {
+      const mid = Math.floor(sorted.length / 2);
+      return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+  }
+}
+
+function meetsTarget(value: number, operator: MetricOperator, target: number): boolean {
+  switch (operator) {
+    case '>=': return value >= target;
+    case '>': return value > target;
+    case '<=': return value <= target;
+    case '<': return value < target;
+    case '==': return value === target;
+    case '!=': return value !== target;
+  }
+}
+
+/** An incomplete gate (could not run, not a real failure) is retried before evidence is recorded. */
+async function withEvidenceRetries(
+  run: () => VerifyResult,
+  retries: number,
+  delayMs: number | undefined,
+  retryAnyFailure = false,
+): Promise<VerifyResult> {
+  let res = run();
+  for (let attempt = 0; !res.ok && (retryAnyFailure || res.code === null) && attempt < Math.max(0, retries); attempt++) {
+    if (delayMs && delayMs > 0) await sleep(delayMs);
+    res = run();
+  }
+  return res;
+}
+
+function fileEvidence(paths: Paths, file: string, kind: GateEvidence['kind']): GateEvidence | undefined {
+  try {
+    const bytes = readFileSync(file);
+    if (!bytes.length) return undefined;
+    return {
+      kind,
+      path: rel(paths.root, file),
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function expandVisualCommand(command: string, vars: Record<string, string>): string {
+  return command.replace(/\{(actual|baseline|diff|threshold|artifactDir)\}/g, (whole, key: string) => vars[key] ?? whole);
+}
+
+interface GateOutcome {
+  status: GateStatus;
+  evidence: GateEvidence[];
+  details: string;
+  command?: string;
+  exitCode?: number;
+  value?: number;
+  samples?: number[];
+}
+
+async function runMetricGate(o: EvaluateAcceptanceOptions, gate: AcceptanceGateSpec, label: string): Promise<GateOutcome> {
+  const command = gate.command ?? '';
+  const timeoutMin = gate.timeoutMin && gate.timeoutMin > 0 ? gate.timeoutMin : o.config.metric.timeoutMin;
+  const timeoutMs = Math.max(1, Math.round(timeoutMin * 60_000));
+  const warmup = gate.warmup ?? 0;
+  const wanted = gate.samples ?? 1;
+  const outputs: string[] = [];
+  const values: number[] = [];
+  let incomplete = 0;
+
+  for (let i = 0; i < warmup; i++) {
+    const res = await withEvidenceRetries(() => o.runVerify(command, timeoutMs), o.verifyRetries ?? 0, o.retryDelayMs, true);
+    outputs.push(`# warmup ${i + 1} (exit ${res.code ?? 'none'})\n${res.output}`);
+  }
+  for (let i = 0; i < wanted; i++) {
+    const res = await withEvidenceRetries(() => o.runVerify(command, timeoutMs), o.verifyRetries ?? 0, o.retryDelayMs, true);
+    outputs.push(`# sample ${i + 1} (exit ${res.code ?? 'none'})\n${res.output}`);
+    if (res.code === null) { incomplete += 1; continue; }
+    const value = res.code === 0 ? parseMetricOutput(res.output, gate) : undefined;
+    if (value === undefined) { incomplete += 1; continue; }
+    values.push(value);
+  }
+
+  const artifact = writeArtifact(o.paths, o.task.id, `metric-${label}`, outputs.join('\n\n') || '(no output)');
+  const evidence = artifact ? [artifact] : [];
+  if (!values.length) {
+    return {
+      status: 'inconclusive',
+      evidence,
+      command,
+      exitCode: undefined,
+      details: `metric gate produced no usable sample after ${wanted} sample${wanted === 1 ? '' : 's'}${incomplete ? ` (${incomplete} incomplete)` : ''}: ${command}`,
+    };
+  }
+  const value = aggregateValues(values, gate.aggregate ?? 'median');
+  const pass = meetsTarget(value, gate.operator ?? '>=', gate.target ?? 0);
+  return {
+    status: pass ? 'pass' : 'fail',
+    evidence: [...evidence, { kind: 'artifact', value, samples: values, command, outputTail: `${gate.aggregate ?? 'median'}(${values.join(', ')}) ${gate.operator ?? '>='} ${gate.target}` }],
+    command,
+    exitCode: 0,
+    value,
+    samples: values,
+    details: `${gate.aggregate ?? 'median'} ${value} ${gate.operator ?? '>='} ${gate.target}${incomplete ? ` (${incomplete} of ${wanted} samples incomplete)` : ''}`,
+  };
+}
+
+async function runVisualGate(o: EvaluateAcceptanceOptions, gate: AcceptanceGateSpec, label: string): Promise<GateOutcome> {
+  const timeoutMin = gate.timeoutMin && gate.timeoutMin > 0 ? gate.timeoutMin : o.config.verifyTimeoutMin;
+  const timeoutMs = Math.max(1, Math.round(timeoutMin * 60_000));
+  const dir = visualArtifactDir(o.paths, o.task.id);
+  ensureDir(dir);
+  const safe = label.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'visual';
+  const actual = join(dir, `${safe}-${stamp()}-${++artifactSeq}.png`);
+  const diff = join(dir, `${safe}-${stamp()}-${++artifactSeq}-diff.png`);
+  const baseline = join(o.paths.root, gate.baseline ?? '');
+  const threshold = String(gate.threshold ?? 0);
+  const vars = { actual, baseline, diff, threshold, artifactDir: dir };
+
+  const capture = await withEvidenceRetries(
+    () => o.runVerify(expandVisualCommand(gate.capture ?? '', vars), timeoutMs, {
+      SYMPHONY_VISUAL_ACTUAL: actual,
+      SYMPHONY_VISUAL_BASELINE: baseline,
+      SYMPHONY_VISUAL_DIFF: diff,
+      SYMPHONY_VISUAL_THRESHOLD: threshold,
+      SYMPHONY_VISUAL_ARTIFACT_DIR: dir,
+    }),
+    o.verifyRetries ?? 0,
+    o.retryDelayMs,
+    true,
+  );
+  const actualEvidence = fileEvidence(o.paths, actual, 'image');
+  if (capture.code !== 0 || !actualEvidence) {
+    const artifact = writeArtifact(o.paths, o.task.id, `visual-capture-${label}`, capture.output || '(no output)');
+    return {
+      status: 'inconclusive',
+      evidence: [...(artifact ? [artifact] : []), ...(actualEvidence ? [actualEvidence] : [])],
+      command: gate.capture,
+      exitCode: capture.code ?? undefined,
+      details: `visual capture did not produce an image${capture.code === null ? ' (command could not run)' : ` (exit ${capture.code})`}: ${gate.capture}`,
+    };
+  }
+  if (!existsSync(baseline)) {
+    return {
+      status: 'inconclusive',
+      evidence: [actualEvidence],
+      command: gate.compare,
+      details: `visual baseline is missing: ${gate.baseline}`,
+    };
+  }
+
+  const compare = await withEvidenceRetries(
+    () => o.runVerify(expandVisualCommand(gate.compare ?? '', vars), timeoutMs, {
+      SYMPHONY_VISUAL_ACTUAL: actual,
+      SYMPHONY_VISUAL_BASELINE: baseline,
+      SYMPHONY_VISUAL_DIFF: diff,
+      SYMPHONY_VISUAL_THRESHOLD: threshold,
+      SYMPHONY_VISUAL_ARTIFACT_DIR: dir,
+    }),
+    o.verifyRetries ?? 0,
+    o.retryDelayMs,
+  );
+  const artifact = writeArtifact(o.paths, o.task.id, `visual-compare-${label}`, compare.output || '(no output)');
+  const diffEvidence = fileEvidence(o.paths, diff, 'image');
+  const evidence = [actualEvidence, ...(diffEvidence ? [diffEvidence] : []), ...(artifact ? [artifact] : [])];
+  if (compare.code === null) {
+    return {
+      status: 'inconclusive',
+      evidence,
+      command: gate.compare,
+      exitCode: undefined,
+      details: `visual compare could not run: ${gate.compare}${compare.output ? ` — ${squash(compare.output, 240)}` : ''}`,
+    };
+  }
+  return {
+    status: compare.code === 0 ? 'pass' : 'fail',
+    evidence,
+    command: gate.compare,
+    exitCode: compare.code,
+    details: compare.code === 0
+      ? `visual ${gate.kind} matched baseline within threshold ${threshold}`
+      : `visual ${gate.kind} changed beyond threshold ${threshold}${compare.output ? ` — ${squash(compare.output, 240)}` : ''}`,
+  };
+}
+
+async function runVisualSemanticGate(o: EvaluateAcceptanceOptions, gate: AcceptanceGateSpec, label: string): Promise<GateOutcome> {
+  const timeoutMin = gate.timeoutMin && gate.timeoutMin > 0 ? gate.timeoutMin : o.config.verifyTimeoutMin;
+  const timeoutMs = Math.max(1, Math.round(timeoutMin * 60_000));
+  let image = gate.image ? join(o.paths.root, gate.image) : '';
+
+  if (!image) {
+    const dir = visualArtifactDir(o.paths, o.task.id);
+    ensureDir(dir);
+    const safe = label.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'visual';
+    image = join(dir, `${safe}-${stamp()}-${++artifactSeq}.png`);
+    const capture = await withEvidenceRetries(
+      () => o.runVerify(gate.capture ?? '', timeoutMs, { SYMPHONY_VISUAL_ACTUAL: image, SYMPHONY_VISUAL_ARTIFACT_DIR: dir }),
+      o.verifyRetries ?? 0,
+      o.retryDelayMs,
+      true,
+    );
+    if (capture.code !== 0 || !existsSync(image)) {
+      const artifact = writeArtifact(o.paths, o.task.id, `visual-semantic-capture-${label}`, capture.output || '(no output)');
+      return {
+        status: 'inconclusive',
+        evidence: artifact ? [artifact] : [],
+        command: gate.capture,
+        exitCode: capture.code ?? undefined,
+        details: `visual-semantic capture did not produce an image: ${gate.capture}`,
+      };
+    }
+  }
+
+  const imageEvidence = fileEvidence(o.paths, image, 'image');
+  if (!imageEvidence) {
+    return { status: 'inconclusive', evidence: [], command: gate.capture, details: `visual-semantic image is missing or empty: ${gate.image ?? gate.capture}` };
+  }
+  if (!o.reviewImage) {
+    return {
+      status: 'inconclusive',
+      evidence: [imageEvidence],
+      command: gate.capture,
+      details: 'visual-semantic review is unavailable (vision.enabled is off or no API key)',
+    };
+  }
+
+  const prompt = `${gate.prompt ?? ''}\n\nJudge only what is visible in the image. End with exactly one line: "VERDICT: PASS" or "VERDICT: FAIL".`;
+  let text: string;
+  try {
+    const review = await o.reviewImage(image, prompt);
+    text = review.text;
+  } catch (e) {
+    return {
+      status: 'inconclusive',
+      evidence: [imageEvidence],
+      command: gate.capture,
+      details: `visual-semantic review could not run: ${(e as Error).message}`,
+    };
+  }
+  const reviewArtifact = writeArtifact(o.paths, o.task.id, `visual-semantic-${label}`, text || '(no review)');
+  const verdicts = [...text.matchAll(/VERDICT:\s*(PASS|FAIL)/gi)];
+  const verdict = verdicts.length ? verdicts[verdicts.length - 1][1].toUpperCase() : undefined;
+  return {
+    status: verdict === 'PASS' ? 'pass' : verdict === 'FAIL' ? 'fail' : 'inconclusive',
+    evidence: [imageEvidence, ...(reviewArtifact ? [reviewArtifact] : [])],
+    command: gate.capture,
+    details: verdict
+      ? `visual-semantic review ${verdict === 'PASS' ? 'passed' : 'failed'}: ${squash(text, 240)}`
+      : `visual-semantic review had no PASS/FAIL verdict: ${squash(text, 240)}`,
+  };
+}
+
+function runHumanGate(o: EvaluateAcceptanceOptions, criterion: AcceptanceCriterion, gate: AcceptanceGateSpec, results: readonly GateResult[]): GateOutcome {
+  const revision = o.revision.tree;
+  const evidenceHash = criterionEvidenceHash(criterion, results, revision);
+  const approvals = readApprovals(o.paths, o.task.id);
+  const matching = approvals.filter((a) =>
+    a.criterionId === criterion.id
+    && a.revision === revision
+    && a.evidenceHash === evidenceHash
+    && (!gate.approver || a.approver === gate.approver));
+  const approval = matching[matching.length - 1];
+  if (approval) {
+    return {
+      status: 'pass',
+      evidence: [{
+        kind: 'approval',
+        path: rel(o.paths.root, approvalsPath(o.paths, o.task.id)),
+        sha256: createHash('sha256').update(JSON.stringify(approval)).digest('hex'),
+        approver: approval.approver,
+        at: approval.at,
+        outputTail: approval.note,
+      }],
+      details: `approved by ${approval.approver} at ${approval.at}${approval.note ? ` — ${approval.note}` : ''}`,
+    };
+  }
+  const stale = approvals.filter((a) => a.criterionId === criterion.id).length > 0;
+  return {
+    status: 'pending_human',
+    evidence: [],
+    details: stale
+      ? `approval for ${criterion.id} is stale: the worktree or its evidence changed since it was recorded`
+      : `waiting for human approval of ${criterion.id} (symphony approve ${o.task.id} ${criterion.id})`,
+  };
 }
 
 /**
- * Run the supported gates and record immutable, revision-bound results. Verify failures get bounded
- * infrastructure retries and, when configured, one focused repair session before the result is
- * recorded; richer evidence acquisition lands in P0c.
+ * Run the supported gates and record immutable, revision-bound results.
+ *
+ * Evidence acquisition (metric sampling, screenshots, vision review) is retried and, when it still
+ * cannot produce evidence, recorded as `inconclusive` rather than a task failure. Human gates run last
+ * so their approval hash covers every other gate for the criterion.
  */
 export async function evaluateAcceptance(o: EvaluateAcceptanceOptions): Promise<{
   decision: AcceptanceDecision;
@@ -394,86 +985,108 @@ export async function evaluateAcceptance(o: EvaluateAcceptanceOptions): Promise<
   const configRev = configRevision(o.config);
   const verifyCache = new Map<string, { res: VerifyResult; evidence: GateEvidence[]; repaired: boolean }>();
 
+  const makeResult = (
+    criterionId: string,
+    gate: SupportedGateKind,
+    outcome: GateOutcome,
+  ): GateResult => ({
+    criterionId,
+    gate,
+    status: outcome.status,
+    revision: { ...o.revision, taskBaseSha: o.taskBaseSha },
+    evidence: outcome.evidence,
+    evaluator: { kind: 'harness', version: ACCEPTANCE_ENGINE_VERSION, configRevision: configRev },
+    createdAt: nowIso(),
+    ...(outcome.command ? { command: outcome.command } : {}),
+    ...(outcome.exitCode !== undefined ? { exitCode: outcome.exitCode } : {}),
+    ...(outcome.value !== undefined ? { value: outcome.value } : {}),
+    ...(outcome.samples !== undefined ? { samples: outcome.samples } : {}),
+    details: outcome.details,
+  });
+
+  const runGate = async (criterion: AcceptanceCriterion, gate: AcceptanceGateSpec, label: string): Promise<GateResult> => {
+    let result: GateResult;
+    try {
+      if (gate.kind === 'verify') {
+        const command = gate.command ?? '';
+        const timeoutMin = gate.timeoutMin && gate.timeoutMin > 0 ? gate.timeoutMin : o.config.verifyTimeoutMin;
+        const timeoutMs = Math.max(1, Math.round(timeoutMin * 60_000));
+        const key = `${command}\0${timeoutMs}`;
+        let ran = verifyCache.get(key);
+        if (!ran) {
+          let res = o.runVerify(command, timeoutMs);
+          // An incomplete verify (timeout/spawn/network) is not a task failure. Retry it first.
+          for (let attempt = 0; !res.ok && res.code === null && attempt < Math.max(0, o.verifyRetries ?? 0); attempt++) {
+            if (o.retryDelayMs && o.retryDelayMs > 0) await sleep(o.retryDelayMs);
+            res = o.runVerify(command, timeoutMs);
+          }
+          let repaired = false;
+          if (!res.ok && o.repair) {
+            repaired = await o.repair(command, res);
+            if (repaired) res = o.runVerify(command, timeoutMs);
+          }
+          const artifact = writeArtifact(o.paths, o.task.id, `verify-${label}`, res.output || '(no output)');
+          ran = { res, evidence: artifact ? [artifact] : [], repaired };
+          verifyCache.set(key, ran);
+        }
+        const status: GateStatus = ran.res.ok ? 'pass' : ran.res.code === null ? 'inconclusive' : 'fail';
+        result = makeResult(criterion.id, 'verify', {
+          status,
+          evidence: ran.evidence,
+          command,
+          exitCode: ran.res.code ?? undefined,
+          details: ran.res.ok
+            ? `verify passed${ran.repaired ? ' after a focused repair' : ''}: ${command}`
+            : ran.res.code === null
+              ? `verify could not complete${ran.repaired ? ' after a focused repair' : ''}: ${command}${ran.res.output ? ` — ${squash(ran.res.output, 240)}` : ''}`
+              : `verify failed${ran.repaired ? ' after a focused repair' : ''} (exit ${ran.res.code}): ${command}${ran.res.output ? ` — ${squash(ran.res.output, 240)}` : ''}`,
+        });
+        if (ran.repaired) result.repaired = true;
+      } else if (gate.kind === 'diff') {
+        const files = o.changedFiles(o.taskBaseSha);
+        const selected = gate.paths?.length
+          ? files.filter((file) => gate.paths!.some((prefix) => matchesPath(file, prefix)))
+          : files;
+        result = makeResult(criterion.id, 'diff', {
+          status: selected.length ? 'pass' : 'fail',
+          evidence: [{ kind: 'files', outputTail: selected.slice(0, 200).join('\n') }],
+          details: selected.length
+            ? `${selected.length} changed file${selected.length === 1 ? '' : 's'}${gate.paths?.length ? ` under ${gate.paths.join(', ')}` : ''}`
+            : `no changed files${gate.paths?.length ? ` under ${gate.paths.join(', ')}` : ''}`,
+        });
+      } else if (gate.kind === 'metric') {
+        result = makeResult(criterion.id, 'metric', await runMetricGate(o, gate, label));
+      } else if (gate.kind === 'visual-regression' || gate.kind === 'visual-layout') {
+        result = makeResult(criterion.id, gate.kind, await runVisualGate(o, gate, label));
+      } else if (gate.kind === 'visual-semantic') {
+        result = makeResult(criterion.id, 'visual-semantic', await runVisualSemanticGate(o, gate, label));
+      } else {
+        result = makeResult(criterion.id, 'human', runHumanGate(o, criterion, gate, results));
+      }
+    } catch (e) {
+      result = makeResult(criterion.id, gate.kind, {
+        status: 'inconclusive',
+        evidence: [],
+        details: `acceptance gate failed to run: ${(e as Error).message}`,
+      });
+    }
+    appendGateResult(o.paths, o.task.id, result);
+    results.push(result);
+    o.log?.info(`${o.task.id}: acceptance ${criterion.id}/${gate.kind} ${result.status}${result.details ? ` — ${result.details}` : ''}`);
+    return result;
+  };
+
   for (const criterion of o.spec.criteria) {
     for (const gate of criterion.gates) {
-      let result: GateResult;
-      try {
-        if (gate.kind === 'verify') {
-          const command = gate.command ?? '';
-          const timeoutMin = gate.timeoutMin && gate.timeoutMin > 0 ? gate.timeoutMin : o.config.verifyTimeoutMin;
-          const timeoutMs = Math.max(1, Math.round(timeoutMin * 60_000));
-          const key = `${command}\0${timeoutMs}`;
-          let ran = verifyCache.get(key);
-          if (!ran) {
-            let res = o.runVerify(command, timeoutMs);
-            // An incomplete verify (timeout/spawn/network) is not a task failure. Retry it first.
-            for (let attempt = 0; !res.ok && res.code === null && attempt < Math.max(0, o.verifyRetries ?? 0); attempt++) {
-              if (o.retryDelayMs && o.retryDelayMs > 0) await sleep(o.retryDelayMs);
-              res = o.runVerify(command, timeoutMs);
-            }
-            let repaired = false;
-            if (!res.ok && o.repair) {
-              repaired = await o.repair(command, res);
-              if (repaired) res = o.runVerify(command, timeoutMs);
-            }
-            const artifact = writeArtifact(o.paths, o.task.id, `verify-${criterion.id}`, res.output || '(no output)');
-            ran = { res, evidence: artifact ? [artifact] : [], repaired };
-            verifyCache.set(key, ran);
-          }
-          const status: GateStatus = ran.res.ok ? 'pass' : ran.res.code === null ? 'inconclusive' : 'fail';
-          result = {
-            criterionId: criterion.id,
-            gate: 'verify',
-            status,
-            revision: { ...o.revision, taskBaseSha: o.taskBaseSha },
-            evidence: ran.evidence,
-            evaluator: { kind: 'harness', version: ACCEPTANCE_ENGINE_VERSION, configRevision: configRev },
-            createdAt: nowIso(),
-            command,
-            exitCode: ran.res.code ?? undefined,
-            repaired: ran.repaired || undefined,
-            details: ran.res.ok
-              ? `verify passed${ran.repaired ? ' after a focused repair' : ''}: ${command}`
-              : ran.res.code === null
-                ? `verify could not complete${ran.repaired ? ' after a focused repair' : ''}: ${command}${ran.res.output ? ` — ${squash(ran.res.output, 240)}` : ''}`
-                : `verify failed${ran.repaired ? ' after a focused repair' : ''} (exit ${ran.res.code}): ${command}${ran.res.output ? ` — ${squash(ran.res.output, 240)}` : ''}`,
-          };
-        } else {
-          const files = o.changedFiles(o.taskBaseSha);
-          const selected = gate.paths?.length
-            ? files.filter((file) => gate.paths!.some((prefix) => matchesPath(file, prefix)))
-            : files;
-          result = {
-            criterionId: criterion.id,
-            gate: 'diff',
-            status: selected.length ? 'pass' : 'fail',
-            revision: { ...o.revision, taskBaseSha: o.taskBaseSha },
-            evidence: [{
-              kind: 'files',
-              outputTail: selected.slice(0, 200).join('\n'),
-            }],
-            evaluator: { kind: 'harness', version: ACCEPTANCE_ENGINE_VERSION, configRevision: configRev },
-            createdAt: nowIso(),
-            details: selected.length
-              ? `${selected.length} changed file${selected.length === 1 ? '' : 's'}${gate.paths?.length ? ` under ${gate.paths.join(', ')}` : ''}`
-              : `no changed files${gate.paths?.length ? ` under ${gate.paths.join(', ')}` : ''}`,
-          };
-        }
-      } catch (e) {
-        result = {
-          criterionId: criterion.id,
-          gate: gate.kind,
-          status: 'inconclusive',
-          revision: { ...o.revision, taskBaseSha: o.taskBaseSha },
-          evidence: [],
-          evaluator: { kind: 'harness', version: ACCEPTANCE_ENGINE_VERSION, configRevision: configRev },
-          createdAt: nowIso(),
-          details: `acceptance gate failed to run: ${(e as Error).message}`,
-        };
-      }
-      appendGateResult(o.paths, o.task.id, result);
-      results.push(result);
-      o.log?.info(`${o.task.id}: acceptance ${criterion.id}/${gate.kind} ${result.status}${result.details ? ` — ${result.details}` : ''}`);
+      if (gate.kind === 'human') continue;
+      await runGate(criterion, gate, criterion.id);
+    }
+  }
+  // Human approvals are bound to the evidence above, so they must be evaluated after it exists.
+  for (const criterion of o.spec.criteria) {
+    for (const gate of criterion.gates) {
+      if (gate.kind !== 'human') continue;
+      await runGate(criterion, gate, criterion.id);
     }
   }
 

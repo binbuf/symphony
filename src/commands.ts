@@ -1,8 +1,9 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { acceptanceExcludes, appendApproval, criterionEvidenceHash, parseAcceptanceSpec, readGateResults } from './acceptance.js';
 import { DEFAULTS, type Config } from './config.js';
 import { ADR_TEMPLATE, DESIGN_README, LOGS_README, PROGRESS_README, ROADMAP_TEMPLATE, TASK_TEMPLATE, docsContract } from './contract.js';
-import { commitsForTask, commitPrefix, ensureGitignore, git } from './git.js';
+import { commitsForTask, commitPrefix, ensureGitignore, git, worktreeRevision } from './git.js';
 import type { Logger } from './logger.js';
 import { taskLogPath } from './logs.js';
 import { rel, stopIgnoreEntry, stopPresent, type Paths } from './paths.js';
@@ -10,7 +11,7 @@ import { PROGRESS_HEADER } from './prompt.js';
 import { canonicalId, patchRoadmapFile } from './roadmap.js';
 import { DONE_STATES, haltResumeHint, saveState, type State } from './state.js';
 import { buildStatusTable, formatStatusRow, statusColumnWidths, updatePipelineStatus } from './status.js';
-import type { Task } from './tasks.js';
+import { parseFrontMatter, type Task } from './tasks.js';
 import { renderPrompt } from './templates.js';
 import { UsageError, ensureDir, fmtCost, fmtDuration, fmtUsage, nowIso } from './util.js';
 
@@ -118,6 +119,69 @@ export function acceptCommand(paths: Paths, state: State, tasks: Task[], rawIds:
     try { patchRoadmapFile(paths.roadmap, task.id, 'accepted'); } catch (e) { log.warn(`${task.id}: could not patch ROADMAP.md: ${(e as Error).message}`); }
   }
   saveState(paths, state);
+  return 0;
+}
+
+export function approveCommand(
+  paths: Paths,
+  state: State,
+  tasks: Task[],
+  rawId: string,
+  criterionId: string | undefined,
+  opts: { approver?: string; note?: string; log: Logger },
+): number {
+  const { log } = opts;
+  const id = canonicalId(rawId);
+  const task = id ? tasks.find((t) => t.id === id) : undefined;
+  if (!task) throw new UsageError(`approve ${rawId}: no such task in ROADMAP.md`);
+  if (!task.taskFile || !existsSync(task.taskFile)) {
+    throw new UsageError(`approve ${task.id}: no task file, so there is no acceptance contract to approve`);
+  }
+  const body = parseFrontMatter(readFileSync(task.taskFile, 'utf8')).body;
+  const read = parseAcceptanceSpec(body);
+  if (read.legacy) throw new UsageError(`approve ${task.id}: the task has no symphony-acceptance block; there is nothing to approve`);
+  if (read.errors.length) throw new UsageError(`approve ${task.id}: the acceptance contract is invalid: ${read.errors.join('; ')}`);
+  const spec = read.spec!;
+  const humanCriteria = spec.criteria.filter((c) => c.gates.some((g) => g.kind === 'human'));
+
+  if (!criterionId) {
+    if (!humanCriteria.length) throw new UsageError(`approve ${task.id}: its acceptance contract has no human gate`);
+    const recorded = state.tasks[task.id]?.acceptance;
+    log.plain(`human approvals for ${task.id}:`);
+    for (const c of humanCriteria) {
+      const status = recorded?.criteria.find((x) => x.id === c.id)?.status ?? 'not evaluated';
+      const approver = c.gates.find((g) => g.kind === 'human')?.approver;
+      log.plain(`  ${c.id} [${status}]${approver ? ` (approver: ${approver})` : ''} — ${c.text}`);
+    }
+    log.plain(`run: symphony approve ${task.id} <criterion> --by "<name>"`);
+    return 0;
+  }
+
+  const criterion = humanCriteria.find((c) => c.id === criterionId);
+  if (!criterion) {
+    throw new UsageError(`approve ${task.id} ${criterionId}: no human gate with that criterion id (${humanCriteria.map((c) => c.id).join(', ') || 'none'})`);
+  }
+  const revision = worktreeRevision(paths.root, acceptanceExcludes(paths));
+  if (!revision) throw new UsageError(`approve ${task.id}: could not snapshot the worktree revision (is this a git repository?)`);
+  const results = readGateResults(paths, task.id);
+  const hasNonHuman = criterion.gates.some((g) => g.kind !== 'human');
+  const atRevision = results.filter((r) => r.criterionId === criterion.id && r.gate !== 'human' && r.revision.tree === revision.tree);
+  if (hasNonHuman && !atRevision.length) {
+    throw new UsageError(`approve ${task.id}: no non-human gate evidence for "${criterion.id}" at revision ${revision.tree.slice(0, 12)}; run the task until its gates have been evaluated, then approve`);
+  }
+  const evidenceHash = criterionEvidenceHash(criterion, results, revision.tree);
+  const approver = opts.approver?.trim() || process.env.USERNAME || process.env.USER || 'human';
+  const file = appendApproval(paths, {
+    taskId: task.id,
+    criterionId: criterion.id,
+    approver,
+    at: nowIso(),
+    revision: revision.tree,
+    evidenceHash,
+    ...(opts.note?.trim() ? { note: opts.note.trim() } : {}),
+  });
+  log.info(`${task.id}: approved ${criterion.id} by ${approver} at revision ${revision.tree.slice(0, 12)}`);
+  log.info(`approval recorded in ${rel(paths.root, file)}; re-run with \`symphony run --retry --only ${task.id}\` to accept the task`);
   return 0;
 }
 
