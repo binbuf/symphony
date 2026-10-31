@@ -1,12 +1,17 @@
 import { spawnSync } from 'node:child_process';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export interface GitResult { code: number; stdout: string; stderr: string }
 
-export function git(root: string, args: string[]): GitResult {
-  const r = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', timeout: 120_000 });
+export function gitWithEnv(root: string, args: string[], env: NodeJS.ProcessEnv): GitResult {
+  const r = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8', timeout: 120_000, env: { ...process.env, ...env } });
   return { code: r.status ?? (r.error ? 127 : 1), stdout: (r.stdout ?? '').trim(), stderr: (r.stderr ?? r.error?.message ?? '').trim() };
+}
+
+export function git(root: string, args: string[]): GitResult {
+  return gitWithEnv(root, args, {});
 }
 
 export function gitAvailable(): boolean {
@@ -41,6 +46,68 @@ export function dirtyFiles(root: string): string[] {
 export function untrackedFiles(root: string): string[] {
   const r = git(root, ['ls-files', '--others', '--exclude-standard']);
   return r.code === 0 && r.stdout ? r.stdout.split('\n').filter(Boolean).map((f) => f.replace(/\\/g, '/')) : [];
+}
+
+export interface WorktreeRevision {
+  /** Tree hash of the full worktree: tracked edits and untracked, non-ignored files. */
+  tree: string;
+  /** HEAD at snapshot time, when the repository has one. */
+  commit?: string;
+  /** Whether the worktree differed from HEAD at snapshot time. */
+  dirty: boolean;
+}
+
+/**
+ * A stable identity for "the implementation currently in the worktree". Unlike a commit SHA, this
+ * includes uncommitted edits and untracked files, so acceptance evidence can be tied to the exact
+ * content it evaluated. The snapshot is built in a temporary index and never changes the real index
+ * or working tree. `.symphony/` is harness state, not implementation, and is excluded.
+ */
+export function worktreeRevision(root: string, exclude: string[] = []): WorktreeRevision | undefined {
+  const commit = headSha(root);
+  let dir: string | undefined;
+  try {
+    dir = mkdtempSync(join(tmpdir(), 'symphony-tree-'));
+    const env = { GIT_INDEX_FILE: join(dir, 'index') };
+    // Start from an empty index and stage the current worktree with the harness-owned paths
+    // excluded. This gives an exact tree hash of the implementation even when the agent committed
+    // its own work (HEAD would otherwise include harness bookkeeping).
+    const seed = gitWithEnv(root, ['read-tree', '--empty'], env);
+    if (seed.code !== 0) return undefined;
+    const excluded = ['.symphony', ...exclude]
+      .map((p) => p.replace(/\\/g, '/').replace(/^\.?\//, ''))
+      .filter(Boolean)
+      .map((p) => `:(exclude)${p}`);
+    const add = gitWithEnv(root, ['add', '-A', '--', '.', ...excluded], env);
+    if (add.code !== 0) return undefined;
+    const tree = gitWithEnv(root, ['write-tree'], env);
+    return tree.code === 0 && tree.stdout ? { tree: tree.stdout, commit, dirty: dirtyFiles(root).length > 0 } : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    if (dir) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  }
+}
+
+/**
+ * Files changed since `base` (or HEAD when no base is given), including untracked, non-ignored
+ * files. Paths use forward slashes. Used as evidence by the diff gate.
+ */
+export function changedFilesSince(root: string, base?: string, exclude: string[] = []): string[] {
+  const out = new Set<string>();
+  const diff = git(root, ['diff', '--name-only', '--no-color', base && base.trim() ? base.trim() : 'HEAD']);
+  if (diff.code === 0 && diff.stdout) {
+    for (const file of diff.stdout.split('\n')) {
+      const f = file.trim().replace(/\\/g, '/');
+      if (f) out.add(f);
+    }
+  }
+  for (const file of untrackedFiles(root)) out.add(file);
+  const ex = exclude.map((p) => p.replace(/\\/g, '/').replace(/^\.?\//, '').replace(/\/+$/, '')).filter(Boolean);
+  const skipped = (file: string): boolean => ex.some((p) => file === p || file.startsWith(`${p}/`));
+  return [...out].filter((f) => f !== '.symphony' && !f.startsWith('.symphony/') && !skipped(f)).sort();
 }
 
 /**

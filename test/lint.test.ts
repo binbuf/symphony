@@ -91,6 +91,29 @@ test('empty roadmap and duplicate ids are errors', () => {
   assert.ok(codes(lintDocs(paths), 'error').includes('roadmap-parse'));
 });
 
+test('a valid v2 acceptance block lints clean; a malformed one is an error', () => {
+  const dir = repo();
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.tasksDir, { recursive: true });
+  mkdirSync(paths.adrDir, { recursive: true });
+  writeFileSync(paths.roadmap, '# R\n\n## Phase 1 — A\n\n- [ ] T01 — First → [tasks/01-first.md](tasks/01-first.md)\n');
+  writeFileSync(paths.progress, '# Progress notes\n');
+  const task = (block: string) => [
+    '# T01 — First', '', '## Goal', 'x', '', '## Scope', '- a', '', '## Done when', '- [ ] tests', '',
+    '```symphony-acceptance', block, '```', '', '## Hand-off', 'c', '',
+  ].join('\n');
+  const valid = JSON.stringify({ version: 2, criteria: [{ id: 'tests', text: 'Tests', gates: [{ kind: 'verify', command: 'npm test' }] }] });
+  writeFileSync(join(paths.tasksDir, '01-first.md'), task(valid));
+  const ok = lintDocs(paths);
+  assert.equal(ok.ok, true, JSON.stringify(ok.findings));
+  assert.ok(!codes(ok).includes('acceptance-contract'));
+
+  writeFileSync(join(paths.tasksDir, '01-first.md'), task(JSON.stringify({ version: 2, criteria: [{ id: 'tests', text: 'Tests', gates: [{ kind: 'verify' }] }] })));
+  const bad = lintDocs(paths);
+  assert.equal(bad.ok, false);
+  assert.ok(codes(bad, 'error').includes('acceptance-contract'));
+});
+
 test('designDocs: false drops design/adr requirements and lints clean without a design folder', () => {
   const dir = repo();
   const paths = resolvePaths(dir);

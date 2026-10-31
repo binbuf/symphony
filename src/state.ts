@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import type { AcceptanceSummary } from './acceptance.js';
 import type { AcceptanceItem } from './graph.js';
 import type { Paths } from './paths.js';
 import type { AttemptDelta } from './progress.js';
@@ -75,6 +76,13 @@ export interface TaskState {
    * landed instead of an empty diff.
    */
   baseSha?: string;
+  /**
+   * HEAD when this task first started. Used by the v2 acceptance diff gate (and later by a full-task
+   * judge) so work from earlier slices is not lost when a new session resets `baseSha`.
+   */
+  taskBaseSha?: string;
+  /** The latest v2 acceptance decision, for status/logs. Gate results themselves are append-only. */
+  acceptance?: AcceptanceSummary;
   durationS: number;
   costUsd?: number;
   /** Provider-reported token usage summed across this task's sessions, when any reported it. */

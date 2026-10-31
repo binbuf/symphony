@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { parseAcceptanceSpec } from './acceptance.js';
 import { PROVIDER_NAMES, type ProviderConfig } from './config.js';
 import { gitToplevel } from './git.js';
 import type { ProviderName } from './providers/types.js';
@@ -150,6 +151,8 @@ export function lintDocs(paths: Paths, opts: { design?: boolean; skipDirs?: stri
           const missing = REQUIRED_SECTIONS.filter(([, re]) => !re.test(body)).map(([n]) => n);
           if (!/\S/.test(body)) add('warn', 'task-empty', `${t.taskFileRel} is empty`, t.taskFileRel);
           else if (missing.length) add('warn', 'task-sections', `${t.taskFileRel}: missing section${missing.length === 1 ? '' : 's'} ${missing.join(', ')}`, t.taskFileRel);
+          const acceptance = parseAcceptanceSpec(body);
+          for (const error of acceptance.errors) add('error', 'acceptance-contract', `${t.taskFileRel}: ${error}`, t.taskFileRel);
           if (meta.provider && !(PROVIDER_NAMES as string[]).includes(meta.provider)) add('error', 'task-frontmatter', `${t.taskFileRel}: front matter provider "${meta.provider}" is not one of ${PROVIDER_NAMES.join(', ')}`, t.taskFileRel);
           if (opts.providers && (meta.model || meta.variant)) {
             const pn = meta.provider && (PROVIDER_NAMES as string[]).includes(meta.provider)

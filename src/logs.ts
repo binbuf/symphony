@@ -54,6 +54,16 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
     lines.push(`- result: ${st.verify.ok ? 'pass' : `FAIL (exit ${st.verify.code ?? 'timeout'})`} at ${st.verify.at}`);
     if (st.verify.output) { lines.push('', '```', st.verify.output, '```'); }
   }
+  if (st.acceptance) {
+    lines.push('');
+    lines.push('## Acceptance');
+    lines.push('');
+    lines.push(`- revision: ${st.acceptance.revision}`);
+    lines.push(`- status: ${st.acceptance.status}`);
+    for (const c of st.acceptance.criteria) {
+      lines.push(`- ${c.id}: ${c.status}${c.reason ? ` — ${c.reason}` : ''}`);
+    }
+  }
   if (st.judge) {
     const j = st.judge;
     lines.push('');

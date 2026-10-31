@@ -138,6 +138,10 @@ function buildExecutionPrompt(ctx: PromptCtx, continuing: boolean): string {
     `Implement only this task's Scope. Read its Context${ctx.designDocs ? ' and referenced design docs' : ''} as needed. Put out-of-scope discoveries in Follow-ups. If the inlined task is truncated, read the full file before implementing.`,
     'Run the acceptance checks and relevant tests in the foreground; record actual commands and results in Hand-off. Add meaningful regression coverage for changed behavior. Report done only when acceptance criteria are met and checks pass.',
   ];
+  const acceptanceBody = body ?? taskFileBody(task);
+  if (acceptanceBody && /^[ \t]*```[ \t]*symphony-acceptance\b/m.test(acceptanceBody)) {
+    steps.push('This task has a structured `symphony-acceptance` block. The harness evaluates those gates itself; do not edit the block or weaken a gate. Checkboxes under "Done when" are informational for a v2 contract — the gate results decide acceptance.');
+  }
   if (ctx.designDocs) {
     steps.push(`Update affected docs in ${d.design}/. Record decisions that constrain later tasks in ${d.adr}/NNNN-title.md (next free number; Status, Context, Decision, Consequences; one page max). List changed docs in Hand-off.`);
   }

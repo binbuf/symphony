@@ -456,6 +456,36 @@ Two optional flags go beyond per-task model selection:
 
 When a provider declares `providers.<name>.models`, those front-matter `model:`/`variant:` values are checked against that allowlist (each model names the `variants` it supports) and an unknown one falls back to the provider's configured default; `symphony lint` reports it as an error instead. `--model`/`--model-provider`/`--variant` and their `SYMPHONY_*` env vars are not constrained.
 
+### Structured acceptance (v2)
+
+A task file may add one fenced `symphony-acceptance` block. Tasks without it keep the legacy contract: checkbox-driven completion plus the harness's verify command and optional judge. A v2 block is explicit and is evaluated by the harness, not by the agent's checkboxes:
+
+````markdown
+## Done when
+
+```symphony-acceptance
+{
+  "version": 2,
+  "criteria": [
+    {
+      "id": "tests",
+      "text": "Tests pass",
+      "blocking": true,
+      "gates": [{ "kind": "verify", "command": "npm test" }]
+    },
+    {
+      "id": "feature",
+      "text": "Feature implemented",
+      "blocking": true,
+      "gates": [{ "kind": "diff", "paths": ["src/", "test/"] }]
+    }
+  ]
+}
+```
+````
+
+This build implements the deterministic `verify` and `diff` gates. The `diff` gate proves that a change exists under the declared paths, not that the change is semantically correct; the semantic judge remains responsible for intent. Every blocking criterion must have a passing result at the exact worktree revision being accepted. Gate results are append-only under `.symphony/evidence/<task>/gate-results.jsonl`; a pass from an older revision is stale and cannot satisfy acceptance. The parser recognises the later gate kinds (`metric`, `semantic`, the visual gates, and `human`) but rejects them until their runner lands. `symphony lint` validates the block, including stable criterion ids, duplicate ids, and required commands.
+
 At the end of every task the harness also rewrites a **pipeline status block** at the bottom of `ROADMAP.md` (between `<!-- symphony:status -->` and `<!-- /symphony:status -->`): what is done, blocked, failed and left, the last finished task and any halt. It is the one place to see the pipeline's high-level state at a glance. Do not edit that block by hand; everything outside the markers stays yours.
 
 **Starting from an idea?** `symphony brief` prints a prompt with the idea placeholder at the top and the bootstrap instructions after a `---`: paste your idea into the top, hand the whole thing to any LLM, and it emits the docs package in this format. The brief asks the model to first decide whether this is a new package, a new phase of an existing one, or its own task set; to record the foundational decisions as ADRs; and to front-load the scaffolding, a green test command and the design docs before feature work. Then drop the files into the project next to `.symphony/` (see [Multiple task sets](#multiple-task-sets) for the task-set case).
