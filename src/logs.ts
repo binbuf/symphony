@@ -64,6 +64,14 @@ export function writeTaskLog(paths: Paths, task: Task, st: TaskState, opts: { co
       lines.push(`- ${c.id}: ${c.status}${c.reason ? ` — ${c.reason}` : ''}`);
     }
   }
+  if (st.checkpointRef) {
+    lines.push('');
+    lines.push('## Checkpoint');
+    lines.push('');
+    lines.push(`- ref: ${st.checkpointRef}`);
+    if (st.checkpointSha) lines.push(`- commit: ${st.checkpointSha}`);
+    if (st.checkpointAt) lines.push(`- at: ${st.checkpointAt}`);
+  }
   if (st.judge) {
     const j = st.judge;
     lines.push('');

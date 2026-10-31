@@ -91,10 +91,16 @@
   "onBlocked": "stop",
   "verifyTimeoutMin": 30,
   "inferVerify": true,
+  "verifyRetries": 1,
+  "verifyRepair": false,
+  "verifyRepairAttempts": 1,
+  "verifyRepairTimeoutMin": 45,
   "hooks": {},
   "git": {
+    "_git": "checkpointMode commit keeps slices/failed work on the branch; ref stores unverified work under refs/symphony/checkpoints/... and restores the pre-task worktree on failure.",
     "autoIgnoreUntracked": true,
-    "extraIgnore": []
+    "extraIgnore": [],
+    "checkpointMode": "commit"
   },
   "escalation": {
     "_escalation": "When a task fails (or a review reports `rework`), hand it to this provider/model. `variant` sets the reasoning effort for escalated sessions only; unset inherits the escalation provider's default. A task may override any of these with `escalation*` front matter, which wins.",

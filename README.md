@@ -1038,6 +1038,8 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `onBlocked` | `stop` | `stop` at a blocked task for a human, or `continue` to the next task |
 | `verifyCommand`, `verifyTimeoutMin` | –, `30` | shell command the harness runs itself after `done`; non-zero demotes to failed (per-task `verify:` wins) |
 | `inferVerify` | `true` | when no verify command is configured, use the project's `package.json` test script (`npm test`) |
+| `verifyRetries`, `verifyRepair`, `verifyRepairAttempts`, `verifyRepairTimeoutMin` | `1`, `false`, `1`, `45` | retry an incomplete v2 verify, and optionally run focused repair sessions after a real verify failure before the task's recovery path (legacy verify keeps its existing network retry) |
+| `git.checkpointMode` | `commit` | `commit` keeps slices/failed work on the branch; `ref` snapshots unverified work under `refs/symphony/checkpoints/...`, restores the pre-task worktree on failure, and commits only accepted work |
 | `hooks.afterTask` `.onBlocked` `.onHalt` `.onRunEnd` | – | shell commands run on lifecycle events (see [Hooks](#hooks)) |
 | `git.autoIgnoreUntracked`, `git.extraIgnore` | `true`, `[]` | before committing, keep untracked ephemeral/secret files out of the commit by adding their patterns to `.gitignore` |
 | `retry.maxAttempts`, `retry.exponential`, `retry.baseSec`, `retry.factor`, `retry.maxSec`, `retry.jitter`, `retry.honorRetryAfter`, `retry.backoffSec` | `8`, `true`, `30`, `2`, `900`, `0.2`, `true`, `[30,120,300]` | transient-error retries: exponential by default (`baseSec × factor^n`, capped, jittered, a provider `Retry-After` honoured), or the fixed `backoffSec` schedule when `exponential` is false |
@@ -1069,6 +1071,20 @@ All hooks also get `SYMPHONY_ROOT`. Example:
 ```json
 { "hooks": { "afterTask": "curl -fsS -d \"$SYMPHONY_TASK $SYMPHONY_STATUS\" $WEBHOOK || true" } }
 ```
+
+## Durable checkpoints and recovery
+
+With `"git": { "checkpointMode": "ref" }`, unverified work is snapshotted under
+`refs/symphony/checkpoints/<task>/...` instead of being committed to the working branch. A failed or
+blocked task is restored to the pre-task worktree, so the next independent task cannot inherit its
+changes; the rejected work remains recoverable in the checkpoint ref. `commit` mode keeps the
+historical linear-commit behavior and is the default.
+
+Execution phase is persisted with the task (`running`, `verifying`, `repairing`,
+`needs_attention`). If the harness stops while a v2 task is verifying, the next `run` re-runs the
+acceptance gates against the existing worktree before opening a new implementation session. A real
+verify failure can run a bounded focused repair session (`verifyRepair`) and re-verify; an
+incomplete verify (timeout, spawn or network fault) is retried separately.
 
 ## Logs and state
 

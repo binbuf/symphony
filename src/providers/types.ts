@@ -7,7 +7,7 @@ export interface BuildCommandOpts {
   promptFile: string;
   taskId: string;
   attempt: number;
-  kind: 'task' | 'resume' | 'nudge' | 'continue' | 'escalate' | 'fallback' | 'wrapup' | 'judge';
+  kind: 'task' | 'resume' | 'nudge' | 'continue' | 'escalate' | 'fallback' | 'wrapup' | 'judge' | 'repair';
   resumeId?: string;
   model?: string;
   /** Reasoning-effort / variant knob, already validated for this provider (e.g. "high"). */

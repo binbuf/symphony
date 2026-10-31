@@ -5,7 +5,7 @@ import type { Config } from './config.js';
 import type { Logger } from './logger.js';
 import { rel, type Paths } from './paths.js';
 import type { Task } from './tasks.js';
-import { ensureDir, headAndTailBytes, isRecord, nowIso, squash, stamp } from './util.js';
+import { ensureDir, headAndTailBytes, isRecord, nowIso, sleep, squash, stamp } from './util.js';
 import type { VerifyResult } from './verify.js';
 
 /**
@@ -81,6 +81,8 @@ export interface GateResult {
   createdAt: string;
   command?: string;
   exitCode?: number;
+  /** Whether a focused repair session ran before this result was recorded. */
+  repaired?: boolean;
   details?: string;
 }
 
@@ -370,21 +372,27 @@ export interface EvaluateAcceptanceOptions {
   log?: Logger;
   runVerify: (command: string, timeoutMs: number) => VerifyResult;
   changedFiles: (base?: string) => string[];
+  /** Extra attempts when verify could not complete (timeout/spawn/network), before repair. */
+  verifyRetries?: number;
+  /** Delay between infrastructure retries. */
+  retryDelayMs?: number;
+  /** A focused repair session; returns true when it actually ran and verify should be retried. */
+  repair?: (command: string, result: VerifyResult) => Promise<boolean>;
 }
 
 /**
- * Run the supported gates once and record immutable, revision-bound results. P0a deliberately has no
- * recovery loop: a missing/failed gate becomes a non-passing decision, which the runner handles
- * through its ordinary verify recovery. Richer evidence acquisition lands in P0c.
+ * Run the supported gates and record immutable, revision-bound results. Verify failures get bounded
+ * infrastructure retries and, when configured, one focused repair session before the result is
+ * recorded; richer evidence acquisition lands in P0c.
  */
-export function evaluateAcceptance(o: EvaluateAcceptanceOptions): {
+export async function evaluateAcceptance(o: EvaluateAcceptanceOptions): Promise<{
   decision: AcceptanceDecision;
   results: GateResult[];
   summary: AcceptanceSummary;
-} {
+}> {
   const results: GateResult[] = [];
   const configRev = configRevision(o.config);
-  const verifyCache = new Map<string, { res: VerifyResult; evidence: GateEvidence[] }>();
+  const verifyCache = new Map<string, { res: VerifyResult; evidence: GateEvidence[]; repaired: boolean }>();
 
   for (const criterion of o.spec.criteria) {
     for (const gate of criterion.gates) {
@@ -397,9 +405,19 @@ export function evaluateAcceptance(o: EvaluateAcceptanceOptions): {
           const key = `${command}\0${timeoutMs}`;
           let ran = verifyCache.get(key);
           if (!ran) {
-            const res = o.runVerify(command, timeoutMs);
+            let res = o.runVerify(command, timeoutMs);
+            // An incomplete verify (timeout/spawn/network) is not a task failure. Retry it first.
+            for (let attempt = 0; !res.ok && res.code === null && attempt < Math.max(0, o.verifyRetries ?? 0); attempt++) {
+              if (o.retryDelayMs && o.retryDelayMs > 0) await sleep(o.retryDelayMs);
+              res = o.runVerify(command, timeoutMs);
+            }
+            let repaired = false;
+            if (!res.ok && o.repair) {
+              repaired = await o.repair(command, res);
+              if (repaired) res = o.runVerify(command, timeoutMs);
+            }
             const artifact = writeArtifact(o.paths, o.task.id, `verify-${criterion.id}`, res.output || '(no output)');
-            ran = { res, evidence: artifact ? [artifact] : [] };
+            ran = { res, evidence: artifact ? [artifact] : [], repaired };
             verifyCache.set(key, ran);
           }
           const status: GateStatus = ran.res.ok ? 'pass' : ran.res.code === null ? 'inconclusive' : 'fail';
@@ -413,11 +431,12 @@ export function evaluateAcceptance(o: EvaluateAcceptanceOptions): {
             createdAt: nowIso(),
             command,
             exitCode: ran.res.code ?? undefined,
+            repaired: ran.repaired || undefined,
             details: ran.res.ok
-              ? `verify passed: ${command}`
+              ? `verify passed${ran.repaired ? ' after a focused repair' : ''}: ${command}`
               : ran.res.code === null
-                ? `verify could not complete: ${command}${ran.res.output ? ` — ${squash(ran.res.output, 240)}` : ''}`
-                : `verify failed (exit ${ran.res.code}): ${command}${ran.res.output ? ` — ${squash(ran.res.output, 240)}` : ''}`,
+                ? `verify could not complete${ran.repaired ? ' after a focused repair' : ''}: ${command}${ran.res.output ? ` — ${squash(ran.res.output, 240)}` : ''}`
+                : `verify failed${ran.repaired ? ' after a focused repair' : ''} (exit ${ran.res.code}): ${command}${ran.res.output ? ` — ${squash(ran.res.output, 240)}` : ''}`,
           };
         } else {
           const files = o.changedFiles(o.taskBaseSha);

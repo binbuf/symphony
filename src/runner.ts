@@ -6,7 +6,7 @@ import { classifyFailure, type Classified, type FailureEvidence } from './classi
 import { isFlexVariant, isModelDowngrade, lookupModelTier, resolveEscalation, resolveFallback, resolveJudge, resolveSession, resolveVerify, type CliOverrides, type Config, type SessionSpec } from './config.js';
 import { writeProgressIndex } from './context.js';
 import { formatChecks, runDoctor, type ExtraProvider } from './doctor.js';
-import { changedFilesSince, commitAll, currentBranch, describeCommit, headSha, worktreeRevision } from './git.js';
+import { changedFilesSince, commitAll, createCheckpoint, currentBranch, describeCommit, headSha, restoreCheckpoint, worktreeRevision } from './git.js';
 import { contractsFor, dependencyClosure, isLandedSubset, parseAcceptance, summarizeAcceptance, topoOrder, validateContracts, type AcceptanceItem, type TaskContract } from './graph.js';
 import { fireHook } from './hooks.js';
 import { classifyEscalation, classifySessionResult, jevProblem, runnerUp } from './jev.js';
@@ -15,7 +15,7 @@ import { createLogger, openRunSinks, type Logger, type RunSinks } from './logger
 import { writeTaskLog } from './logs.js';
 import { mcpPromptNote, planMcp, resolveMcpProfile } from './mcp.js';
 import { placeStop, rel, stopPresent, type Paths } from './paths.js';
-import { buildContinuePrompt, buildNudgePrompt, buildResumePrompt, buildTaskPrompt, buildWrapUpPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
+import { buildContinuePrompt, buildNudgePrompt, buildRepairPrompt, buildResumePrompt, buildTaskPrompt, buildWrapUpPrompt, ensureProgressFile, taskFileBody, type PromptCtx } from './prompt.js';
 import { applyPlan, loadProject, retargetFlags, sanitizeFlags } from './project.js';
 import { computeAttemptDelta, isStalled, metricPlateau, parseMetric } from './progress.js';
 import { createRemainderTask } from './remainder.js';
@@ -489,8 +489,8 @@ function mergeOutcome(first: SessionOutcome, second: SessionOutcome): SessionOut
 }
 
 interface SessionRun {
-  kind: 'task' | 'resume' | 'nudge' | 'continue' | 'escalate' | 'fallback' | 'wrapup';
-  logKind: 'task' | 'retry' | 'nudge' | 'wrapup';
+  kind: 'task' | 'resume' | 'nudge' | 'continue' | 'escalate' | 'fallback' | 'wrapup' | 'repair';
+  logKind: 'task' | 'retry' | 'nudge' | 'wrapup' | 'repair';
   attempt: number;
   resumeId?: string;
   timeoutMin: number;
@@ -502,7 +502,7 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
   let session: Session | undefined;
   try {
     ensureDir(paths.runs);
-    const suffix = r.logKind === 'nudge' ? '-nudge' : r.logKind === 'wrapup' ? '-wrapup' : r.attempt > 1 ? `-r${r.attempt}` : '';
+    const suffix = r.logKind === 'nudge' ? '-nudge' : r.logKind === 'wrapup' ? '-wrapup' : r.logKind === 'repair' ? '-repair' : r.attempt > 1 ? `-r${r.attempt}` : '';
     sinks = openRunSinks(paths.runs, `${task.id}-${stamp()}${suffix}`);
     writeFileSync(sinks.promptPath, prompt);
     const rel = (p: string) => relative(paths.root, p);
@@ -685,6 +685,52 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
   delete st.continuation;
   if (final.status === 'done') delete st.lastError; else if (final.lastError) st.lastError = final.lastError;
   delete st.pid;
+  if (final.status === 'done' || final.status === 'accepted') {
+    delete st.phase;
+    delete st.repairAttempts;
+  } else {
+    delete st.repairAttempts;
+  }
+
+  // In `ref` mode, unverified work never lands on the working branch. Snapshot it to a checkpoint,
+  // then restore the pre-task worktree so the next independent task cannot inherit it.
+  const isolated = config.git.checkpointMode === 'ref' && final.status !== 'done' && final.status !== 'accepted';
+  if (isolated) {
+    st.phase = 'checkpointing';
+    saveState(paths, state);
+    const checkpoint = createCheckpoint(paths.root, task.id, final.status, {
+      message: `symphony ${task.id} ${final.status} checkpoint`,
+    });
+    if (checkpoint) {
+      st.checkpointRef = checkpoint.ref;
+      st.checkpointSha = checkpoint.sha;
+      st.checkpointAt = nowIso();
+      log.warn(`${task.id}: unverified work saved to checkpoint ${checkpoint.sha.slice(0, 8)} (${checkpoint.ref})`);
+      const branchOk = !ctx.startBranch || currentBranch(paths.root) === ctx.startBranch;
+      if (!branchOk) {
+        log.error(`${task.id}: a session switched branches; not restoring the pre-task worktree. Resolve the branch before the next task.`);
+      } else if (st.preTaskRef) {
+        if (restoreCheckpoint(paths.root, st.preTaskRef)) {
+          log.warn(`${task.id}: restored the pre-task worktree; unverified changes remain only in ${checkpoint.ref}`);
+        } else {
+          log.error(`${task.id}: could not restore pre-task checkpoint ${st.preTaskRef}; the worktree may still contain unverified work`);
+        }
+      } else {
+        log.warn(`${task.id}: no pre-task checkpoint exists; leaving the unverified worktree in place`);
+      }
+    } else {
+      // Never discard work we could not snapshot. Leave it for inspection and make the position clear.
+      log.error(`${task.id}: could not create a checkpoint for the unverified worktree; leaving it in place`);
+    }
+    if (final.status === 'blocked') st.phase = 'needs_attention';
+    else delete st.phase;
+    if (final.status === 'failed') delete st.repairAttempts;
+    st.commit = st.checkpointRef
+      ? `checkpoint ${st.checkpointSha?.slice(0, 8) ?? '?'} (uncommitted; pre-task worktree restored)`
+      : 'checkpoint missing; unverified work was not committed';
+    delete st.commitSha;
+    saveState(paths, state);
+  }
 
   const writeArtifacts = (status: TaskStatus): string => {
     // Marker first so the task's own commit carries the final [x]/[~] state.
@@ -708,28 +754,37 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
   });
 
   const message = writeArtifacts(final.status);
-  let commit = commitOnce(message);
-  if (commit.status === 'failed') {
-    log.warn(`${task.id}: ${commit.detail}; retrying the commit once`);
-    commit = commitOnce(message);
-  }
-  if (commit.status === 'failed') {
-    // A task must never be recorded done when its work could not be committed. Demote it so the next
-    // run (or a human) sees the problem; the work itself stays in the tree.
-    const reason = `commit failed: ${commit.detail}`;
-    log.error(`${task.id}: ${reason}; demoting ${final.status} -> failed`);
-    final.status = 'failed';
-    final.summary = reason;
-    final.lastError = { category: 'commit', message: reason, transient: false, fatal: false, at: nowIso() };
-    st.status = 'failed';
-    st.summary = reason;
-    st.lastError = final.lastError;
+  if (isolated) {
+    // Keep the harness-owned artifacts (roadmap marker, task log, progress index) dirty for the next
+    // accepted task to commit, but never commit the unverified implementation itself.
+    st.commit = st.checkpointRef
+      ? `checkpoint ${st.checkpointSha?.slice(0, 8) ?? '?'} (uncommitted; pre-task worktree restored)`
+      : 'checkpoint missing; unverified work was not committed';
     delete st.commitSha;
-    writeArtifacts('failed');
-    st.commit = reason;
   } else {
-    st.commit = describeCommit(commit);
-    if (commit.status === 'committed') st.commitSha = commit.sha;
+    let commit = commitOnce(message);
+    if (commit.status === 'failed') {
+      log.warn(`${task.id}: ${commit.detail}; retrying the commit once`);
+      commit = commitOnce(message);
+    }
+    if (commit.status === 'failed') {
+      // A task must never be recorded done when its work could not be committed. Demote it so the next
+      // run (or a human) sees the problem; the work itself stays in the tree.
+      const reason = `commit failed: ${commit.detail}`;
+      log.error(`${task.id}: ${reason}; demoting ${final.status} -> failed`);
+      final.status = 'failed';
+      final.summary = reason;
+      final.lastError = { category: 'commit', message: reason, transient: false, fatal: false, at: nowIso() };
+      st.status = 'failed';
+      st.summary = reason;
+      st.lastError = final.lastError;
+      delete st.commitSha;
+      writeArtifacts('failed');
+      st.commit = reason;
+    } else {
+      st.commit = describeCommit(commit);
+      if (commit.status === 'committed') st.commitSha = commit.sha;
+    }
   }
 
   if (halt) state.halted = halt;
@@ -900,6 +955,21 @@ function recordAttemptDelta(ctx: RunContext, task: Task, st: TaskState): void {
 /** Commit a `continue` session's work so a crash never loses it. */
 function commitIntermediate(ctx: RunContext, task: Task, st: TaskState): void {
   const { paths, config, log } = ctx;
+  if (config.git.checkpointMode === 'ref') {
+    const checkpoint = createCheckpoint(paths.root, task.id, `slice-${st.attempts}`, {
+      message: `symphony ${task.id} slice ${st.attempts} checkpoint`,
+    });
+    if (checkpoint) {
+      st.checkpointRef = checkpoint.ref;
+      st.checkpointSha = checkpoint.sha;
+      st.checkpointAt = nowIso();
+      saveState(paths, ctx.state);
+      log.info(`${task.id}: intermediate checkpoint ${checkpoint.sha.slice(0, 8)} (${checkpoint.ref})`);
+    } else {
+      log.warn(`${task.id}: could not create an intermediate checkpoint for this slice`);
+    }
+    return;
+  }
   const message = renderTemplate(config.commitMessageTemplate, { id: task.id, title: task.title, status: 'continue' });
   const commitAllOpts = { autoIgnoreUntracked: config.git.autoIgnoreUntracked, extraIgnore: config.git.extraIgnore, expectedBranch: ctx.startBranch };
   let commit = commitAll(paths.root, message, (m) => log.warn(`${task.id}: ${m}`), commitAllOpts);
@@ -918,6 +988,17 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   const hasAcceptanceContract = !acceptanceRead.legacy;
   for (const error of acceptanceRead.errors) log.warn(`${task.id}: acceptance contract: ${error}`);
   if (acceptanceSpec && !st.taskBaseSha) st.taskBaseSha = headSha(paths.root);
+  if (config.git.checkpointMode === 'ref' && !st.preTaskRef && st.phase !== 'verifying' && st.phase !== 'repairing') {
+    const pre = createCheckpoint(paths.root, task.id, 'pre', { message: `symphony ${task.id} pre-task snapshot` });
+    if (pre) {
+      st.preTaskRef = pre.ref;
+      st.checkpointAt = nowIso();
+      saveState(paths, state);
+      log.info(`${task.id}: pre-task checkpoint ${pre.sha.slice(0, 8)} (${pre.ref})`);
+    } else {
+      log.warn(`${task.id}: could not create a pre-task checkpoint; failed work cannot be isolated automatically`);
+    }
+  }
   // When every unchecked acceptance item is deferrable, the landed blocking subset is green: the task
   // can be accepted programmatically and the remainder recorded, instead of stopping for a human.
   // A v2 contract (valid or malformed) is decided by its gates, never by checkbox state.
@@ -989,6 +1070,116 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
   let pendingGap: string | undefined;
   let final: Final | undefined;
   let halt: Halted | undefined;
+
+  /** One focused repair session after verify failed. Returns true when verify should be retried. */
+  const runFocusedRepair = async (command: string, res: VerifyResult): Promise<boolean> => {
+    const used = st.repairAttempts ?? 0;
+    if (!config.verifyRepair || used >= config.verifyRepairAttempts) return false;
+    st.repairAttempts = used + 1;
+    st.phase = 'repairing';
+    saveState(paths, state);
+    const pc = promptCtx(ctx, task, st, spec, undefined, continuation);
+    const excludes = acceptanceExcludes(paths);
+    const prompt = buildRepairPrompt(pc, {
+      verifyCommand: command,
+      verifyOutput: res.output,
+      changedFiles: changedFilesSince(paths.root, st.taskBaseSha, excludes),
+    });
+    log.warn(`${task.id}: verify failed; starting focused repair ${st.repairAttempts}/${config.verifyRepairAttempts}`);
+    const repairRun = await runOneSession(ctx, task, st, provider, spec, prompt, {
+      kind: 'repair',
+      logKind: 'repair',
+      attempt: st.attempts,
+      timeoutMin: Math.min(config.verifyRepairTimeoutMin, spec.timeoutMin),
+    });
+    iterations += 1;
+    const repaired = parseResultBlock(repairRun.result.text) ?? parseResultBlock(repairRun.allText);
+    log.info(`${task.id}: repair session ended${repaired ? ` (${repaired.status}: ${repaired.summary || 'no summary'})` : ' without a result block'}; re-running verify`);
+    st.phase = 'verifying';
+    saveState(paths, state);
+    return true;
+  };
+
+  /** Run the v2 gates against the current worktree, persisting the decision and phase. */
+  const runAcceptance = async (specToUse: AcceptanceSpec) => {
+    const excludes = acceptanceExcludes(paths);
+    const revision = worktreeRevision(paths.root, excludes);
+    if (!revision) return undefined;
+    st.phase = 'verifying';
+    saveState(paths, state);
+    const evaluateAt = (rev: NonNullable<typeof revision>, allowRepair: boolean) => evaluateAcceptance({
+      paths,
+      task,
+      spec: specToUse,
+      config,
+      taskBaseSha: st.taskBaseSha,
+      revision: rev,
+      log,
+      runVerify: (command, timeoutMs) => runVerify(paths.root, command, timeoutMs),
+      changedFiles: (base) => changedFilesSince(paths.root, base, excludes),
+      verifyRetries: config.verifyRetries,
+      retryDelayMs: Math.min(30_000, Math.max(0, config.retry.baseSec) * 1000),
+      repair: allowRepair && config.verifyRepair ? (command, res) => runFocusedRepair(command, res) : undefined,
+    });
+    let evaluated = await evaluateAt(revision, true);
+    let after = worktreeRevision(paths.root, excludes);
+    if (after && after.tree !== revision.tree) {
+      // A focused repair (or a verify command that writes tracked files) changed the implementation.
+      // The first results are stale; evaluate once more against the settled tree, without another
+      // repair, so acceptance is bound to the work that actually exists.
+      log.info(`${task.id}: worktree changed during acceptance gates; re-evaluating at ${after.tree.slice(0, 12)}`);
+      evaluated = await evaluateAt(after, false);
+      after = worktreeRevision(paths.root, excludes);
+    }
+    if (!after || after.tree !== evaluated.summary.revision) {
+      evaluated.decision = {
+        ...evaluated.decision,
+        status: 'inconclusive',
+        accepted: false,
+        reasons: [
+          ...evaluated.decision.reasons,
+          `worktree changed while acceptance gates ran (${evaluated.summary.revision.slice(0, 12)} → ${after ? after.tree.slice(0, 12) : 'unavailable'})`,
+        ],
+      };
+      evaluated.summary = {
+        ...evaluated.summary,
+        status: 'inconclusive',
+        criteria: evaluated.decision.criteria.map((c) => ({ id: c.id, status: c.status, ...(c.reason ? { reason: c.reason } : {}) })),
+      };
+    }
+    st.acceptance = evaluated.summary;
+    delete st.verify;
+    const verifyResult = evaluated.results.find((r) => r.gate === 'verify');
+    if (verifyResult) {
+      st.verify = {
+        command: verifyResult.command ?? '',
+        ok: verifyResult.status === 'pass',
+        code: verifyResult.exitCode,
+        output: verifyResult.evidence.find((e) => e.kind === 'command-output')?.outputTail?.slice(-2000) || verifyResult.details?.slice(-2000),
+        at: verifyResult.createdAt,
+      };
+    }
+    saveState(paths, state);
+    return evaluated;
+  };
+
+  // A crash during verification leaves the implementation intact. On the next run, resume the
+  // acceptance gates before opening a new implementation session.
+  if (st.phase === 'verifying' && acceptanceSpec && hasAcceptanceContract) {
+    log.warn(`${task.id}: resuming validation of the existing work without a new implementation session`);
+    const recovered = await runAcceptance(acceptanceSpec);
+    if (recovered?.decision.accepted) {
+      final = { status: 'done', summary: 'recovered: acceptance verification passed after a restart' };
+      await finalizeTask(ctx, task, st, final);
+      return { status: 'done' };
+    }
+    if (recovered) {
+      log.warn(`${task.id}: acceptance still ${recovered.decision.status}; continuing with the ordinary task path`);
+      st.phase = 'running';
+      st.lastError = { category: 'verify', message: `acceptance ${recovered.decision.status}: ${recovered.decision.reasons.join('; ')}`, transient: false, fatal: false, at: nowIso() };
+      saveState(paths, state);
+    }
+  }
 
   /**
    * Hand the task to the escalation provider/model for a fresh attempt. Bounded by
@@ -1274,6 +1465,7 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
     }
 
     st.status = 'running';
+    st.phase = 'running';
     st.attempts += 1;
     iterations += 1;
     st.started = nowIso();
@@ -1475,9 +1667,8 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
             final = { status: 'failed', summary: msg, lastError: { category: 'verify', message: msg, transient: false, fatal: false, at: nowIso() } };
             break;
           }
-          const excludes = acceptanceExcludes(paths);
-          const revision = worktreeRevision(paths.root, excludes);
-          if (!revision) {
+          const evaluated = await runAcceptance(finalRead.spec);
+          if (!evaluated) {
             const msg = 'acceptance could not snapshot the worktree revision';
             log.error(`${task.id}: ${msg}`);
             const rec = await recover('verify', msg);
@@ -1487,47 +1678,6 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
             final = { status: 'failed', summary: msg, lastError: { category: 'verify', message: msg, transient: false, fatal: false, at: nowIso() } };
             break;
           }
-          const evaluated = evaluateAcceptance({
-            paths,
-            task,
-            spec: finalRead.spec,
-            config,
-            taskBaseSha: st.taskBaseSha,
-            revision,
-            log,
-            runVerify: (command, timeoutMs) => runVerify(paths.root, command, timeoutMs),
-            changedFiles: (base) => changedFilesSince(paths.root, base, excludes),
-          });
-          const after = worktreeRevision(paths.root, excludes);
-          if (!after || after.tree !== revision.tree) {
-            evaluated.decision = {
-              ...evaluated.decision,
-              status: 'inconclusive',
-              accepted: false,
-              reasons: [
-                ...evaluated.decision.reasons,
-                `worktree changed while acceptance gates ran (${revision.tree.slice(0, 12)} → ${after ? after.tree.slice(0, 12) : 'unavailable'})`,
-              ],
-            };
-            evaluated.summary = {
-              ...evaluated.summary,
-              status: 'inconclusive',
-              criteria: evaluated.decision.criteria.map((c) => ({ id: c.id, status: c.status, ...(c.reason ? { reason: c.reason } : {}) })),
-            };
-          }
-          st.acceptance = evaluated.summary;
-          delete st.verify;
-          const verifyResult = evaluated.results.find((r) => r.gate === 'verify');
-          if (verifyResult) {
-            st.verify = {
-              command: verifyResult.command ?? '',
-              ok: verifyResult.status === 'pass',
-              code: verifyResult.exitCode,
-              output: verifyResult.evidence.find((e) => e.kind === 'command-output')?.outputTail?.slice(-2000) || verifyResult.details?.slice(-2000),
-              at: verifyResult.createdAt,
-            };
-          }
-          saveState(paths, state);
           if (!evaluated.decision.accepted) {
             const msg = `acceptance ${evaluated.decision.status}: ${evaluated.decision.reasons.join('; ')}`;
             log.error(`${task.id}: ${msg}`);
@@ -1538,10 +1688,12 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
             final = { status: 'failed', summary: msg, lastError: { category: 'verify', message: msg, transient: false, fatal: false, at: nowIso() } };
             break;
           }
-          log.info(`${task.id}: v2 acceptance passed at revision ${revision.tree.slice(0, 12)} (${evaluated.summary.criteria.length} criteria)`);
+          log.info(`${task.id}: v2 acceptance passed at revision ${evaluated.summary.revision.slice(0, 12)} (${evaluated.summary.criteria.length} criteria)`);
         } else {
           const verify = resolveVerify(config, task, paths.root);
           if (verify) {
+            st.phase = 'verifying';
+            saveState(paths, state);
             log.info(`${task.id}: running verify: ${verify.command}`);
             let res = runVerify(paths.root, verify.command, verify.timeoutMin * 60_000);
             const recordVerify = () => {
@@ -1572,6 +1724,14 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
               log.info(`${task.id}: re-running verify: ${verify.command}`);
               res = runVerify(paths.root, verify.command, verify.timeoutMin * 60_000);
               recordVerify();
+            }
+            if (!res.ok) {
+              const repaired = await runFocusedRepair(verify.command, res);
+              if (repaired) {
+                log.info(`${task.id}: re-running verify after focused repair: ${verify.command}`);
+                res = runVerify(paths.root, verify.command, verify.timeoutMin * 60_000);
+                recordVerify();
+              }
             }
             if (!res.ok) {
               const msg = `verify failed (exit ${res.code ?? 'timeout'}): ${verify.command} — ${squash(res.output, 240) || 'no output'}`;
@@ -1796,8 +1956,36 @@ function recoverStaleRuns(ctx: RunContext): void {
       log.warn(`${task.id}: state says "running" and pid ${st.pid} is still alive; leaving it alone`);
       continue;
     }
+    if (st.phase === 'verifying') {
+      // The implementation session completed; only verification was lost. Keep the attempt and the
+      // worktree, and let the next run re-evaluate acceptance before opening a new session.
+      st.status = 'failed';
+      st.summary = 'verification was interrupted by an unclean stop; the existing work will be re-validated before a new implementation session';
+      st.lastError = { category: 'interrupted', message: 'harness stopped during verification', transient: true, fatal: false, at: nowIso() };
+      delete st.pid;
+      delete st.started;
+      delete st.baseSha;
+      saveState(paths, state);
+      patchRoadmap(ctx, task.id, 'failed');
+      log.warn(`${task.id}: verification was interrupted; the next run will re-run the acceptance gates without reimplementing`);
+      continue;
+    }
+    if (st.phase === 'repairing') {
+      st.status = 'failed';
+      st.phase = 'verifying';
+      st.summary = 'focused verification repair was interrupted; verification will be re-run before a new implementation session';
+      st.lastError = { category: 'interrupted', message: 'harness stopped during verification repair', transient: true, fatal: false, at: nowIso() };
+      delete st.pid;
+      delete st.started;
+      delete st.baseSha;
+      saveState(paths, state);
+      patchRoadmap(ctx, task.id, 'failed');
+      log.warn(`${task.id}: verification repair was interrupted; the next run will re-validate the existing work`);
+      continue;
+    }
     if ((st.attempts ?? 0) > 0) st.attempts -= 1;
     st.status = 'failed';
+    delete st.phase;
     st.summary = 'recovered after an unclean stop (crashed, killed or host restart); the unfinished session does not count as an attempt and the task will be retried';
     st.lastError = { category: 'interrupted', message: 'harness stopped mid-session', transient: true, fatal: false, at: nowIso() };
     delete st.pid;
@@ -2131,7 +2319,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
       const spend = await budgetHalt();
       if (spend !== undefined) return spend;
       const st = state.tasks[task.id];
-      if (st && st.status === 'failed' && st.attempts >= config.halt.maxAttemptsPerTask && !flags.retry) {
+      if (st && st.status === 'failed' && st.phase !== 'verifying' && st.attempts >= config.halt.maxAttemptsPerTask && !flags.retry) {
         return setHalt(ctx, { at: nowIso(), taskId: task.id, category: 'attempts', reason: `${task.id} has failed ${st.attempts} times (halt.maxAttemptsPerTask = ${config.halt.maxAttemptsPerTask}); last: ${st.lastError?.message ?? st.summary ?? '?'}. Fix the cause, then \`symphony run --clear-halt --retry --only ${task.id}\`` });
       }
 

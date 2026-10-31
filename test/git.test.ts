@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { resetCommand } from '../src/commands.js';
-import { commitAll, commitPrefix, commitsForTask, currentBranch, dirtyFiles, guardGitignore, restoreWorktree, snapshotWorktree, untrackedFiles } from '../src/git.js';
+import { commitAll, commitPrefix, commitsForTask, createCheckpoint, currentBranch, dirtyFiles, guardGitignore, headSha, restoreCheckpoint, restoreWorktree, snapshotWorktree, untrackedFiles } from '../src/git.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths } from '../src/paths.js';
 import { loadState, newTaskState } from '../src/state.js';
@@ -187,6 +187,28 @@ test('restoreWorktree cleans the tree completely when there was no pre-session w
   assert.equal(readFileSync(join(dir, 'tracked.txt'), 'utf8'), 'orig');
   assert.ok(!existsSync(join(dir, 'session-new.txt')));
   assert.deepEqual(dirtyFiles(dir), []);
+});
+
+test('checkpoint refs snapshot and restore the worktree without moving HEAD', () => {
+  const dir = repo();
+  writeFileSync(join(dir, 'tracked.txt'), 'one');
+  execFileSync('git', ['-C', dir, 'add', '-A']);
+  execFileSync('git', ['-C', dir, 'commit', '-q', '-m', 'init']);
+  const head = headSha(dir);
+  writeFileSync(join(dir, 'tracked.txt'), 'two');
+  writeFileSync(join(dir, 'new.txt'), 'new');
+  const checkpoint = createCheckpoint(dir, 'T01', 'pre');
+  assert.ok(checkpoint, 'checkpoint created');
+  assert.match(checkpoint.ref, /^refs\/symphony\/checkpoints\/T01\//);
+  assert.equal(headSha(dir), head, 'HEAD did not move');
+
+  writeFileSync(join(dir, 'tracked.txt'), 'three');
+  writeFileSync(join(dir, 'later.txt'), 'later');
+  assert.equal(restoreCheckpoint(dir, checkpoint.ref), true);
+  assert.equal(readFileSync(join(dir, 'tracked.txt'), 'utf8'), 'two');
+  assert.equal(readFileSync(join(dir, 'new.txt'), 'utf8'), 'new');
+  assert.ok(!existsSync(join(dir, 'later.txt')));
+  assert.equal(headSha(dir), head);
 });
 
 test('reset --revert refuses a template that cannot identify the task commits', () => {

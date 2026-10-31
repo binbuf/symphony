@@ -293,6 +293,26 @@ test('caps, verify, hooks and git settings parse, with CLI caps overriding', () 
   assert.ok(bad.warnings.some((w) => w.includes('git.extraIgnore')));
 });
 
+test('durability settings parse checkpoint mode and verify recovery', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-durability-cfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  writeFileSync(paths.config, JSON.stringify({
+    git: { checkpointMode: 'ref' },
+    verifyRetries: 2,
+    verifyRepair: true,
+    verifyRepairAttempts: 3,
+    verifyRepairTimeoutMin: 12,
+  }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.git.checkpointMode, 'ref');
+  assert.equal(config.verifyRetries, 2);
+  assert.equal(config.verifyRepair, true);
+  assert.equal(config.verifyRepairAttempts, 3);
+  assert.equal(config.verifyRepairTimeoutMin, 12);
+  assert.ok(!warnings.some((w) => /checkpointMode|verifyRepair|verifyRetries/.test(w)));
+});
+
 test('verify resolution: front matter > config > inferred package.json test script', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-verify-'));
   const cfg = { ...DEFAULTS };

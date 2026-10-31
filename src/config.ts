@@ -87,11 +87,20 @@ export interface HooksConfig {
   onRunEnd?: string;
 }
 
+export type CheckpointMode = 'commit' | 'ref';
+
 export interface GitConfig {
   /** Before committing, append untracked ephemeral/secret files (node_modules/, .env*, *.log, …) to .gitignore. */
   autoIgnoreUntracked: boolean;
   /** Extra glob-ish basenames/segments to treat as ephemeral (e.g. "*.tfstate", "scratch"). */
   extraIgnore: string[];
+  /**
+   * How intermediate/unverified work is stored. `commit` keeps the historical behaviour: slices and
+   * failed work are committed to the working branch. `ref` stores them as checkpoint refs under
+   * `refs/symphony/checkpoints/...`; a failed task is restored to its pre-task worktree and only
+   * accepted work is committed to the branch.
+   */
+  checkpointMode: CheckpointMode;
 }
 
 /**
@@ -621,6 +630,14 @@ export interface Config {
   verifyTimeoutMin: number;
   /** When no verifyCommand is configured, use the project's package.json test script (`npm test`) as the verify command. */
   inferVerify: boolean;
+  /** Extra attempts for a verify that could not complete (timeout/spawn/network), not a real test failure. */
+  verifyRetries: number;
+  /** After a real verify failure, run one focused repair session and re-verify before failing the task. */
+  verifyRepair: boolean;
+  /** Repair sessions one task may use before the ordinary recovery path takes over. */
+  verifyRepairAttempts: number;
+  /** Wall clock for one focused repair session. */
+  verifyRepairTimeoutMin: number;
   hooks: HooksConfig;
   git: GitConfig;
   /** Second provider/model a failed task can be handed to. See EscalationConfig. */
@@ -731,8 +748,12 @@ export const DEFAULTS: Config = {
   verifyCommand: undefined,
   verifyTimeoutMin: 30,
   inferVerify: true,
+  verifyRetries: 1,
+  verifyRepair: false,
+  verifyRepairAttempts: 1,
+  verifyRepairTimeoutMin: 45,
   hooks: {},
-  git: { autoIgnoreUntracked: true, extraIgnore: [] },
+  git: { autoIgnoreUntracked: true, extraIgnore: [], checkpointMode: 'commit' },
   escalation: {
     enabled: false,
     provider: 'opencode',
@@ -1279,6 +1300,10 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     verifyCommand: hookString(raw.verifyCommand, 'verifyCommand', warnings),
     verifyTimeoutMin: positiveOr(raw.verifyTimeoutMin, DEFAULTS.verifyTimeoutMin, 'verifyTimeoutMin', warnings),
     inferVerify: boolOr(raw.inferVerify, DEFAULTS.inferVerify, 'inferVerify', warnings),
+    verifyRetries: Math.max(0, numberOr(raw.verifyRetries, DEFAULTS.verifyRetries, 'verifyRetries', warnings)),
+    verifyRepair: boolOr(raw.verifyRepair, DEFAULTS.verifyRepair, 'verifyRepair', warnings),
+    verifyRepairAttempts: Math.max(0, numberOr(raw.verifyRepairAttempts, DEFAULTS.verifyRepairAttempts, 'verifyRepairAttempts', warnings)),
+    verifyRepairTimeoutMin: positiveOr(raw.verifyRepairTimeoutMin, DEFAULTS.verifyRepairTimeoutMin, 'verifyRepairTimeoutMin', warnings),
     hooks: {
       afterTask: hookString(hooksRaw.afterTask, 'hooks.afterTask', warnings),
       onHalt: hookString(hooksRaw.onHalt, 'hooks.onHalt', warnings),
@@ -1288,6 +1313,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
     git: {
       autoIgnoreUntracked: boolOr(gitRaw.autoIgnoreUntracked, DEFAULTS.git.autoIgnoreUntracked, 'git.autoIgnoreUntracked', warnings),
       extraIgnore: stringArray(gitRaw.extraIgnore, DEFAULTS.git.extraIgnore, 'git.extraIgnore', warnings),
+      checkpointMode: enumOr(gitRaw.checkpointMode, ['commit', 'ref'] as const, DEFAULTS.git.checkpointMode, 'git.checkpointMode', warnings),
     },
     escalation: (() => {
       const model = typeof escRaw.model === 'string' ? escRaw.model.trim() : DEFAULTS.escalation.model;

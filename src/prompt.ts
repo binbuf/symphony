@@ -6,7 +6,7 @@ import { capIndexBody, readIndexCapped } from './repomap.js';
 import { DONE_STATES, type State } from './state.js';
 import { parseFrontMatter, type Task } from './tasks.js';
 import { renderPrompt } from './templates.js';
-import { capUtf8, ensureDir, slugify } from './util.js';
+import { capUtf8, ensureDir, headAndTailBytes, slugify } from './util.js';
 
 export interface PromptCtx {
   paths: Paths;
@@ -303,6 +303,36 @@ ${readProgress(ctx, paths)}
     buildStep,
     designNote,
     contextBlock,
+  });
+  return withNotes(text, ctx);
+}
+
+/**
+ * A focused repair session after the harness's own verify command failed. It gets the task contract,
+ * the failing command/output and the changed files, and is told to fix only the failing checks.
+ */
+export function buildRepairPrompt(
+  ctx: PromptCtx,
+  opts: { verifyCommand: string; verifyOutput: string; changedFiles?: string[] },
+): string {
+  const { task, paths } = ctx;
+  const d = docPaths(paths);
+  const rel0 = task.taskFileRel ?? defaultTaskFileRel(paths, task);
+  const body = taskFileBody(task, ctx.maxTaskBytes);
+  const files = opts.changedFiles?.length
+    ? opts.changedFiles.slice(0, 80).map((f) => `- ${f}`).join('\n') + (opts.changedFiles.length > 80 ? `\n- … and ${opts.changedFiles.length - 80} more` : '')
+    : '- (no changed files detected)';
+  const text = renderPrompt('repair.md', {
+    projectName: basename(paths.root),
+    taskId: task.id,
+    taskTitle: task.title,
+    taskFile: rel0,
+    progress: d.progress,
+    progressShard: rel(paths.root, progressShardPath(paths, task.id)),
+    verifyCommand: opts.verifyCommand,
+    verifyOutput: headAndTailBytes(opts.verifyOutput || '(no output)', 6000),
+    changedFiles: files,
+    taskBody: body?.trim() ? headAndTailBytes(body, 12_000) : `(no task file — the roadmap bullet is the whole task: "${task.id} — ${task.title}")`,
   });
   return withNotes(text, ctx);
 }

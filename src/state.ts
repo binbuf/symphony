@@ -8,13 +8,15 @@ import { statusFromMarkers, type Roadmap } from './roadmap.js';
 import { UsageError, atomicWriteSync, ensureDir, isRecord, nowIso } from './util.js';
 
 export type TaskStatus = 'pending' | 'running' | 'done' | 'blocked' | 'failed' | 'accepted';
+/** Execution phase used for crash recovery; the coarse `status` remains the outcome. */
+export type TaskPhase = 'running' | 'checkpointing' | 'verifying' | 'repairing' | 'needs_attention';
 export const DONE_STATES: TaskStatus[] = ['done', 'accepted'];
 export const SKIP_STATES: TaskStatus[] = ['done', 'accepted', 'blocked'];
 /** Statuses a task holds after running and that `run` will not revisit without `--retry`/`accept`. */
 export const HELD_STATES: TaskStatus[] = ['done', 'accepted', 'blocked'];
 
 export interface LogRef {
-  kind: 'task' | 'retry' | 'nudge' | 'wrapup' | 'judge';
+  kind: 'task' | 'retry' | 'nudge' | 'wrapup' | 'judge' | 'repair';
   jsonl: string;
   log: string;
   prompt: string;
@@ -81,6 +83,16 @@ export interface TaskState {
    * judge) so work from earlier slices is not lost when a new session resets `baseSha`.
    */
   taskBaseSha?: string;
+  /** Durable execution phase; lets a restart resume verification/repair instead of reimplementing. */
+  phase?: TaskPhase;
+  /** Pre-task worktree snapshot, used to restore clean state after a failed/blocked task. */
+  preTaskRef?: string;
+  /** Latest checkpoint ref (a slice, a failed task, or a recovery snapshot). */
+  checkpointRef?: string;
+  checkpointSha?: string;
+  checkpointAt?: string;
+  /** Focused verify-repair sessions used on this task. */
+  repairAttempts?: number;
   /** The latest v2 acceptance decision, for status/logs. Gate results themselves are append-only. */
   acceptance?: AcceptanceSummary;
   durationS: number;

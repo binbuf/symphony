@@ -110,6 +110,74 @@ export function changedFilesSince(root: string, base?: string, exclude: string[]
   return [...out].filter((f) => f !== '.symphony' && !f.startsWith('.symphony/') && !skipped(f)).sort();
 }
 
+export interface GitCheckpoint {
+  ref: string;
+  sha: string;
+  tree: string;
+}
+
+function checkpointPart(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'checkpoint';
+}
+
+/**
+ * Create an immutable snapshot of the full worktree under a namespaced Git ref, without moving HEAD
+ * or changing the real index. Unlike a branch, this does not require checkout/merge work; restoring it
+ * replaces the worktree contents directly.
+ */
+export function createCheckpoint(
+  root: string,
+  taskId: string,
+  label: string,
+  opts: { exclude?: string[]; message?: string } = {},
+): GitCheckpoint | undefined {
+  let dir: string | undefined;
+  try {
+    dir = mkdtempSync(join(tmpdir(), 'symphony-checkpoint-'));
+    const env = { GIT_INDEX_FILE: join(dir, 'index') };
+    if (gitWithEnv(root, ['read-tree', '--empty'], env).code !== 0) return undefined;
+    const excluded = ['.symphony', '.stop', ...(opts.exclude ?? [])]
+      .map((p) => p.replace(/\\/g, '/').replace(/^\.?\//, ''))
+      .filter(Boolean)
+      .map((p) => `:(exclude)${p}`);
+    if (gitWithEnv(root, ['add', '-A', '--', '.', ...excluded], env).code !== 0) return undefined;
+    const tree = gitWithEnv(root, ['write-tree'], env);
+    if (tree.code !== 0 || !tree.stdout) return undefined;
+    const parent = headSha(root);
+    const args = ['-c', 'user.name=symphony', '-c', 'user.email=symphony@localhost', 'commit-tree', tree.stdout];
+    if (parent) args.push('-p', parent);
+    args.push('-m', opts.message ?? `symphony ${taskId} checkpoint (${label})`);
+    const commit = git(root, args);
+    if (commit.code !== 0 || !commit.stdout) return undefined;
+    const ref = `refs/symphony/checkpoints/${checkpointPart(taskId)}/${checkpointPart(label)}-${Date.now().toString(36)}-${process.pid}`;
+    if (git(root, ['update-ref', ref, commit.stdout]).code !== 0) return undefined;
+    return { ref, sha: commit.stdout, tree: tree.stdout };
+  } catch {
+    return undefined;
+  } finally {
+    if (dir) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+  }
+}
+
+/**
+ * Replace the worktree with a checkpoint's tree. `.symphony/` and the pause sentinel are preserved.
+ * Never call this when there may be external edits the harness did not make; the caller is responsible
+ * for checking. Returns false when Git refuses.
+ */
+export function restoreCheckpoint(root: string, ref: string): boolean {
+  const resolved = git(root, ['rev-parse', '--verify', `${ref}^{commit}`]);
+  if (resolved.code !== 0 || !resolved.stdout) return false;
+  // Remove the current tracked state and untracked task files, but keep harness state and the stop
+  // sentinel. read-tree then materialises the checkpoint exactly.
+  git(root, ['reset', '-q', '--hard', 'HEAD']);
+  git(root, ['clean', '-qfd', '-e', '.symphony', '-e', '.symphony/**', '-e', '.stop']);
+  if (git(root, ['read-tree', '--reset', '-u', ref]).code !== 0) return false;
+  git(root, ['reset', '-q']);
+  return true;
+}
+
 /**
  * Snapshot the current uncommitted worktree — tracked edits and untracked files alike — as a stash
  * commit object, leaving the worktree itself untouched. Returns the commit sha, or undefined when the

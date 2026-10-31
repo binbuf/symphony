@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { gateResultsPath, readGateResults } from '../src/acceptance.js';
 import { DEFAULTS } from '../src/config.js';
+import { headSha } from '../src/git.js';
 import type { Logger } from '../src/logger.js';
 import { resolvePaths } from '../src/paths.js';
-import { runTask, type RunContext, type RunFlags } from '../src/runner.js';
-import { loadState, type State } from '../src/state.js';
+import { runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
+import { loadState, newTaskState, type State } from '../src/state.js';
 import type { Task } from '../src/tasks.js';
 
 const silent: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner() {} };
@@ -149,6 +150,97 @@ test('a legacy task keeps the old verify path and has no v2 acceptance record', 
     assert.equal(state.tasks.T01.acceptance, undefined);
     assert.equal(state.tasks.T01.verify?.ok, true);
     assert.equal(readGateResults(paths, 'T01').length, 0);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('ref checkpoint mode isolates a failed task and keeps the next task clean', async () => {
+  const { dir, paths, task } = project(v2Block('git --version'));
+  writeFileSync(paths.roadmap, [
+    '# R',
+    '',
+    '## Phase 1',
+    '',
+    '- [ ] T01 — Do the thing → [tasks/01-thing.md](tasks/01-thing.md)',
+    '- [ ] T02 — Other work',
+    '',
+  ].join('\n'));
+  writeFileSync(join(dir, 'fixtures', 'T01.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }),
+    JSON.stringify({ type: 'fake_write', path: 'impl.txt', content: 'unverified implementation' }),
+    claudeResult('failed', 'workhorse gave up'),
+  ].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'T02.task.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's2' }),
+    JSON.stringify({ type: 'fake_write', path: 'other.txt', content: 'independent work' }),
+    claudeResult('done', 'other task done'),
+  ].join('\n') + '\n');
+  const task2: Task = { id: 'T02', num: 2, title: 'Other work', phase: 'Phase 1', order: 1, meta: { provider: 'fake' } };
+  const { ctx, state } = ctxFor(paths, task);
+  ctx.tasks = [task, task2];
+  ctx.config = { ...ctx.config, git: { ...ctx.config.git, checkpointMode: 'ref' } };
+  try {
+    const out1 = await runTask(ctx, task);
+    assert.equal(out1.status, 'failed');
+    assert.ok(state.tasks.T01.checkpointRef, 'unverified work is in a checkpoint ref');
+    assert.ok(!existsSync(join(dir, 'impl.txt')), 'the failed implementation was removed from the worktree');
+    assert.equal(headSha(dir), undefined, 'a failed task does not commit to the branch');
+    assert.match(state.tasks.T01.commit ?? '', /checkpoint/);
+
+    const out2 = await runTask(ctx, task2);
+    assert.equal(out2.status, 'done');
+    const committed = execFileSync('git', ['-C', dir, 'show', '--name-only', '--pretty=format:', 'HEAD'], { encoding: 'utf8' })
+      .split('\n').map((f) => f.trim()).filter(Boolean);
+    assert.ok(committed.includes('other.txt'), committed.join('\n'));
+    assert.ok(!committed.includes('impl.txt'), 'the next task did not inherit the failed implementation');
+    assert.ok(existsSync(join(dir, 'other.txt')));
+    assert.ok(!existsSync(join(dir, 'impl.txt')));
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a verification crash resumes acceptance without reimplementing the task', async () => {
+  const { paths, task } = project(v2Block('git --version'));
+  writeFileSync(join(paths.root, 'part1.txt'), 'already implemented');
+  const { ctx, state } = ctxFor(paths, task);
+  state.tasks.T01 = {
+    ...newTaskState(task.title),
+    status: 'running',
+    phase: 'verifying',
+    attempts: 1,
+    pid: 999999,
+  };
+  try {
+    const code = await runCommand(ctx);
+    assert.equal(code, 0);
+    assert.equal(state.tasks.T01.acceptance?.status, 'accepted');
+    assert.equal(state.tasks.T01.logs.length, 0, 'no new implementation session ran');
+    assert.equal(state.tasks.T01.phase, undefined);
+    assert.ok(existsSync(join(paths.root, 'part1.txt')));
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('a failed verify runs a focused repair session and re-verifies', async () => {
+  const { dir, paths, task } = project(v2Block('node verify.js'));
+  writeFileSync(join(dir, 'verify.js'), "const fs = require('node:fs'); process.exit(fs.existsSync('fixed.txt') ? 0 : 1);\n");
+  writeFileSync(join(dir, 'fixtures', 'T01.repair.jsonl'), [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-repair' }),
+    JSON.stringify({ type: 'fake_write', path: 'fixed.txt', content: 'repaired' }),
+    claudeResult('done', 'the failing check was repaired'),
+  ].join('\n') + '\n');
+  const { ctx, state } = ctxFor(paths, task);
+  ctx.config = { ...ctx.config, verifyRepair: true, verifyRepairAttempts: 1, verifyRetries: 0 };
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    assert.equal(state.tasks.T01.acceptance?.status, 'accepted');
+    assert.ok(existsSync(join(dir, 'fixed.txt')), 'the repair session wrote the fix');
+    assert.ok(state.tasks.T01.logs.some((l) => l.kind === 'repair'), 'the repair session is recorded');
+    assert.equal(state.tasks.T01.repairAttempts, undefined);
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }
