@@ -559,6 +559,8 @@ Every command accepts `--root DIR` (default: the project containing `.symphony/`
 | `brief` | print a paste-ready prompt so any LLM turns an idea into the docs package in this exact format |
 | `accept T05[,T06…] [--note "…"]` | human sign-off on one or more blocked/failed tasks; counts as done, bullet becomes `[x] ⟵ accepted` |
 | `approve T05 [criterion] [--by "…"] [--note "…"]` | record a v2 `human` gate approval; with no criterion, list the human criteria and their status; the approval is bound to the current revision and evidence |
+| `attention [--json]` | show every task/run waiting for a human (halt, human approval, inconclusive evidence, required judge unavailable, blocked, failed) with the command that resolves it; also refreshes `.symphony/attention.json` |
+| `steer T05 "note" [--by "…"]` | queue operator guidance for the task's next session; a running task receives it at its next session boundary (hot steering, no restart); with no note, list what is queued |
 | `reset T05 [--revert]` | clear a task's state so it runs again; `--revert` also undoes its `T05:` commits (newest first) |
 | `reset --all` | clear every task's state and the halt, and reset every roadmap marker to `[ ]` |
 | `nudge T05 [--note "…"]` | resume a task's last session and ask it to close out with a result block |
@@ -909,6 +911,7 @@ The [verify command](#the-lifecycle) checks what it was told to check — tests,
   "modelProvider": "openrouter",
   "onFail": "fail",
   "minConfidence": 0.7,
+  "required": false,
   "maxPerTask": 1,
   "includeDiff": true,
   "maxDiffBytes": 20000,
@@ -922,12 +925,13 @@ The [verify command](#the-lifecycle) checks what it was told to check — tests,
 | `provider` / `model` / `modelProvider` / `variant` | the `watch` block's | where the judge runs; independent of the run's model, so the reviewer can be stronger than the model that did the work (`modelProvider` names the OpenCode upstream provider) |
 | `onFail` | `fail` | what a confident failing verdict does: `fail` demotes the `done` to a failure so the ordinary recovery (retry, [breakdown](#automatic-breakdowns), [escalation](#escalation)) re-engages; `warn` records the verdict and lets the `done` stand. Add `judge` to `escalation.onCategories` and `breakdown.rules.onCategories` to have those react to a rejected `done` |
 | `minConfidence` | `0.7` | the confidence bar. A **failing** verdict below it (or one that reports no confidence) is treated as a pass, so a weak read cannot demote good work. A **passing** verdict below it is treated as unfinished: the run asks [breakdown](#automatic-breakdowns) (`onGap`) and, absent a split/replan, continues the task with the judge's gap analysis |
+| `required` | `false` | make the judge a hard gate. When it cannot run (missing binary/key, timeout, spawn fault, unparseable answer), the task is parked as `blocked` with `phase: needs_attention` instead of accepting the `done` or failing the task. The work is kept for review; fix the judge, then `symphony run --retry --only T05` |
 | `maxPerTask` | `1` | judge sessions each terminal `done` attempt may take (0 = unlimited). The budget is per completion, so a task that is rejected, re-run and reaches `done` again is judged again; the recovery paths (escalation/breakdown/retry) bound the loop |
 | `includeDiff` | `true` | inline the worktree diff so the read-only session can see what changed |
 | `maxDiffBytes` | `20000` | byte cap for the inlined diff |
 | `timeoutMin` | `10` | hard wall clock for one judge session; on timeout the `done` is accepted as reported |
 
-The judge is **advisory by construction when its own infrastructure is uncertain**: a session that times out, a provider that is missing or errors, and any unparseable answer all fall back to *accepting the `done` as reported*, so the judge can never fail a task on its own account. A **failing** verdict below `minConfidence`, or one that reports no confidence, stays advisory too (the `done` stands). A **passing** verdict below `minConfidence` is different — it means the judge read the work as present but unverified or incomplete, so the run treats the task as unfinished: it first asks [breakdown](#automatic-breakdowns) (`breakdown.onGap`) whether the missing items belong in subtasks or a plan rewrite, and if breakdown declines it **continues the task**, injecting the judge's `summary`/`gaps` into the next session's prompt as an authoritative gap analysis to close. That continuation is an ordinary slice, bounded by `maxContinuations` (and the retry/iteration ceilings); once the bound is spent the `done` is accepted as reported. The judge's confidence is computed from a fixed, evidence-anchored rubric in its prompt, so it does not default to a round number.
+The judge is **advisory by construction when its own infrastructure is uncertain** unless `judge.required` is set: a session that times out, a provider that is missing or errors, and any unparseable answer normally fall back to *accepting the `done` as reported*, so the judge can never fail a task on its own account. With `required: true` those same conditions are treated as missing evidence: the task is parked for attention (`blocked`, `phase: needs_attention`) and the implementation is preserved, so it is neither silently accepted nor failed. A **failing** verdict below `minConfidence`, or one that reports no confidence, stays advisory too (the `done` stands). A **passing** verdict below `minConfidence` is different — it means the judge read the work as present but unverified or incomplete, so the run treats the task as unfinished: it first asks [breakdown](#automatic-breakdowns) (`breakdown.onGap`) whether the missing items belong in subtasks or a plan rewrite, and if breakdown declines it **continues the task**, injecting the judge's `summary`/`gaps` into the next session's prompt as an authoritative gap analysis to close. That continuation is an ordinary slice, bounded by `maxContinuations` (and the retry/iteration ceilings); once the bound is spent the `done` is accepted as reported. The judge's confidence is computed from a fixed, evidence-anchored rubric in its prompt, so it does not default to a round number.
 
 The latest verdict is recorded on the task and written to its `docs/logs/TNN.md` under `## Judge`, so a rejected completion is visible in the committed log, and the judge provider is preflighted with the rest of the run so a missing binary is reported before the first task starts.
 
@@ -1089,7 +1093,7 @@ Every key is optional and lives in `.symphony/symphony.config.json`. CLI flags a
 | `vision.enabled`, `.provider`, `.baseUrl`, `.model`, `.apiKeyEnv`, `.timeoutMs`, `.prompt`, `.maxImageBytes` | `false`, `openrouter`, –, `qwen/qwen3-vl-235b-a22b-instruct`, `OPENROUTER_API_KEY`, `60000`, adaptive image description, `20971520` | image-analysis tool a task session invokes (`symphony vision <image>`); when on, every task prompt explains it (see [Vision tool](#vision-tool)) |
 | `slack.enabled`, `.apiKeyEnv`, `.project`, `.baseUrl`, `.channel`, `.user`, `.mention`, `.events.*`, `.timeoutMs` | `false`, `SLACK_BOT_TOKEN`, the project folder name, –, –, –, `true`, all `true` except `watch`, `10000` | post lifecycle events to a Slack channel or DM a user, threading a task's later events under its start (see [Slack notifications](#slack-notifications)) |
 | `watch.enabled`, `.intervalMin`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin` | `true`, `5`, `opencode`, `deepseek/deepseek-v4.1-flash`, `openrouter`, –, `5` | periodic (and per-task-end) read-only pipeline summary in the TUI strip and `.symphony/watch.log` (see [Pipeline watch](#pipeline-watch)) |
-| `judge.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.onFail`, `.minConfidence`, `.maxPerTask`, `.includeDiff`, `.maxDiffBytes`, `.timeoutMin` | `false`, the `watch` block's, `fail`, `0.7`, `1`, `true`, `20000`, `10` | independent read-only completion judge after a task's verify passes: checks the task's intent against the work that landed and can demote a confident rejection (see [Judge](#judge)) |
+| `judge.enabled`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.onFail`, `.minConfidence`, `.required`, `.maxPerTask`, `.includeDiff`, `.maxDiffBytes`, `.timeoutMin` | `false`, the `watch` block's, `fail`, `0.7`, `false`, `1`, `true`, `20000`, `10` | independent read-only completion judge after a task's verify passes: checks the task's intent against the work that landed and can demote a confident rejection; `required` parks the task when the judge itself cannot run (see [Judge](#judge)) |
 | `breakdown.enabled`, `.onStart`, `.onContinue`, `.onFailure`, `.onBlocked`, `.onGap`, `.rules.*`, `.decision`, `.provider`, `.model`, `.modelProvider`, `.variant`, `.timeoutMin`, `.preferOverEscalation`, `.maxPerTask` | `false`, `false`, `true`, `true`, `true`, `true`, `1`/`1`/`[task, verify]`/`proceed`, `auto`, the `watch` block's, `5`, `true`, `1` | automatic task breakdown before a task starts, at a `continue` boundary, when a task reports blocked, when the judge passes below its confidence bar, or instead of escalating (see [Automatic breakdowns](#automatic-breakdowns)) |
 | `commitMessageTemplate` | `{id}: {title} [{status}]` | |
 
@@ -1123,6 +1127,27 @@ Execution phase is persisted with the task (`running`, `verifying`, `repairing`,
 acceptance gates against the existing worktree before opening a new implementation session. A real
 verify failure can run a bounded focused repair session (`verifyRepair`) and re-verify; an
 incomplete verify (timeout, spawn or network fault) is retried separately.
+
+## Attention and hot steering
+
+Everything the pipeline stops on for a human is in one derived queue: a halt, a v2 `pending_human`
+acceptance criterion, `inconclusive` evidence, a required judge that could not run, an ordinary
+`blocked` task, or a `failed` task. `symphony attention` prints it with the command that resolves
+each item; every run also writes the same snapshot to `.symphony/attention.json`, so an external
+supervisor can poll one file instead of interpreting state.
+
+```bash
+symphony attention
+symphony attention --json
+```
+
+`symphony steer T05 "keep the public API stable"` queues operator guidance for a task without
+stopping the run. A running CLI session cannot be interrupted safely, so the note is delivered at the
+task's **next session boundary** (fresh task, continuation, nudge or repair) by prepending an
+`## Operator steering` block to that session's prompt. Delivery is recorded in
+`.symphony/steering/T05.jsonl`; queued notes are append-only and consumed exactly once. `symphony
+steer T05` with no note lists what is still queued. If the task is already terminal, the note is kept
+for a future retry/reset rather than discarded.
 
 ## Logs and state
 

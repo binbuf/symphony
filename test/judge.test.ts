@@ -429,3 +429,36 @@ test('collectChanges keeps whole files and marks the rest omitted rather than cu
   assert.match(changes.diff, /omitted \(diff exceeded judge\.maxDiffBytes\)/);
   assert.match(changes.diff, /a\.txt/);
 });
+
+test('runJudge reports why it was unavailable so a required judge can park', async () => {
+  const { dir, paths } = project('# R\n\n- [ ] T01 - Do it\n');
+  writeFileSync(join(dir, 'fixtures', 'judge-T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 'j' }), claudeResult('done', 'I will not answer')].join('\n') + '\n');
+  const config = cfg({ enabled: true, provider: 'fake', model: 'fake-model' });
+  const reasons: string[] = [];
+  try {
+    const v = await runJudge(config, { taskId: 'T01', taskTitle: 'Do it', taskPhase: 'P', status: 'done', attempts: 1 }, { paths, log: silent, onUnavailable: (r) => reasons.push(r) });
+    assert.equal(v, undefined);
+    assert.equal(reasons.length, 1);
+    assert.match(reasons[0], /no verdict|no usable/i);
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('judge.required parks the task for attention instead of accepting or failing it', async () => {
+  const { dir, paths } = project('# R\n\n- [ ] T01 — Do it → [tasks/01-thing.md](tasks/01-thing.md)\n', { 'docs/tasks/01-thing.md': '# T01\n' });
+  writeFileSync(join(dir, 'fixtures', 'T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 's1' }), JSON.stringify({ type: 'fake_write', path: 'work.txt', content: 'done' }), claudeResult('done', 'shipped it')].join('\n') + '\n');
+  writeFileSync(join(dir, 'fixtures', 'judge-T01.jsonl'), [JSON.stringify({ type: 'system', subtype: 'init', session_id: 'j' }), claudeResult('done', 'I cannot answer')].join('\n') + '\n');
+  const config: Config = { ...DEFAULTS, provider: 'fake', nudge: false, watch: { ...DEFAULTS.watch, enabled: false }, judge: { ...DEFAULTS.judge, enabled: true, provider: 'fake', model: 'm', required: true } };
+  const ctx = runnerCtx(dir, paths, config);
+  try {
+    const out = await runTask(ctx, ctx.tasks[0]);
+    assert.equal(out.status, 'blocked');
+    assert.equal(ctx.state.tasks.T01.judge?.verdict, 'unavailable');
+    assert.equal(ctx.state.tasks.T01.phase, 'needs_attention');
+    assert.match(ctx.state.tasks.T01.summary ?? '', /judge is required but unavailable/);
+    assert.ok(readFileSync(join(dir, 'work.txt'), 'utf8').includes('done'), 'the implementation is kept for review');
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});

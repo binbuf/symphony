@@ -11,6 +11,7 @@ import { contractsFor, dependencyClosure, isLandedSubset, parseAcceptance, summa
 import { fireHook } from './hooks.js';
 import { classifyEscalation, classifySessionResult, jevProblem, runnerUp } from './jev.js';
 import { collectChanges, runJudge, type JudgeEvidence, type JudgeVerdict } from './judge.js';
+import { collectAttention, writeAttention } from './attention.js';
 import { createLogger, openRunSinks, type Logger, type RunSinks } from './logger.js';
 import { writeTaskLog } from './logs.js';
 import { mcpPromptNote, planMcp, resolveMcpProfile } from './mcp.js';
@@ -19,6 +20,7 @@ import { buildContinuePrompt, buildNudgePrompt, buildRepairPrompt, buildResumePr
 import { applyPlan, loadProject, retargetFlags, sanitizeFlags } from './project.js';
 import { computeAttemptDelta, isStalled, metricPlateau, parseMetric } from './progress.js';
 import { createRemainderTask } from './remainder.js';
+import { consumeSteering, pendingSteering, steeringBlock } from './steering.js';
 import { getProvider, variantSupported } from './providers/index.js';
 import { addUsage } from './providers/common.js';
 import type { Provider, ResultEvent, SpawnSpec, TokenUsage } from './providers/types.js';
@@ -275,10 +277,12 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
   };
 
   let judgeRow: LogRef | undefined;
+  let unavailable: string | undefined;
   const verdict = await runJudge(config, ev, {
     paths,
     log,
     abort: ctx.abort.signal,
+    onUnavailable: (reason) => { unavailable = reason; },
     // Record every judge session as a row on the task, so the TUI table and the task log show each
     // run as its own step — from the moment it starts (`running`) through its verdict.
     onStart: (ref) => {
@@ -297,6 +301,16 @@ async function runCompletionJudge(ctx: RunContext, task: Task, st: TaskState, se
     },
   });
   if (!verdict) {
+    if (unavailable && config.judge.required) {
+      st.judge = {
+        verdict: 'unavailable',
+        ok: false,
+        summary: `judge unavailable: ${unavailable}`,
+        reason: unavailable,
+        at: nowIso(),
+      };
+      saveState(paths, state);
+    }
     updatePipelineStatus(paths, ctx.tasks, state, log);
     return undefined;
   }
@@ -504,7 +518,13 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
     ensureDir(paths.runs);
     const suffix = r.logKind === 'nudge' ? '-nudge' : r.logKind === 'wrapup' ? '-wrapup' : r.logKind === 'repair' ? '-repair' : r.attempt > 1 ? `-r${r.attempt}` : '';
     sinks = openRunSinks(paths.runs, `${task.id}-${stamp()}${suffix}`);
-    writeFileSync(sinks.promptPath, prompt);
+    const queued = pendingSteering(paths, task.id);
+    const deliveredPrompt = queued.length ? `${steeringBlock(queued)}${prompt}` : prompt;
+    writeFileSync(sinks.promptPath, deliveredPrompt);
+    if (queued.length) {
+      consumeSteering(paths, task.id, queued.map((m) => m.id));
+      log.info(`${task.id}: delivered ${queued.length} operator steering note${queued.length === 1 ? '' : 's'} to this session`);
+    }
     const rel = (p: string) => relative(paths.root, p);
     const entry: LogRef = { kind: r.logKind, jsonl: rel(sinks.jsonlPath), log: rel(sinks.logPath), prompt: rel(sinks.promptPath), started: nowIso(), provider: spec.providerName, model: spec.model, variant: spec.variant };
     st.logs.push(entry);
@@ -512,7 +532,7 @@ async function runOneSession(ctx: RunContext, task: Task, st: TaskState, provide
     const mcp = planMcp(ctx.config, r.kind === 'escalate' ? 'escalation' : 'task', task, ctx.cli, provider.name, join(paths.runs, sinks.base), (m) => log.warn(`${task.id}: mcp: ${m}`));
     mcp?.notes.forEach((n) => log.warn(`${task.id}: mcp: ${n}`));
     const cmd = provider.buildCommand({
-      bin: spec.bin, prompt, promptFile: sinks.promptPath, taskId: task.id, attempt: r.attempt, kind: r.kind,
+      bin: spec.bin, prompt: deliveredPrompt, promptFile: sinks.promptPath, taskId: task.id, attempt: r.attempt, kind: r.kind,
       resumeId: r.resumeId, model: spec.model, variant: spec.variant, autoApprove: spec.autoApprove, budgetUsd: spec.budgetUsd,
       extraArgs: [...spec.extraArgs, ...(mcp?.args ?? [])], cwd: paths.root,
     });
@@ -675,6 +695,10 @@ async function slackNotify(ctx: RunContext, event: SlackEvent, n: { title: strin
   await notifyTaskSlack(ctx.config.slack, threads, { event, project, taskId, ...n }, { fetchImpl: ctx.fetchImpl, signal: ctx.abort.signal }, (m) => ctx.log.warn(m));
 }
 
+function refreshAttention(ctx: RunContext): void {
+  writeAttention(ctx.paths, collectAttention(ctx.state, ctx.tasks));
+}
+
 async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: Final, halt?: Halted): Promise<void> {
   const { paths, config, log, state } = ctx;
   st.status = final.status;
@@ -696,7 +720,9 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
   // then restore the pre-task worktree so the next independent task cannot inherit it. Work parked
   // only for human approval or missing evidence is *kept* in place: it must survive until the gate can
   // be re-evaluated.
-  const keepForAttention = st.acceptance?.status === 'pending_human' || st.acceptance?.status === 'inconclusive';
+  const keepForAttention = st.acceptance?.status === 'pending_human'
+    || st.acceptance?.status === 'inconclusive'
+    || (final.status === 'blocked' && st.judge?.verdict === 'unavailable');
   const isolated = config.git.checkpointMode === 'ref'
     && final.status !== 'done'
     && final.status !== 'accepted'
@@ -797,6 +823,7 @@ async function finalizeTask(ctx: RunContext, task: Task, st: TaskState, final: F
 
   if (halt) state.halted = halt;
   saveState(paths, state);
+  refreshAttention(ctx);
   fireHook(config, 'afterTask', {
     SYMPHONY_ROOT: paths.root,
     SYMPHONY_TASK: task.id,
@@ -1788,6 +1815,12 @@ export async function runTask(ctx: RunContext, task: Task): Promise<TaskOutcome>
         // all, is advisory — the done stands and the verdict is recorded for the log.
         if (config.judge.enabled) {
           const verdict = await runCompletionJudge(ctx, task, st, block.summary);
+          if (!verdict && config.judge.required && st.judge?.verdict === 'unavailable') {
+            const msg = `judge is required but unavailable: ${st.judge.summary}`;
+            log.error(`${task.id}: ${msg}; parking the task for attention`);
+            final = { status: 'blocked', summary: msg, lastError: { category: 'judge', message: msg, transient: false, fatal: false, at: nowIso() } };
+            break;
+          }
           if (verdict && verdict.verdict === 'fail') {
             const pct = verdict.confidence !== undefined ? ` (${Math.round(verdict.confidence * 100)}%)` : '';
             const msg = `judge rejected the completion${pct}: ${verdict.summary}${verdict.gaps ? ` — gaps: ${verdict.gaps}` : ''}`;
@@ -2477,6 +2510,7 @@ export async function runCommand(ctx: RunContext): Promise<number> {
   try {
     code = await runLoop();
   } finally {
+    refreshAttention(ctx);
     watcher?.stop();
     stopHeartbeat();
     releaseLock(paths);
@@ -2522,6 +2556,7 @@ export async function nudgeCommand(ctx: RunContext, rawId: string, note?: string
 
   acquireLock(paths);
   ctx.startBranch = currentBranch(paths.root);
+  refreshAttention(ctx);
   const stopHeartbeat = startLockHeartbeat(paths);
   try {
     st.status = 'running';

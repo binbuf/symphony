@@ -313,6 +313,18 @@ test('durability settings parse checkpoint mode and verify recovery', () => {
   assert.ok(!warnings.some((w) => /checkpointMode|verifyRepair|verifyRetries/.test(w)));
 });
 
+test('judge.required parses and defaults to off', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'symphony-judge-cfg-'));
+  const paths = resolvePaths(dir);
+  mkdirSync(paths.symphony, { recursive: true });
+  assert.equal(DEFAULTS.judge.required, false);
+  writeFileSync(paths.config, JSON.stringify({ judge: { enabled: true, required: true } }));
+  const { config, warnings } = loadConfig(paths, {});
+  assert.equal(config.judge.enabled, true);
+  assert.equal(config.judge.required, true);
+  assert.ok(!warnings.some((w) => /judge\.required/.test(w)), warnings.join('\n'));
+});
+
 test('verify resolution: front matter > config > inferred package.json test script', () => {
   const dir = mkdtempSync(join(tmpdir(), 'symphony-verify-'));
   const cfg = { ...DEFAULTS };

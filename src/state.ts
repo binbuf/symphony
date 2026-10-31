@@ -42,13 +42,15 @@ export interface LastError { category: string; message: string; transient: boole
 
 /** The independent judge's verdict on a task's `done`, as recorded on the task row and run log. */
 export interface JudgeRecord {
-  /** `pass` accepts the completion; `fail` is the judge's read that it was not done as intended. */
-  verdict: 'pass' | 'fail';
+  /** `pass` accepts the completion; `fail` is the judge's read that it was not done as intended; `unavailable` means the judge could not run and the task was parked. */
+  verdict: 'pass' | 'fail' | 'unavailable';
   ok: boolean;
   confidence?: number;
   summary: string;
   /** Specific missing/incorrect items, when the judge named them. */
   gaps?: string;
+  /** Why the judge was unavailable (required mode only). */
+  reason?: string;
   /** Whether this failing verdict actually demoted the task (judge.onFail === 'fail' and confident). */
   enforced?: boolean;
   at: string;

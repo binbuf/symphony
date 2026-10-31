@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -12,6 +12,7 @@ import type { Logger } from '../src/logger.js';
 import { resolvePaths } from '../src/paths.js';
 import { runCommand, runTask, type RunContext, type RunFlags } from '../src/runner.js';
 import { loadState, newTaskState, type State } from '../src/state.js';
+import { appendSteering, pendingSteering } from '../src/steering.js';
 import type { Task } from '../src/tasks.js';
 
 const silent: Logger = { info() {}, warn() {}, error() {}, plain() {}, banner() {} };
@@ -304,6 +305,24 @@ test('inconclusive acceptance evidence parks the task instead of reimplementing 
     assert.equal(state.tasks.T01.phase, 'needs_attention');
     assert.equal(state.tasks.T01.logs.length, 1);
     assert.ok(existsSync(join(paths.root, 'part1.txt')));
+  } finally {
+    delete process.env.SYMPHONY_FAKE_FIXTURES;
+  }
+});
+
+test('operator steering is delivered to the next session prompt and consumed', async () => {
+  const { paths, task } = project(v2Block('git --version'));
+  const { ctx, state } = ctxFor(paths, task);
+  appendSteering(paths, 'T01', 'keep the public API stable', 'dan');
+  try {
+    const out = await runTask(ctx, task);
+    assert.equal(out.status, 'done');
+    const promptRef = state.tasks.T01.logs.find((l) => l.kind === 'task');
+    assert.ok(promptRef);
+    const prompt = readFileSync(join(paths.root, promptRef.prompt), 'utf8');
+    assert.match(prompt, /Operator steering/);
+    assert.match(prompt, /dan: keep the public API stable/);
+    assert.equal(pendingSteering(paths, 'T01').length, 0, 'the note was consumed');
   } finally {
     delete process.env.SYMPHONY_FAKE_FIXTURES;
   }

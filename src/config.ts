@@ -304,6 +304,11 @@ export interface JudgeConfig {
   onFail: 'fail' | 'warn';
   /** A failing verdict below this confidence, or one that reports none, is treated as a pass. */
   minConfidence: number;
+  /**
+   * When true, the judge is a hard gate: an unavailable/unusable judge (missing binary, timeout,
+   * unparseable answer) parks the task for attention instead of accepting the `done` as reported.
+   */
+  required: boolean;
   /** Judge sessions each terminal `done` attempt may take (0 = unlimited); a re-run done is judged again. */
   maxPerTask: number;
   /** Inline the worktree diff into the judge's evidence so a read-only session can see what changed. */
@@ -841,6 +846,7 @@ export const DEFAULTS: Config = {
     variant: undefined,
     onFail: 'fail',
     minConfidence: 0.7,
+    required: false,
     maxPerTask: 1,
     includeDiff: true,
     maxDiffBytes: 20_000,
@@ -1559,6 +1565,7 @@ export function loadConfig(paths: Paths, cli: CliOverrides = {}): LoadedConfig {
           }
           return n;
         })(),
+        required: boolOr(judgeRaw.required, DEFAULTS.judge.required, 'judge.required', warnings),
         maxPerTask: Math.max(0, Math.floor(numberOr(judgeRaw.maxPerTask, DEFAULTS.judge.maxPerTask, 'judge.maxPerTask', warnings))),
         includeDiff: boolOr(judgeRaw.includeDiff, DEFAULTS.judge.includeDiff, 'judge.includeDiff', warnings),
         maxDiffBytes: positiveOr(judgeRaw.maxDiffBytes, DEFAULTS.judge.maxDiffBytes, 'judge.maxDiffBytes', warnings),

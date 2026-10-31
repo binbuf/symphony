@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { acceptanceExcludes, appendApproval, criterionEvidenceHash, parseAcceptanceSpec, readGateResults } from './acceptance.js';
+import { attentionPath, collectAttention, formatAttention, writeAttention } from './attention.js';
 import { DEFAULTS, type Config } from './config.js';
 import { ADR_TEMPLATE, DESIGN_README, LOGS_README, PROGRESS_README, ROADMAP_TEMPLATE, TASK_TEMPLATE, docsContract } from './contract.js';
 import { commitsForTask, commitPrefix, ensureGitignore, git, worktreeRevision } from './git.js';
@@ -10,6 +11,7 @@ import { rel, stopIgnoreEntry, stopPresent, type Paths } from './paths.js';
 import { PROGRESS_HEADER } from './prompt.js';
 import { canonicalId, patchRoadmapFile } from './roadmap.js';
 import { DONE_STATES, haltResumeHint, saveState, type State } from './state.js';
+import { appendSteering, pendingSteering, steeringPath } from './steering.js';
 import { buildStatusTable, formatStatusRow, statusColumnWidths, updatePipelineStatus } from './status.js';
 import { parseFrontMatter, type Task } from './tasks.js';
 import { renderPrompt } from './templates.js';
@@ -61,7 +63,7 @@ export function initCommand(paths: Paths, log: Logger, opts: { design?: boolean 
 
 export function statusCommand(paths: Paths, config: Config, state: State, tasks: Task[], log: Logger, json: boolean, activeSet?: string): number {
   if (json) {
-    log.plain(JSON.stringify({ root: paths.root, set: activeSet ?? null, provider: config.provider, halted: state.halted ?? null, tasks: tasks.map((t) => ({ ...t, state: state.tasks[t.id] ?? null })) }, null, 2));
+    log.plain(JSON.stringify({ root: paths.root, set: activeSet ?? null, provider: config.provider, halted: state.halted ?? null, attention: collectAttention(state, tasks), tasks: tasks.map((t) => ({ ...t, state: state.tasks[t.id] ?? null })) }, null, 2));
     return 0;
   }
   if (state.halted) log.banner('HALTED', [`${state.halted.taskId ? `${state.halted.taskId} · ` : ''}${state.halted.category}: ${state.halted.reason}`, `at ${state.halted.at}`, haltResumeHint(state.halted)]);
@@ -182,6 +184,55 @@ export function approveCommand(
   });
   log.info(`${task.id}: approved ${criterion.id} by ${approver} at revision ${revision.tree.slice(0, 12)}`);
   log.info(`approval recorded in ${rel(paths.root, file)}; re-run with \`symphony run --retry --only ${task.id}\` to accept the task`);
+  return 0;
+}
+
+export function attentionCommand(paths: Paths, state: State, tasks: Task[], log: Logger, json: boolean): number {
+  const items = collectAttention(state, tasks);
+  writeAttention(paths, items);
+  if (json) {
+    log.plain(JSON.stringify({ at: nowIso(), items }, null, 2));
+    return 0;
+  }
+  for (const line of formatAttention(items)) log.plain(line);
+  if (items.length) log.plain(`snapshot: ${rel(paths.root, attentionPath(paths))}`);
+  return 0;
+}
+
+export function steerCommand(
+  paths: Paths,
+  state: State,
+  tasks: Task[],
+  rawId: string,
+  message: string | undefined,
+  opts: { by?: string; log: Logger },
+): number {
+  const { log } = opts;
+  const id = canonicalId(rawId);
+  const task = id ? tasks.find((t) => t.id === id) : undefined;
+  if (!task) throw new UsageError(`steer ${rawId}: no such task in ROADMAP.md`);
+  const st = state.tasks[task.id];
+
+  if (!message?.trim()) {
+    const pending = pendingSteering(paths, task.id);
+    if (!pending.length) {
+      log.info(`${task.id}: no pending steering`);
+      return 0;
+    }
+    log.plain(`pending steering for ${task.id}:`);
+    for (const m of pending) log.plain(`  ${m.at}${m.by ? ` · ${m.by}` : ''}: ${m.note.split('\n')[0]}`);
+    return 0;
+  }
+
+  appendSteering(paths, task.id, message, opts.by);
+  log.info(`queued steering for ${task.id} in ${rel(paths.root, steeringPath(paths, task.id))}`);
+  if (st?.status === 'running') {
+    log.info('the running task receives it at its next session boundary (the current session cannot be interrupted safely)');
+  } else if (st && DONE_STATES.includes(st.status)) {
+    log.warn(`${task.id} is already ${st.status}; the note applies only if the task is retried or reset`);
+  } else {
+    log.info(`it is prepended to ${task.id}'s next session`);
+  }
   return 0;
 }
 

@@ -77,6 +77,12 @@ export interface JudgeDeps {
   onStart?: (ref: Omit<LogRef, 'kind'>) => void;
   /** Receives the same log reference once the session ends, with its status, cost and summary set. */
   onLog?: (ref: Omit<LogRef, 'kind'>) => void;
+  /**
+   * Called when the judge could not produce a usable verdict (spawn failure, timeout, no block).
+   * `runJudge` still returns undefined so the caller's default remains "accept the done"; a caller
+   * with `judge.required` uses this to park the task for attention instead.
+   */
+  onUnavailable?: (reason: string) => void;
 }
 
 const JUDGE_RE = /SYMPHONY_JUDGE[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*END_SYMPHONY_JUDGE/i;
@@ -357,6 +363,7 @@ export async function runJudge(config: Config, ev: JudgeEvidence, deps: JudgeDep
     deps.onLog?.(ref);
     if (!answer) {
       log?.warn(`${ev.taskId}: judge returned no usable verdict (${why}); accepting the done as reported`);
+      deps.onUnavailable?.(why);
       return undefined;
     }
     return {
@@ -371,6 +378,7 @@ export async function runJudge(config: Config, ev: JudgeEvidence, deps: JudgeDep
     };
   } catch (e) {
     log?.warn(`${ev.taskId}: judge failed (${(e as Error).message}); accepting the done as reported`);
+    deps.onUnavailable?.((e as Error).message);
     return undefined;
   } finally {
     // Close the session files on every path, including a throw while building the command or spawning
